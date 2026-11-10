@@ -54,7 +54,7 @@ export const MonitorsView: React.FC = () => {
       for (const m of monitors) {
         if (m.monitorId !== active.monitorId) await applyMonitorSource(m.monitorId, active.activeSource);
       }
-      setMsg(`Cloned "${describeSource(active.activeSource, lookup)}" to ${monitors.length - 1} other monitor(s)`);
+      setMsg(`Applied "${describeSource(active.activeSource, lookup)}" to ${monitors.length - 1} other monitor(s)`);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     }
@@ -164,8 +164,8 @@ export const MonitorsView: React.FC = () => {
       <SectionTitle>Multi-Monitor Mode</SectionTitle>
       <div className="card" style={{ padding: 16, fontSize: 13 }}>
         <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>
-          Each monitor keeps its own source (Independent per monitor). Clone the selected monitor's source to every
-          other display to show the same wallpaper everywhere.
+          Each display keeps its own source. Apply the selected source to all displays to share a Workshop
+          wallpaper or photo pool. Photo draws remain independent.
         </div>
         <button
           type="button"
@@ -173,7 +173,7 @@ export const MonitorsView: React.FC = () => {
           disabled={!active || monitors.length < 2}
           onClick={() => void cloneToAll()}
         >
-          <Copy size={14} /> Clone same wallpaper across all monitors
+          <Copy size={14} /> Use source on all displays
         </button>
       </div>
     </div>

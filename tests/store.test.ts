@@ -51,6 +51,20 @@ beforeEach(() => {
 
 const calls = () => invokeMock.mock.calls.map(([cmd, args]) => [cmd, args]);
 
+it('sleep and unlock keep manual pause and overlapping system pause reasons', async () => {
+  await useAppStore.getState().initAppListeners();
+  await useAppStore.getState().setPlaybackPaused(true);
+  const power = listeners.get('system-power')!;
+  power({ payload: { kind: 'pause', reason: 'lock' } });
+  power({ payload: { kind: 'pause', reason: 'sleep' } });
+  power({ payload: { kind: 'resume', reason: 'sleep' } });
+  expect(useAppStore.getState().systemPowerReasons).toEqual(['lock']);
+  expect(useAppStore.getState().isPaused).toBe(true);
+  power({ payload: { kind: 'resume', reason: 'lock' } });
+  expect(useAppStore.getState().systemPowerReasons).toEqual([]);
+  expect(useAppStore.getState().isPaused).toBe(true);
+});
+
 describe('store → invoke() contract', () => {
   it('refreshAll loads status, monitors, library, settings and playlists', async () => {
     await useAppStore.getState().refreshAll();
@@ -140,7 +154,8 @@ describe('store → listen() event wiring', () => {
     expect(useAppStore.getState().policyStateByMonitor).toEqual({ M1: 'paused_battery' });
 
     listeners.get('system-power')!({ payload: { kind: 'pause', reason: 'lock' } });
-    expect(useAppStore.getState().isPaused).toBe(true);
+    expect(useAppStore.getState().isPaused).toBe(false);
+    expect(useAppStore.getState().systemPowerReasons).toEqual(['lock']);
 
     const photo = { id: 'x', albumSlug: 'a' };
     listeners.get('wallpaper://changed')!({ payload: { monitorId: 'M1', currentItem: photo, transitionUsed: 'crossfade' } });

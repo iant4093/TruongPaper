@@ -38,6 +38,7 @@ export const App: React.FC = () => {
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
   const isPaused = useAppStore((s) => s.isPaused);
+  const systemPowerReasons = useAppStore((s) => s.systemPowerReasons);
   const policyStateByMonitor = useAppStore((s) => s.policyStateByMonitor);
   const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
@@ -71,7 +72,7 @@ export const App: React.FC = () => {
   const showInspector = detailsOpen && canInspect;
   const ActiveView = VIEWS[activeTab];
   const activeLabel = STUDIO_TABS.find(([key]) => key === activeTab)?.[1];
-  const autoPaused = activeMonitor && policyStateByMonitor[activeMonitor.monitorId] && policyStateByMonitor[activeMonitor.monitorId] !== 'playing';
+  const autoPaused = systemPowerReasons.length > 0 || (activeMonitor && policyStateByMonitor[activeMonitor.monitorId] && policyStateByMonitor[activeMonitor.monitorId] !== 'playing');
   const playingLabel = isPaused ? 'Paused' : autoPaused ? 'Auto-paused' : 'Playing';
   const currentTitle = activeWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
   const currentPreview = activeWallpaper?.previewPath ?? currentPhoto?.filePath;

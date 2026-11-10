@@ -52,6 +52,7 @@ export interface AppState {
   playlists: Playlist[];
   settings: AppSettings | null;
   isPaused: boolean;
+  systemPowerReasons: string[];
   policyStateByMonitor: Record<string, string>;
   presetsByWallpaper: Record<string, WallpaperPreset[]>;
 
@@ -152,6 +153,7 @@ export const useAppStore = create<AppState>((set, get) => {
     playlists: [],
     settings: null,
     isPaused: false,
+    systemPowerReasons: [],
     policyStateByMonitor: {},
     presetsByWallpaper: readJson<Record<string, WallpaperPreset[]>>(PRESETS_KEY, {}),
 
@@ -251,7 +253,11 @@ export const useAppStore = create<AppState>((set, get) => {
         }),
 
         listen<{ kind: 'pause' | 'resume'; reason: string }>('system-power', (event) => {
-          set({ isPaused: event.payload.kind === 'pause' });
+          // System sleep/lock must not erase the user's explicit pause on resume.
+          const { kind, reason } = event.payload;
+          set((state) => ({ systemPowerReasons: kind === 'pause'
+            ? [...new Set([...state.systemPowerReasons, reason])]
+            : state.systemPowerReasons.filter((r) => r !== reason) }));
         }),
       ];
 

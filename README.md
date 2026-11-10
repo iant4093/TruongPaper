@@ -26,34 +26,36 @@ TruongPaper renders live, audio-reactive and high-resolution photographic wallpa
 
 ## Screenshots
 
+The screenshots below use the interactive browser preview with sample wallpapers. The [native macOS screenshot](docs/screenshots/native-library.jpg) uses real photo API data.
+
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/studio-library.webp" width="100%" alt="TruongPaper main dark studio window showing unified library, top paste omnibar, active 5-photo queue and live property inspector">
+      <img src="docs/screenshots/studio-library.jpg" width="100%" alt="TruongPaper main dark studio window showing unified library, top paste omnibar, active 5-photo queue and live property inspector">
       <p align="center"><sub><b>Wallpaper Library</b> · unified library, paste omnibar and live inspector</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/photos-api.webp" width="100%" alt="Ian Truong Photography API studio view showing saved albums, featured filter, 5-photo offline queue, cache slider and history controls">
+      <img src="docs/screenshots/photos-api.jpg" width="100%" alt="Ian Truong Photography API studio view showing saved albums, featured filter, 5-photo offline queue, cache slider and history controls">
       <p align="center"><sub><b>Ian's Photos API</b> · offline queue, saved albums and zero-repeat history</sub></p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/workshop-download.webp" width="100%" alt="Steam Workshop URL paste modal showing live depot download progress, QR sign-in and automatic scene unpacking">
+      <img src="docs/screenshots/workshop-download.jpg" width="100%" alt="Steam Workshop URL paste modal showing live depot download progress, the wallpaper details and download status">
       <p align="center"><sub><b>Steam Workshop</b> · paste any Workshop link to download and apply</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/scene-inspector.webp" width="100%" alt="Dynamic Wallpaper Engine property inspector with auto-generated sliders, color pickers, toggles, presets and audio FFT sensitivity">
+      <img src="docs/screenshots/scene-inspector.jpg" width="100%" alt="Dynamic Wallpaper Engine property inspector with auto-generated sliders, color pickers, toggles, presets and audio FFT sensitivity">
       <p align="center"><sub><b>Wallpaper Engine Inspector</b> · user properties, presets and audio FFT</sub></p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/monitors-playlists.webp" width="100%" alt="Multi-monitor layout diagram with per-display wallpaper assignment, GPU transitions and unified mixed playlists">
-      <p align="center"><sub><b>Monitors & Playlists</b> · per-display fit modes and Liquid Glass transitions</sub></p>
+      <img src="docs/screenshots/monitors-playlists.jpg" width="100%" alt="Multi-monitor layout diagram with per-display wallpaper assignment, GPU transitions and unified mixed playlists">
+      <p align="center"><sub><b>Monitors & Playlists</b> · per-display fit modes and wallpaper transitions</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/tray-popover.webp" width="100%" alt="Frameless Liquid Glass Menu Bar and System Tray popover with quick pause, next wallpaper, favorite, volume and queue status">
+      <img src="docs/screenshots/tray-popover.jpg" width="100%" alt="Dark Menu Bar and System Tray popover with quick pause, next wallpaper, favorite, volume and queue status">
       <p align="center"><sub><b>Menu Bar & System Tray</b> · instant controls without opening the studio</sub></p>
     </td>
   </tr>
@@ -89,18 +91,20 @@ TruongPaper renders live, audio-reactive and high-resolution photographic wallpa
 
 - Dynamic `project.json` inspector: automatically generates sliders, switches, color pickers, dropdowns, text inputs and file pickers for every wallpaper property, evaluating visibility `condition` expressions and localization tables in real time
 - Universal per-wallpaper adjustments (Volume, Playback Speed, Fit Mode, Zoom/Offset, Brightness, Contrast, Saturation, Hue Shift) and named user presets
-- System audio loopback + 2048-point Hann-windowed FFT (`WASAPI Loopback` on Windows, `CoreAudio Tap` / input capture on macOS) driving 16-, 32- and 64-band logarithmic stereo spectrums at 60 Hz
+- System audio loopback + 2048-point Hann-windowed FFT (`WASAPI Loopback` on Windows; a virtual loopback device such as BlackHole on macOS) driving 16-, 32- and 64-band logarithmic stereo spectrums at 60 Hz
 - Passive desktop cursor forwarding: tracks cursor movement and clicks over unoccluded desktop regions without stealing clicks from Finder or Windows desktop icons
 
 **Multi-Monitor, GPU Transitions & Smart Pause**
 
-- Independent per-monitor wallpapers, Clone across all displays, with platform support for both classic Windows 10/11 `WorkerW` and Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP`) raised layered desktops
+- Independent per-monitor wallpapers and applying the same source across displays (photo draws remain independent), with platform support for both classic Windows 10/11 `WorkerW` and Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP`) raised layered desktops
 - Smart orientation matching: skips portrait photos on landscape monitors (and vice-versa) by default, or displays mismatched aspect ratios over a dual-pass Kawase GPU-blurred ambient backdrop (`Fit + Blur`)
 - Custom `wgpu` transitions: **Smooth Crossfade**, **Blur-Dissolve**, and **Liquid Glass Morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
 - Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`), on app launch, on display wake
 - Smart pause & battery saver: suspends animation and FFT work and mutes audio when a fullscreen game or maximized window covers a monitor, when running on laptop battery / Low Power Mode, or when the screen locks or sleeps
 
 ## Install
+
+This project is in preview testing. Test installers are available from [GitHub Actions](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml); release download links become available after the first approved publication. See [the testing checklist](docs/MANUAL-TESTING.md) and [remaining limitations](docs/RELEASE-READINESS.md).
 
 **macOS** (Apple Silicon, macOS 14.2 or later)
 
@@ -126,7 +130,7 @@ Installed copies check for a new version once a day (or from **Settings › Abou
 | Wallpaper Engine Formats | Custom Rust `.pkg` memory-mapped VFS, `.tex` decoder (`lz4_flex`, BC1/BC2/BC3, RG88, R8, RGBA8, MP4 streams), `.mdl` puppet mesh deformer, `rquickjs` SceneScript sandbox |
 | Steam Workshop | Bundled checksum-verified `DepotDownloader` v3.4.0 sidecar, Steam Web API metadata client, `notify` local `431960` folder watcher, OS Keychain (`keyring`) |
 | Photo API & Storage | `reqwest` (rustls), `imagesize`, SQLite (`rusqlite` WAL mode) with persistent `photos_history` and LRU disk cache eviction |
-| Audio DSP | `cpal` (WASAPI Loopback / CoreAudio), `rustfft` 2048-point Hann-windowed logarithmic 16/32/64-band stereo analyzer |
+| Audio DSP | `cpal` (WASAPI Loopback / macOS virtual loopback device), `rustfft` 2048-point Hann-windowed logarithmic 16/32/64-band stereo analyzer |
 | Delivery | GitHub Actions, macOS `.dmg`, Windows NSIS installer, signed auto-updates, SHA-256 checksums |
 
 ## Build locally
@@ -188,13 +192,13 @@ The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository 
 ```text
 .
 ├── src/                    React app (Wallpaper Library & Menu Bar / Tray Popover)
-│   ├── components/         Studio views (views/), PropertyInspector, Omnibar, LiquidGlassFilters,
+│   ├── components/         Studio views (views/), PropertyInspector, Omnibar,
 │   │                       AmbientBacklightCanvas, Steam sign-in and Workshop preview modals
 │   ├── services/           Signed auto-updater client (updates.ts)
 │   ├── store/              Zustand store (useAppStore.ts): photos, Workshop, playlists, monitors, presets
 │   ├── tray/               Menu Bar (macOS) / System Tray (Windows) quick-control popover
 │   ├── lib/ types/         Formatting helpers and IPC types (ipc.ts)
-│   ├── styles/             Liquid Glass CSS
+│   ├── styles/             Neutral dark theme (theme.css)
 │   └── dev/                Browser-preview mock of the Tauri backend (dev only)
 ├── src-tauri/              Rust backend
 │   ├── crates/             Modular crates: core, photo-api, steam, we-formats, renderer, scenescript, audio, platform

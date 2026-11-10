@@ -68,7 +68,11 @@ pub(crate) fn scene_content_revision(roots: &[PathBuf]) -> std::io::Result<u64> 
         };
         if metadata.is_dir() {
             for entry in std::fs::read_dir(&path)? {
-                pending.push(entry?.path());
+                let entry = entry?;
+                // Embedded MP4 extraction creates this runtime cache during the first load.
+                if entry.file_name() != ".cache" {
+                    pending.push(entry.path());
+                }
             }
         } else {
             files.push((path, metadata.len(), metadata.modified().ok()));
@@ -539,6 +543,27 @@ impl WallpaperHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_revision_detects_asset_updates_and_ignores_extraction_cache() {
+        let dir = std::env::temp_dir().join(format!("truongpaper-revision-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scene.json"), b"{}").unwrap();
+        let revision = || scene_content_revision(std::slice::from_ref(&dir)).unwrap();
+        let initial = revision();
+        assert_eq!(initial, revision());
+        std::fs::create_dir_all(dir.join(".cache")).unwrap();
+        std::fs::write(dir.join(".cache/clip.mp4"), b"extracted video").unwrap();
+        assert_eq!(initial, revision());
+        std::fs::write(dir.join("scene.json"), b"{\"changed\":true}").unwrap();
+        assert_ne!(initial, revision());
+        let updated = revision();
+        std::fs::write(dir.join("texture.tex"), b"image").unwrap();
+        assert_ne!(updated, revision());
+        std::fs::remove_file(dir.join("texture.tex")).unwrap();
+        assert_eq!(updated, revision());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn pause_flags_and_policy_combine() {

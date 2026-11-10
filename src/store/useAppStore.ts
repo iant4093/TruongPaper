@@ -175,7 +175,7 @@ export const useAppStore = create<AppState>((set, get) => {
         monitors,
         selectedMonitorId: state.selectedMonitorId ?? monitors[0]?.monitorId ?? null,
         wallpapers,
-        selectedWallpaperId: state.selectedWallpaperId ?? wallpapers[0]?.wallpaperId ?? null,
+        selectedWallpaperId: wallpapers.some((w) => w.wallpaperId === state.selectedWallpaperId) ? state.selectedWallpaperId : null,
         settings,
         playlists,
       }));

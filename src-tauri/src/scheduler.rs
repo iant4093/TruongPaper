@@ -118,7 +118,7 @@ pub struct MonitorTick {
 /// Builds the per-monitor snapshot for every live monitor (unassigned ones show the Photo API,
 /// as in `photo_rotate_next`), sorted by id. Assigned monitors that are not connected are left
 /// out: nothing is restored into a window on another screen and no photo is marked shown for
-/// a display nobody sees. They are restored (as new monitors) once they are connected again.
+/// a display nobody sees. Their current playlist item is restored once they are connected again.
 pub fn build_monitor_ticks(
     live: &[String],
     assigned: &HashMap<String, WallpaperSource>,
@@ -182,6 +182,7 @@ struct MonitorSchedule {
     last_rotation: Instant,
     playlist_index: usize,
     wake_pending: bool,
+    restore_pending: bool,
 }
 
 /// A manual rotation reported by an IPC command (see [`note_manual_rotation`]).
@@ -218,10 +219,11 @@ impl RotationScheduler {
         self.manual.push(note);
     }
 
-    /// Forgets a monitor whose wallpaper window was closed because it disconnected: the next
-    /// [`Self::plan`] that sees it treats it as new and restores its source.
-    pub fn forget(&mut self, monitor_id: &str) {
-        self.monitors.remove(monitor_id);
+    /// Preserve playlist position while disconnected, but restore the closed window on replug.
+    pub fn mark_disconnected(&mut self, monitor_id: &str) {
+        if let Some(schedule) = self.monitors.get_mut(monitor_id) {
+            schedule.restore_pending = true;
+        }
     }
 
     /// Current playlist position of a monitor.
@@ -246,8 +248,11 @@ impl RotationScheduler {
         let launch = !std::mem::replace(&mut self.launched, true);
         let woke = std::mem::replace(&mut self.wake_generation, wake_generation) != wake_generation;
         let manual = std::mem::take(&mut self.manual);
-        self.monitors
-            .retain(|id, _| monitors.iter().any(|m| &m.monitor_id == id));
+        for (id, schedule) in &mut self.monitors {
+            if !monitors.iter().any(|m| &m.monitor_id == id) {
+                schedule.restore_pending = true;
+            }
+        }
 
         let mut out = Vec::new();
         for m in monitors {
@@ -265,6 +270,7 @@ impl RotationScheduler {
                     last_rotation: now,
                     playlist_index: first_index,
                     wake_pending: false,
+                    restore_pending: false,
                 });
 
             let notes: Vec<&ManualNote> = manual
@@ -280,7 +286,9 @@ impl RotationScheduler {
                 s.last_rotation = now;
                 s.playlist_index = first_index;
                 s.wake_pending = false;
-                continue;
+                if !s.restore_pending {
+                    continue;
+                }
             }
             if !notes.is_empty() {
                 s.last_rotation = now;
@@ -288,18 +296,26 @@ impl RotationScheduler {
                 if notes.iter().any(|n| n.restart_playlist) {
                     s.playlist_index = first_index;
                 }
-                continue;
+                if !s.restore_pending {
+                    continue;
+                }
             }
             if woke && m.interval_secs > 0 {
                 s.wake_pending = true;
             }
 
-            if launch || is_new {
+            if launch || is_new || s.restore_pending {
+                let restore = if s.restore_pending {
+                    restored_playlist_action(s, m).unwrap_or(RotationAction::Restore)
+                } else {
+                    RotationAction::Restore
+                };
+                s.restore_pending = false;
                 let rotate = launch && m.interval_secs > 0 && m.renderable;
                 let action = rotate
                     .then(|| rotation_action(s, m, true))
                     .flatten()
-                    .unwrap_or(RotationAction::Restore);
+                    .unwrap_or(restore);
                 s.last_rotation = now;
                 s.wake_pending = false;
                 out.push(PlannedRotation {
@@ -356,6 +372,28 @@ impl RotationScheduler {
     }
 }
 
+/// Reconnects resume the current playlist item without consuming another draw/position.
+fn restored_playlist_action(s: &MonitorSchedule, m: &MonitorTick) -> Option<RotationAction> {
+    let WallpaperSource::Playlist { playlist_id } = &m.source else {
+        return None;
+    };
+    let playlist = m.playlist.as_ref()?;
+    let index = if playlist
+        .items
+        .get(s.playlist_index)
+        .is_some_and(|item| playlist_item_allowed(playlist.mode, item))
+    {
+        s.playlist_index
+    } else {
+        first_playlist_index(playlist)?
+    };
+    Some(RotationAction::ShowPlaylistItem {
+        playlist_id: playlist_id.clone(),
+        index,
+        item: playlist.items[index].clone(),
+    })
+}
+
 /// Next action for a rotating monitor; advances its playlist position.
 fn rotation_action(
     s: &mut MonitorSchedule,
@@ -409,7 +447,7 @@ fn take_manual_notes() -> Vec<ManualNote> {
 static DISCONNECTED: parking_lot::Mutex<Vec<String>> = parking_lot::const_mutex(Vec::new());
 
 /// Called when a monitor's wallpaper window was closed because the monitor disconnected, so the
-/// scheduler restores it on reconnect (see [`RotationScheduler::forget`]).
+/// scheduler restores it on reconnect (see [`RotationScheduler::mark_disconnected`]).
 pub fn note_monitor_disconnected(monitor_id: &str) {
     let mut ids = DISCONNECTED.lock();
     if ids.len() >= MAX_PENDING_MANUAL_NOTES {
@@ -486,7 +524,7 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
         scheduler.note_manual(note);
     }
     for id in take_disconnected() {
-        scheduler.forget(&id);
+        scheduler.mark_disconnected(&id);
     }
     let plans = scheduler.plan(
         Instant::now(),
@@ -777,7 +815,7 @@ mod tests {
         assert!(s
             .plan(secs(t0, 63), &ticks(&["EXT", "LAPTOP"]), 0, false)
             .is_empty());
-        s.forget("EXT");
+        s.mark_disconnected("EXT");
         let plans = s.plan(secs(t0, 64), &ticks(&["EXT", "LAPTOP"]), 0, false);
         assert_eq!(
             summary(&plans),
@@ -789,6 +827,28 @@ mod tests {
         );
         note_monitor_disconnected("EXT");
         assert!(take_disconnected().contains(&"EXT".to_string()));
+    }
+
+    #[test]
+    fn reconnect_resumes_playlist_position_instead_of_starting_over() {
+        let t0 = Instant::now();
+        let p = playlist(PlaylistMode::Mixed, vec![ws("a"), ws("b"), ws("c")]);
+        let ticks = [playlist_tick("EXT", &p)];
+        let mut scheduler = RotationScheduler::new(0);
+        scheduler.plan(t0, &ticks, 0, false);
+        scheduler.plan(secs(t0, 60), &ticks, 0, false);
+        assert_eq!(scheduler.playlist_index("EXT"), Some(2));
+        scheduler.plan(secs(t0, 61), &[], 0, false);
+        let plans = scheduler.plan(secs(t0, 120), &ticks, 0, false);
+        assert!(
+            matches!(&plans[0].action, RotationAction::ShowPlaylistItem { index: 2, item, .. } if item == &ws("c"))
+        );
+        assert!(scheduler.plan(secs(t0, 121), &ticks, 0, false).is_empty());
+        scheduler.mark_disconnected("EXT");
+        assert!(matches!(
+            scheduler.plan(secs(t0, 122), &ticks, 0, false)[0].action,
+            RotationAction::ShowPlaylistItem { index: 2, .. }
+        ));
     }
 
     #[test]

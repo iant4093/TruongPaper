@@ -225,13 +225,29 @@ fn extracts_embedded_mp4_once() {
     assert_eq!(std::fs::read(&path).unwrap(), payload);
     assert!(!path.with_extension("mp4.part").exists());
 
-    // Second call with the same length must not rewrite the file.
-    std::fs::write(&path, vec![0x11u8; payload.len()]).unwrap();
+    // Identical payloads do not rewrite a cached file.
+    let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
     let again = extract_embedded_tex_mp4(&tex, tmp.path(), "materials/clip.tex")
         .unwrap()
         .unwrap();
     assert_eq!(again, path);
-    assert_eq!(std::fs::read(&path).unwrap(), vec![0x11u8; payload.len()]);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+
+    // Same-length corruption or an updated Workshop texture must be replaced too.
+    std::fs::write(&path, vec![0x11u8; payload.len()]).unwrap();
+    extract_embedded_tex_mp4(&tex, tmp.path(), "materials/clip.tex").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
+    let mut updated = payload.clone();
+    *updated.last_mut().unwrap() ^= 1;
+    let updated_tex = tex_with(FIF_MP4, updated.clone());
+    extract_embedded_tex_mp4(&updated_tex, tmp.path(), "materials/clip.tex").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), updated);
 
     // A stale file with a different length is replaced.
     std::fs::write(&path, b"short").unwrap();

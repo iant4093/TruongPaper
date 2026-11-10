@@ -61,9 +61,22 @@ describe('Main studio window', () => {
       fireEvent.click(within(nav).getByRole('button', { name: 'Workshop' }));
     });
     await screen.findByRole('heading', { level: 2, name: HEADINGS.workshop }, { timeout: 2000 });
-    expect(await screen.findByText('WALLPAPER PROPERTIES')).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select Neon Rain City' })); });
+    expect(await screen.findByText('Wallpaper properties')).toBeTruthy();
     expect(screen.getByText('Scheme Color')).toBeTruthy();
     expect(screen.getByText('Rain Speed')).toBeTruthy();
+  });
+
+  it('filters the library and opens details only after selecting a wallpaper', async () => {
+    await act(async () => { render(<App />); });
+    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
+    await act(async () => { fireEvent.change(screen.getByRole('textbox', { name: 'Search library' }), { target: { value: 'Neon' } }); });
+    expect(screen.queryByRole('button', { name: 'Select Lo-fi Train Window' })).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select Neon Rain City' })); });
+    expect(screen.getByRole('complementary', { name: 'Wallpaper details' })).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Toggle wallpaper details' })); });
+    expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
   });
 
   it('rotates to the next photo through the mock backend', async () => {

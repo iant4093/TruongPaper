@@ -367,6 +367,21 @@ pub fn spawn_audio_loopback_worker(
     .ring
 }
 
+/// Starts loopback capture with an explicit stop handle for runtime ownership.
+/// The legacy ring-only helper remains available for external PCM injectors.
+pub fn start_audio_loopback_worker(
+    latest_frame: Arc<ArcSwap<AudioSpectrumFrame>>,
+    sensitivity_gain: Arc<AtomicU32>,
+    all_monitors_paused: Arc<AtomicBool>,
+) -> AudioWorkerHandle {
+    spawn_audio_worker(
+        default_backend,
+        latest_frame,
+        sensitivity_gain,
+        all_monitors_paused,
+    )
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn default_backend() -> Option<Box<dyn LoopbackBackend>> {
     Some(Box::new(cpal_backend::CpalLoopbackBackend::default()))
@@ -647,6 +662,32 @@ mod tests {
             .copied()
             .fold(0.0, f32::max);
         assert!(hi > lo * 2.0);
+    }
+
+    #[test]
+    fn stopping_worker_releases_capture_backend() {
+        struct CaptureProbe(std::sync::mpsc::Sender<()>);
+        impl LoopbackBackend for CaptureProbe {
+            fn start(&mut self, _: Arc<Mutex<StereoRingBuffer>>) -> anyhow::Result<f32> {
+                Ok(SR)
+            }
+        }
+        impl Drop for CaptureProbe {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (released, receiver) = std::sync::mpsc::channel();
+        let worker = spawn_audio_worker(
+            move || Some(Box::new(CaptureProbe(released)) as Box<dyn LoopbackBackend>),
+            Arc::new(ArcSwap::from_pointee(AudioSpectrumFrame::default())),
+            Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            Arc::new(AtomicBool::new(false)),
+        );
+        worker.stop();
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("capture must be released on stop");
     }
 
     /// Backend that feeds synthetic PCM for ~300 ms from its own thread, then stops calling

@@ -57,6 +57,10 @@ export const App: React.FC = () => {
     return () => { cancelled = true; cleanup?.(); };
   }, [initAppListeners]);
 
+  useEffect(() => {
+    if (selectedWallpaperId) setDetailsOpen(true);
+  }, [selectedWallpaperId]);
+
   const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0];
   const currentPhoto = activeMonitor ? photoStatus?.currentPhotoByMonitor?.[activeMonitor.monitorId] : null;
   const activeWallpaper = activeMonitor?.activeSource.kind === 'workshop'

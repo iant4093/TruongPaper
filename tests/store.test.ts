@@ -58,7 +58,7 @@ describe('store → invoke() contract', () => {
       ['library_list_wallpapers', 'monitors_list', 'photo_get_status', 'playlist_list', 'settings_get'].sort()
     );
     expect(useAppStore.getState().selectedMonitorId).toBe('M1');
-    expect(useAppStore.getState().selectedWallpaperId).toBe('workshop:1');
+    expect(useAppStore.getState().selectedWallpaperId).toBeNull();
   });
 
   it.each([

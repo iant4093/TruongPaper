@@ -1,0 +1,10 @@
+# Keep shader/spec parity and build scripts identical on Windows and macOS.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff2 binary

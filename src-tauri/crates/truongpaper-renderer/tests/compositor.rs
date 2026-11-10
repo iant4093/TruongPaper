@@ -102,6 +102,7 @@ fn shaders_match_doc_listing_exactly() {
         eprintln!("docs/01 not found; skipping doc/shader parity check");
         return;
     };
+    let doc = doc.replace("\r\n", "\n");
     let blocks: Vec<&str> = doc
         .split("```wgsl\n")
         .skip(1)
@@ -109,11 +110,13 @@ fn shaders_match_doc_listing_exactly() {
         .collect();
     assert!(blocks.len() >= 2);
     assert_eq!(
-        blocks[0], KAWASE_BLUR_WGSL,
+        blocks[0],
+        KAWASE_BLUR_WGSL.replace("\r\n", "\n"),
         "kawase_blur.wgsl drifted from docs/01 §3.1"
     );
     assert_eq!(
-        blocks[1], COMPOSITOR_WGSL,
+        blocks[1],
+        COMPOSITOR_WGSL.replace("\r\n", "\n"),
         "compositor.wgsl drifted from docs/01 §3.2"
     );
 }

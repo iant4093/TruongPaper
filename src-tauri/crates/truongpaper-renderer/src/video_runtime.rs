@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use truongpaper_we_formats::ParsedTex;
@@ -194,7 +194,7 @@ pub fn embedded_mp4_cache_path(wallpaper_dir: &Path, tex_virtual_path: &str) -> 
 /// `<wallpaper_dir>/.cache/<name>.mp4` (docs/03 §6.2 item 2) and returns its path.
 ///
 /// Returns `Ok(None)` when the texture is not an MP4 or its first mipmap is not an `ftyp`
-/// container. The file is written once: an existing cache file with the same length is reused.
+/// container. Reuse requires matching contents; Workshop updates can preserve the file length.
 /// Writes go through a `.mp4.part` temp file followed by a rename so a crash never leaves a
 /// truncated cache file behind.
 pub fn extract_embedded_tex_mp4(
@@ -223,10 +223,8 @@ pub fn extract_embedded_tex_mp4(
         )
     })?;
 
-    if let Ok(meta) = fs::metadata(&path) {
-        if meta.is_file() && meta.len() == bytes.len() as u64 {
-            return Ok(Some(path));
-        }
+    if cached_video_matches(&path, bytes) {
+        return Ok(Some(path));
     }
 
     if let Some(parent) = path.parent() {
@@ -239,6 +237,26 @@ pub fn extract_embedded_tex_mp4(
     }
     tracing::debug!(path = %path.display(), bytes = bytes.len(), "extracted embedded tex mp4");
     Ok(Some(path))
+}
+
+/// Compare in bounded chunks rather than allocating a second copy of a large MP4.
+fn cached_video_matches(path: &Path, bytes: &[u8]) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    if !file
+        .metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.len() == bytes.len() as u64)
+    {
+        return false;
+    }
+    let mut buffer = [0u8; 64 * 1024];
+    for chunk in bytes.chunks(buffer.len()) {
+        if file.read_exact(&mut buffer[..chunk.len()]).is_err() || buffer[..chunk.len()] != *chunk {
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------------------------

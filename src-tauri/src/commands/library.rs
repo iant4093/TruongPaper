@@ -5,7 +5,7 @@ use crate::db;
 use crate::models::{IpcFitMode, IpcTransitionType, WallpaperItem, WallpaperPreset};
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 fn default_fit(state: &AppState) -> IpcFitMode {
     IpcFitMode::from_setting(&state.settings.lock().default_fit_mode)
@@ -33,9 +33,25 @@ pub fn is_strictly_within(child: &Path, parent: &Path) -> bool {
 
 #[tauri::command]
 pub async fn library_list_wallpapers(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<WallpaperItem>, String> {
-    list_items(&state).await
+    let items = list_items(&state).await?;
+    let scope = app.asset_protocol_scope();
+    for item in &items {
+        let preview = Path::new(&item.preview_path);
+        // Local Steam installs live outside app data. Grant only a real preview image
+        // within its wallpaper directory, never the whole Steam library or a symlink escape.
+        if preview.is_file() && is_strictly_within(preview, Path::new(&item.install_dir)) {
+            if let Err(err) = scope.allow_file(preview) {
+                tracing::warn!(
+                    "cannot allow wallpaper preview {}: {err}",
+                    preview.display()
+                );
+            }
+        }
+    }
+    Ok(items)
 }
 
 /// Removes the wallpaper from the library. Files are deleted only for items TruongPaper

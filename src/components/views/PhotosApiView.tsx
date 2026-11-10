@@ -26,7 +26,7 @@ const MAX_CACHE = 10 * GB;
 const POOL_OPTIONS = [
   ['all', 'All Public Photos'],
   ['featured', 'Featured Photos Only'],
-  ['albums', 'Selected Saved Albums'],
+  ['albums', 'Selected Saved albums'],
 ] as const satisfies ReadonlyArray<readonly [FilterMode, string]>;
 
 const photoDims = (p: PhotoItem) =>
@@ -113,19 +113,19 @@ export const PhotosApiView: React.FC = () => {
     <div>
       <ViewHeader
         title="Photography"
-        subtitle={`Rate limit remaining: ${photoStatus?.rateLimitRemaining ?? '—'} • ${
+        subtitle={`API requests available: ${photoStatus?.rateLimitRemaining ?? '—'} • ${
           photoStatus?.isRefilling ? 'Refilling queue…' : 'Queue idle'
         }`}
         actions={
           <button type="button" className="button" onClick={() => void openCatalog()}>
-            <BookOpen size={14} /> {catalogOpen ? 'Hide Album Catalog' : 'Browse Official Album Catalog'}
+            <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Browse albums'}
           </button>
         }
       />
 
       {/* Filter Controls Card */}
       <div className="card" style={{ padding: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Photo Pool</div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Photo source</div>
         <SegmentedControl
           value={mode}
           options={POOL_OPTIONS}
@@ -183,14 +183,14 @@ export const PhotosApiView: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Saved Albums Grid */}
-      <SectionTitle>Saved Albums</SectionTitle>
+      {/* Saved albums Grid */}
+      <SectionTitle>Saved albums</SectionTitle>
       <form onSubmit={submitAlbum} style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <input
           type="text"
           value={albumInput}
           onChange={(e) => setAlbumInput(e.target.value)}
-          placeholder="Add Album URL/Slug (e.g. bald-mountain-11-1)"
+          placeholder="Paste an album link or slug"
           className="button"
           style={{ flex: 1, textAlign: 'left', cursor: 'text', justifyContent: 'flex-start' }}
         />
@@ -243,8 +243,8 @@ export const PhotosApiView: React.FC = () => {
         )}
       </div>
 
-      {/* Currently Displayed Photo Card */}
-      <SectionTitle>Currently Displayed</SectionTitle>
+      {/* Current wallpaper Photo Card */}
+      <SectionTitle>Current wallpaper</SectionTitle>
       {currentPhoto ? (
         <div className="card" style={{ padding: 14, display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           <Thumb src={currentPhoto.filePath} alt={currentPhoto.albumSlug} height={200} />
@@ -262,13 +262,13 @@ export const PhotosApiView: React.FC = () => {
               onClick={() => void setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite)}
             >
               <Heart size={14} fill={currentPhoto.isFavorite ? 'currentColor' : 'none'} />
-              {currentPhoto.isFavorite ? 'Favorited (Kept on Disk)' : 'Favorite / Keep on Disk'}
+              {currentPhoto.isFavorite ? 'Favorited' : 'Favorite / Keep on Disk'}
             </button>
             <button type="button" className="button" onClick={() => void blacklistAndSkipPhoto(currentPhoto.id)}>
-              <EyeOff size={14} /> Hide / Never Show Again
+              <EyeOff size={14} /> Hide photo
             </button>
             <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
-              <ExternalLink size={14} /> View Album on iantruongphotography.com
+              <ExternalLink size={14} /> View album
             </button>
           </div>
         </div>
@@ -280,7 +280,7 @@ export const PhotosApiView: React.FC = () => {
 
       {/* Up Next Queue */}
       <SectionTitle>
-        Up Next Queue ({queue.length} Unused Photo{queue.length === 1 ? '' : 's'} on Disk)
+        Up next ({queue.length} Photo{queue.length === 1 ? '' : 's'} ready)
       </SectionTitle>
       <div style={cardGrid}>
         {queue.map((photo, idx) => (
@@ -320,8 +320,8 @@ export const PhotosApiView: React.FC = () => {
         )}
       </div>
 
-      {/* Storage & History Bar */}
-      <SectionTitle>Storage & History</SectionTitle>
+      {/* Storage & history Bar */}
+      <SectionTitle>Storage & history</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
           <span>Image Cache</span>
@@ -377,13 +377,13 @@ export const PhotosApiView: React.FC = () => {
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button type="button" className="button button-primary" onClick={() => void triggerPhotoRefill()}>
-            <RefreshCw size={14} /> Refill Queue Now
+            <RefreshCw size={14} /> Refill queue
           </button>
           <button type="button" className="button" onClick={() => void clearPhotoCache()}>
-            <Trash2 size={14} /> Clear Image Cache (Keep History)
+            <Trash2 size={14} /> Clear cache
           </button>
           <button type="button" className="button" onClick={() => void resetPhotoHistory()}>
-            <History size={14} /> Reset Shown History
+            <History size={14} /> Reset history
           </button>
         </div>
       </div>

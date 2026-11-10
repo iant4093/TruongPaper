@@ -174,7 +174,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
       {/* Universal Color & Audio Adjustments */}
       <section style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-          UNIVERSAL PLAYBACK & AUDIO
+          Playback & audio
         </div>
         <label style={{ display: 'block', fontSize: 13, marginBottom: 10 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -219,7 +219,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
       {/* Auto-Generated project.json Properties */}
       <section>
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-          WALLPAPER PROPERTIES
+          Wallpaper properties
         </div>
         {sortedProperties.map((prop) => {
           const isVisible = evaluatePropertyCondition(prop.condition, values);

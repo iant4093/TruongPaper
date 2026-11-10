@@ -1,11 +1,12 @@
 // src/components/views/SteamWorkshopView.tsx
 // §2.3 View 2: "Steam Workshop" Library View
 import React, { useMemo, useState } from 'react';
-import { AudioLines, LogIn, LogOut, MonitorSmartphone, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { LogIn, LogOut, RefreshCw, Search } from 'lucide-react';
+import { WallpaperCard } from '../WallpaperCard';
 import { useAppStore } from '../../store/useAppStore';
 import { WALLPAPER_TYPE_LABEL } from '../../lib/format';
 import type { WallpaperItem } from '../../types/ipc';
-import { Badge, SectionTitle, SegmentedControl, Thumb, ViewHeader, cardGrid } from '../ui';
+import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
 
 export type WorkshopFilter =
   | 'all'
@@ -175,67 +176,14 @@ export const SteamWorkshopView: React.FC = () => {
         </div>
       </div>
 
-      <div style={cardGrid}>
+      <div className="wallpaper-grid">
         {items.map((w) => (
-          <div
-            key={w.wallpaperId}
-            className="card"
-            role="button"
-            tabIndex={0}
-            aria-pressed={w.wallpaperId === selectedWallpaperId}
-            style={{
-              padding: 12,
-              cursor: 'pointer',
-              outline: w.wallpaperId === selectedWallpaperId ? '2px solid var(--accent-cyan)' : 'none',
-            }}
-            onClick={() => selectWallpaper(w.wallpaperId)}
-            onKeyDown={(e) => e.key === 'Enter' && selectWallpaper(w.wallpaperId)}
-
-          >
-            {/* preview.gif / preview.jpg from the Workshop item (GIF previews animate natively) */}
-            <Thumb src={w.previewPath} alt={w.title} height={110} />
-            <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' }}>
-              <Badge tone={w.windowsOnly ? 'warn' : 'cyan'}>{WALLPAPER_TYPE_LABEL[w.type]}</Badge>
-              {w.audioReactive && (
-                <span title="Audio reactive" style={{ color: 'var(--accent-cyan)', display: 'inline-flex' }}>
-                  <AudioLines size={14} />
-                </span>
-              )}
-              {isLocalSteamItem(w) && <Badge tone="muted">Steam</Badge>}
-            </div>
-            <div style={{ fontWeight: 600, marginTop: 6, fontSize: 13 }}>{w.title}</div>
-            {w.workshopId && (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>#{w.workshopId}</div>
-            )}
-            <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-              <button
-                type="button"
-                className="button button-primary"
-                style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                disabled={!activeMonitorId}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (activeMonitorId) {
-                    void applyMonitorSource(activeMonitorId, { kind: 'workshop', wallpaperId: w.wallpaperId });
-                  }
-                }}
-              >
-                <MonitorSmartphone size={12} /> Apply
-              </button>
-              <button
-                type="button"
-                className="button"
-                aria-label={`Delete ${w.title}`}
-                style={{ fontSize: 11, padding: '6px 10px' }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void deleteWallpaper(w.wallpaperId);
-                }}
-              >
-                <Trash2 size={12} />
-              </button>
-            </div>
-          </div>
+          <WallpaperCard key={w.wallpaperId} title={w.title} preview={w.previewPath}
+            kind={WALLPAPER_TYPE_LABEL[w.type]} detail={isLocalSteamItem(w) ? 'Steam library' : w.windowsOnly ? 'Windows only' : undefined}
+            selected={w.wallpaperId === selectedWallpaperId} audioReactive={w.audioReactive} canApply={!!activeMonitorId}
+            onSelect={() => selectWallpaper(w.wallpaperId)}
+            onApply={() => { if (activeMonitorId) void applyMonitorSource(activeMonitorId, { kind: 'workshop', wallpaperId: w.wallpaperId }).catch((err) => setSyncMsg(String(err))); }}
+            onDelete={() => void deleteWallpaper(w.wallpaperId).catch((err) => setSyncMsg(String(err)))} />
         ))}
         {items.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>

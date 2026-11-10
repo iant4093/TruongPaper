@@ -1,0 +1,133 @@
+// src/components/UniversalOmnibar.tsx
+import React, { useEffect, useState } from 'react';
+import { useAppStore } from '../store/useAppStore';
+
+export type ParsedOmnibarTarget =
+  | { kind: 'steam_workshop'; workshopId: string }
+  | { kind: 'photo_album'; albumSlug: string }
+  | null;
+
+/**
+ * Classifies any pasted URL, Workshop numeric ID, or Ian Truong Photography album slug.
+ */
+export function parseOmnibarInput(raw: string): ParsedOmnibarTarget {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const steamUrlMatch =
+    trimmed.match(/steamcommunity\.com\/(?:sharedfiles|workshop)\/filedetails\/?\?.*?\bid=(\d{6,12})/i) ??
+    trimmed.match(/steam:\/\/url\/CommunityFilePage\/(\d{6,12})/i);
+  if (steamUrlMatch) {
+    return { kind: 'steam_workshop', workshopId: steamUrlMatch[1] };
+  }
+
+  if (/^\d{7,12}$/.test(trimmed)) {
+    return { kind: 'steam_workshop', workshopId: trimmed };
+  }
+
+  const albumUrlMatch = trimmed.match(
+    /(?:https?:\/\/)?(?:www\.)?iantruongphotography\.com\/album\/([a-z0-9-]+)\/?/i
+  );
+  if (albumUrlMatch) {
+    return { kind: 'photo_album', albumSlug: albumUrlMatch[1].toLowerCase() };
+  }
+
+  if (/^[a-z0-9]+(?:-[a-z0-9]+)+$/i.test(trimmed)) {
+    return { kind: 'photo_album', albumSlug: trimmed.toLowerCase() };
+  }
+
+  return null;
+}
+
+export const UniversalOmnibar: React.FC = () => {
+  const [input, setInput] = useState('');
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const inspectWorkshopUrl = useAppStore((s) => s.inspectWorkshopUrl);
+  const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
+  const addAlbum = useAppStore((s) => s.addAlbum);
+  const openSteamAuthModal = useAppStore((s) => s.openSteamAuthModal);
+
+  const handleResolvedInput = async (rawText: string) => {
+    const parsed = parseOmnibarInput(rawText);
+    if (!parsed) {
+      setStatusMsg('Paste a valid Steam Workshop URL/ID or iantruongphotography.com album link/slug');
+      return;
+    }
+
+    try {
+      if (parsed.kind === 'steam_workshop') {
+        setStatusMsg(`Inspecting Steam Workshop #${parsed.workshopId}...`);
+        const preview = await inspectWorkshopUrl(parsed.workshopId);
+        setStatusMsg(`Downloading "${preview.title}"...`);
+        await downloadWorkshopItem(parsed.workshopId);
+        setInput('');
+      } else {
+        setStatusMsg(`Adding album "${parsed.albumSlug}"...`);
+        const saved = await addAlbum(parsed.albumSlug);
+        setStatusMsg(`Added album "${saved.displayName}" to Saved Albums`);
+        setInput('');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.toLowerCase().includes('auth') || msg.toLowerCase().includes('login')) {
+        openSteamAuthModal();
+      }
+      setStatusMsg(msg);
+    }
+  };
+
+  useEffect(() => {
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        (active instanceof HTMLElement && active.isContentEditable)
+      ) {
+        return;
+      }
+      const pasted = e.clipboardData?.getData('text/plain')?.trim();
+      if (pasted && parseOmnibarInput(pasted)) {
+        e.preventDefault();
+        setInput(pasted);
+        void handleResolvedInput(pasted);
+      }
+    };
+
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, []);
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void handleResolvedInput(input);
+      }}
+      style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}
+    >
+      <input
+        type="text"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder="Paste Steam Workshop URL / ID or Ian's Photo Album URL / Slug (Cmd/Ctrl+V anywhere)..."
+        className="glass-button"
+        style={{
+          flex: 1,
+          justifyContent: 'flex-start',
+          textAlign: 'left',
+          padding: '10px 16px',
+          cursor: 'text',
+        }}
+      />
+      <button type="submit" className="glass-button glass-button-primary">
+        + Import
+      </button>
+      {statusMsg && (
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+          {statusMsg}
+        </span>
+      )}
+    </form>
+  );
+};

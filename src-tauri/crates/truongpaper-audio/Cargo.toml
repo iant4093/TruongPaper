@@ -1,0 +1,17 @@
+[package]
+name = "truongpaper-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+truongpaper-we-formats = { path = "../truongpaper-we-formats" }
+anyhow.workspace = true
+thiserror.workspace = true
+rustfft.workspace = true
+cpal.workspace = true
+kira.workspace = true
+arc-swap.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+tracing.workspace = true

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-library-list-wallpapers"
+description = "Enables the library_list_wallpapers command without any pre-configured scope."
+commands.allow = ["library_list_wallpapers"]
+
+[[permission]]
+identifier = "deny-library-list-wallpapers"
+description = "Denies the library_list_wallpapers command without any pre-configured scope."
+commands.deny = ["library_list_wallpapers"]

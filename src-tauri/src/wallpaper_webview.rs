@@ -1,0 +1,841 @@
+//! Desktop-level webview windows for Web and Video wallpapers (docs/03 §6.2, §6.3, §9) and the
+//! bridge thread that feeds them.
+//!
+//! Each monitor showing a Web or Video wallpaper gets one undecorated `WebviewWindow` labelled
+//! `wallpaper-<monitor id>` that loads the `wpe://` URL built by
+//! `truongpaper_renderer::web_runtime` and is moved behind the desktop icons
+//! (`mac_desktop::attach_window_to_desktop` / `win_desktop::attach_hwnd_to_desktop`). These
+//! windows are deliberately NOT listed in `capabilities/default.json`, and `build.rs` declares
+//! an app ACL manifest, so Tauri rejects every app and plugin command they invoke; they only
+//! receive `eval` calls from the backend. Each window streams from its own wallpaper's VFS
+//! (`WallpaperHost::set_webview_vfs`) and follows its monitor's rect on display changes.
+//!
+//! The bridge thread (`truongpaper-webview-bridge`) closes windows whose monitor switched to
+//! another runtime, starts / suspends the audio loopback worker, pushes 128-float spectrum
+//! frames (60 Hz max), forwards desktop cursor events to Web pages and applies user pause /
+//! Smart Pause (docs/01 §6.1 items 2 and 3).
+
+use crate::commands::monitor::LiveMonitor;
+use crate::desktop_host::{cursor_transitions, monitor_geometries, CursorPoller, CursorSample};
+use crate::host::{ActiveRuntime, MonitorRuntime, WallpaperHost, WebviewKind};
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, OnceLock};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use truongpaper_renderer::{
+    audio_dispatch_js, cursor_event_js, pack_web_audio_frame, video_set_paused_js,
+};
+
+/// Pauses every media element of a Web wallpaper (docs/01 §6.1 item 3).
+pub const WEB_MEDIA_PAUSE_JS: &str =
+    "document.querySelectorAll('video, audio').forEach(el => el.pause());";
+/// Resumes the media elements paused by [`WEB_MEDIA_PAUSE_JS`].
+pub const WEB_MEDIA_RESUME_JS: &str = "document.querySelectorAll('video, audio').forEach(el => { const p = el.play(); if (p && p.catch) p.catch(() => {}); });";
+
+/// Minimum spacing of `__truongpaper_dispatch_audio` pushes (60 Hz).
+pub const AUDIO_PUSH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+/// Bridge tick while a webview wallpaper is playing / while idle.
+const ACTIVE_TICK: Duration = Duration::from_millis(16);
+const IDLE_TICK: Duration = Duration::from_millis(250);
+const GEOMETRY_REFRESH: Duration = Duration::from_secs(2);
+
+// ---------------------------------------------------------------------------------------------
+// Pure helpers (unit tested)
+// ---------------------------------------------------------------------------------------------
+
+/// `wallpaper-<monitor id>` with every character outside `[A-Za-z0-9_-]` replaced by `_`
+/// (Tauri labels allow a restricted character set; monitor ids can be `\\.\DISPLAY1` or
+/// `LG UltraFine #2`).
+pub fn wallpaper_window_label(monitor_id: &str) -> String {
+    let sanitized: String = monitor_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("wallpaper-{sanitized}")
+}
+
+/// Script that pauses / resumes a webview wallpaper.
+pub fn pause_script(kind: WebviewKind, paused: bool) -> String {
+    match kind {
+        WebviewKind::Video => video_set_paused_js(paused),
+        WebviewKind::Web if paused => WEB_MEDIA_PAUSE_JS.to_string(),
+        WebviewKind::Web => WEB_MEDIA_RESUME_JS.to_string(),
+    }
+}
+
+/// Pause state of one webview window as tracked by the bridge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowPauseState {
+    pub monitor_id: String,
+    pub label: String,
+    pub kind: WebviewKind,
+    /// The page finished loading (scripts can run).
+    pub loaded: bool,
+    /// Last pause state sent to the page (`None` = never sent since load).
+    pub paused_sent: Option<bool>,
+}
+
+/// `(label, script, paused)` for every loaded window whose desired pause state differs from the
+/// last one sent. `playing(monitor_id)` is the host's `monitor_should_render`.
+pub fn plan_pause_updates(
+    windows: &[WindowPauseState],
+    playing: impl Fn(&str) -> bool,
+) -> Vec<(String, String, bool)> {
+    windows
+        .iter()
+        .filter(|w| w.loaded)
+        .filter_map(|w| {
+            let paused = !playing(&w.monitor_id);
+            (w.paused_sent != Some(paused))
+                .then(|| (w.label.clone(), pause_script(w.kind, paused), paused))
+        })
+        .collect()
+}
+
+/// Rate limiter for the 60 Hz audio push.
+#[derive(Debug, Clone, Default)]
+pub struct AudioPushThrottle {
+    last: Option<Instant>,
+}
+
+impl AudioPushThrottle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` (and records `now`) when at least [`AUDIO_PUSH_INTERVAL`] passed since the last
+    /// accepted push.
+    pub fn ready(&mut self, now: Instant) -> bool {
+        let ok = self
+            .last
+            .is_none_or(|t| now.saturating_duration_since(t) >= AUDIO_PUSH_INTERVAL);
+        if ok {
+            self.last = Some(now);
+        }
+        ok
+    }
+}
+
+/// `true` when the host still wants `window` on its monitor.
+fn window_matches_host(window: &WebWindow, rt: Option<&MonitorRuntime>) -> bool {
+    rt.is_some_and(|rt| {
+        rt.wallpaper_id.as_deref() == Some(window.wallpaper_id.as_str())
+            && matches!(&rt.active, ActiveRuntime::Webview { kind, label }
+                if *kind == window.kind && *label == window.label)
+    })
+}
+
+/// Logical rect `(x, y, width, height)` of a monitor.
+pub type LogicalRect = (f64, f64, f64, f64);
+
+/// What happens to one open wallpaper window after the display configuration changed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GeometryUpdate {
+    /// Its monitor is gone: close the window (restored when the monitor comes back).
+    Close { monitor_id: String },
+    /// Move / resize it to the monitor's current rect and attach it to the desktop again.
+    Place {
+        monitor_id: String,
+        logical: LogicalRect,
+        physical: (i32, i32, u32, u32),
+    },
+}
+
+/// Plans [`GeometryUpdate`]s for the open windows `(monitor id, current logical rect)`.
+/// `force` places every window that still has a monitor (desktop surfaces were recreated);
+/// otherwise only windows whose rect changed are placed. An empty `live` list (the monitor
+/// query failed) changes nothing.
+pub fn plan_geometry_updates(
+    windows: &[(String, LogicalRect)],
+    live: &[LiveMonitor],
+    force: bool,
+) -> Vec<GeometryUpdate> {
+    if live.is_empty() {
+        return Vec::new();
+    }
+    windows
+        .iter()
+        .filter_map(|(monitor_id, rect)| {
+            let Some(m) = live.iter().find(|m| &m.id == monitor_id) else {
+                return Some(GeometryUpdate::Close {
+                    monitor_id: monitor_id.clone(),
+                });
+            };
+            let logical = m.logical_rect();
+            (force || logical != *rect).then(|| GeometryUpdate::Place {
+                monitor_id: monitor_id.clone(),
+                logical,
+                physical: (m.x, m.y, m.width, m.height),
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Window registry
+// ---------------------------------------------------------------------------------------------
+
+struct WebWindow {
+    label: String,
+    kind: WebviewKind,
+    wallpaper_id: String,
+    audio_reactive: bool,
+    loaded: bool,
+    paused_sent: Option<bool>,
+    /// Logical rect of the window (its monitor's rect when it was last placed).
+    logical: LogicalRect,
+    /// CSS pixel size of the page (logical monitor size) for cursor coordinates.
+    css_size: (f64, f64),
+    last_cursor: Option<CursorSample>,
+}
+
+static APP: OnceLock<AppHandle> = OnceLock::new();
+/// `monitor id -> window`.
+static WINDOWS: LazyLock<Mutex<HashMap<String, WebWindow>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn eval(app: &AppHandle, label: &str, js: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        if let Err(err) = window.eval(js) {
+            tracing::debug!("eval on {label} failed: {err}");
+        }
+    }
+}
+
+fn destroy(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        if let Err(err) = window.destroy() {
+            tracing::warn!("closing wallpaper window {label}: {err}");
+        }
+    }
+}
+
+/// What [`show`] creates for one monitor.
+#[derive(Debug, Clone)]
+pub struct WebviewSpec {
+    pub monitor_id: String,
+    pub kind: WebviewKind,
+    pub wallpaper_id: String,
+    /// `web_wallpaper_url` / `video_host_url` result.
+    pub url: String,
+    pub audio_reactive: bool,
+    /// Sent after every page load: full property set (Web) / adjustments (Video).
+    pub on_load_scripts: Vec<String>,
+}
+
+/// Creates (or reuses) the desktop webview window of `spec.monitor_id`. Fails when the monitor is
+/// not connected (the window would otherwise land on another screen); the scheduler restores it
+/// once the monitor is back.
+pub async fn show(app: &AppHandle, spec: WebviewSpec) -> Result<(), String> {
+    let _ = APP.set(app.clone());
+    let label = wallpaper_window_label(&spec.monitor_id);
+    let url = tauri::Url::parse(&spec.url).map_err(|e| format!("invalid wallpaper URL: {e}"))?;
+    let monitor = crate::commands::monitor::live_monitors(app)
+        .into_iter()
+        .find(|m| m.id == spec.monitor_id)
+        .ok_or_else(|| format!("Monitor '{}' is not connected", spec.monitor_id))?;
+
+    // Same wallpaper already open: just resend the scripts.
+    let reuse = WINDOWS.lock().get(&spec.monitor_id).is_some_and(|w| {
+        w.label == label && w.kind == spec.kind && w.wallpaper_id == spec.wallpaper_id
+    }) && app.get_webview_window(&label).is_some();
+    if reuse {
+        for js in &spec.on_load_scripts {
+            eval(app, &label, js);
+        }
+        return Ok(());
+    }
+
+    WINDOWS.lock().remove(&spec.monitor_id);
+    if app.get_webview_window(&label).is_some() {
+        destroy(app, &label);
+        // `destroy` completes on the event loop; the label is free once the window is gone.
+        for _ in 0..40 {
+            if app.get_webview_window(&label).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    let (lx, ly, lw, lh) = monitor.logical_rect();
+
+    let load_label = label.clone();
+    let load_scripts = spec.on_load_scripts.clone();
+    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::CustomProtocol(url))
+        .title("TruongPaper Wallpaper")
+        .decorations(false)
+        .skip_taskbar(true)
+        .focused(false)
+        .resizable(false)
+        .shadow(false)
+        .visible(false)
+        .position(lx, ly)
+        .inner_size(lw, lh)
+        .on_page_load(move |window, payload| {
+            if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == load_label) {
+                w.loaded = true;
+                // The bridge re-sends the pause state for the fresh page.
+                w.paused_sent = None;
+            }
+            for js in &load_scripts {
+                if let Err(err) = window.eval(js) {
+                    tracing::debug!("initial script on {}: {err}", window.label());
+                }
+            }
+        });
+    if spec.kind == WebviewKind::Web {
+        builder = builder.initialization_script(truongpaper_platform::WEB_WALLPAPER_PRELOAD_JS);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Webviews with different browser arguments need their own data directory.
+        builder =
+            builder.additional_browser_args(truongpaper_platform::WEBVIEW2_WALLPAPER_BROWSER_ARGS);
+        if let Ok(dir) = app.path().app_data_dir() {
+            builder = builder.data_directory(dir.join("wallpaper-webview"));
+        }
+    }
+    let window = builder
+        .build()
+        .map_err(|e| format!("could not open the wallpaper window: {e}"))?;
+
+    WINDOWS.lock().insert(
+        spec.monitor_id.clone(),
+        WebWindow {
+            label: label.clone(),
+            kind: spec.kind,
+            wallpaper_id: spec.wallpaper_id.clone(),
+            audio_reactive: spec.audio_reactive,
+            loaded: false,
+            paused_sent: None,
+            logical: (lx, ly, lw, lh),
+            css_size: (lw, lh),
+            last_cursor: None,
+        },
+    );
+    attach_to_desktop(
+        app,
+        window,
+        (monitor.x, monitor.y, monitor.width, monitor.height),
+    );
+    Ok(())
+}
+
+/// Moves the window behind the desktop icons (main thread).
+#[cfg(target_os = "macos")]
+fn attach_to_desktop(
+    app: &AppHandle,
+    window: tauri::WebviewWindow,
+    _physical: (i32, i32, u32, u32),
+) {
+    let dispatched = app.run_on_main_thread(move || {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        match window.ns_window() {
+            Ok(ptr) if !ptr.is_null() => {
+                // SAFETY: Tauri returns the live NSWindow of this webview window; we are on the
+                // main thread and only borrow it for the duration of the call.
+                let ns_window: &objc2_app_kit::NSWindow =
+                    unsafe { &*(ptr as *const objc2_app_kit::NSWindow) };
+                truongpaper_platform::mac_desktop::attach_window_to_desktop(mtm, ns_window);
+            }
+            Ok(_) => tracing::warn!("wallpaper window has no NSWindow"),
+            Err(err) => tracing::warn!("wallpaper window NSWindow: {err}"),
+        }
+    });
+    if let Err(err) = dispatched {
+        tracing::warn!("could not attach the wallpaper window: {err}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn attach_to_desktop(
+    app: &AppHandle,
+    window: tauri::WebviewWindow,
+    physical: (i32, i32, u32, u32),
+) {
+    let (x, y, w, h) = physical;
+    let dispatched = app.run_on_main_thread(move || {
+        let Ok(tauri_hwnd) = window.hwnd() else {
+            tracing::warn!("wallpaper window has no HWND");
+            return;
+        };
+        let hwnd = windows::Win32::Foundation::HWND(tauri_hwnd.0 as *mut std::ffi::c_void);
+        let rect = windows::Win32::Foundation::RECT {
+            left: x,
+            top: y,
+            right: x + w as i32,
+            bottom: y + h as i32,
+        };
+        // SAFETY: `hwnd` belongs to this process; desktop handles are freshly queried.
+        unsafe {
+            match truongpaper_platform::win_desktop::setup_desktop_layer() {
+                Some(desktop) => {
+                    if !truongpaper_platform::win_desktop::attach_hwnd_to_desktop(
+                        hwnd, &desktop, rect,
+                    ) {
+                        tracing::warn!("attaching the wallpaper window to the desktop failed");
+                    }
+                }
+                None => tracing::warn!("Progman/WorkerW not found for the wallpaper window"),
+            }
+        }
+    });
+    if let Err(err) = dispatched {
+        tracing::warn!("could not attach the wallpaper window: {err}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn attach_to_desktop(
+    _app: &AppHandle,
+    window: tauri::WebviewWindow,
+    _physical: (i32, i32, u32, u32),
+) {
+    let _ = window.show();
+}
+
+/// Applies `updates` to the open windows: closes windows whose monitor is gone, moves / resizes
+/// the others to their monitor's current rect (also updating the CSS size used for cursor
+/// coordinates) and attaches them to the desktop again.
+fn apply_geometry_updates(app: &AppHandle, updates: Vec<GeometryUpdate>) {
+    for update in updates {
+        match update {
+            GeometryUpdate::Close { monitor_id } => {
+                tracing::info!("monitor {monitor_id} disconnected; closing its wallpaper window");
+                close_monitor(&monitor_id);
+                // Restored by the scheduler when the monitor is seen again, even if it comes
+                // back before the scheduler's next monitor refresh.
+                crate::scheduler::note_monitor_disconnected(&monitor_id);
+            }
+            GeometryUpdate::Place {
+                monitor_id,
+                logical,
+                physical,
+            } => {
+                let label = {
+                    let mut windows = WINDOWS.lock();
+                    let Some(w) = windows.get_mut(&monitor_id) else {
+                        continue;
+                    };
+                    w.logical = logical;
+                    w.css_size = (logical.2, logical.3);
+                    w.label.clone()
+                };
+                let Some(window) = app.get_webview_window(&label) else {
+                    continue;
+                };
+                // Windows: `attach_hwnd_to_desktop` positions the child window in physical
+                // pixels itself; elsewhere the top-level window is moved here.
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let (x, y, w, h) = logical;
+                    if let Err(err) = window.set_position(tauri::LogicalPosition::new(x, y)) {
+                        tracing::warn!("moving wallpaper window {label}: {err}");
+                    }
+                    if let Err(err) = window.set_size(tauri::LogicalSize::new(w, h)) {
+                        tracing::warn!("resizing wallpaper window {label}: {err}");
+                    }
+                }
+                attach_to_desktop(app, window, physical);
+            }
+        }
+    }
+}
+
+/// Current `(monitor id, logical rect)` of every open window.
+fn window_rects() -> Vec<(String, LogicalRect)> {
+    WINDOWS
+        .lock()
+        .iter()
+        .map(|(id, w)| (id.clone(), w.logical))
+        .collect()
+}
+
+/// Re-places every open wallpaper window after the desktop surfaces were recreated (display
+/// hotplug, resolution / scale change) or explorer.exe restarted: windows of disconnected
+/// monitors are closed, the others follow their monitor's rect and are attached again.
+pub fn reattach_all() {
+    let Some(app) = APP.get() else {
+        return;
+    };
+    let monitors = crate::commands::monitor::live_monitors(app);
+    apply_geometry_updates(app, plan_geometry_updates(&window_rects(), &monitors, true));
+}
+
+/// Moves / closes windows whose monitor changed since the last check (bridge thread; also
+/// covers display changes when no desktop renderer is attached).
+fn follow_display_changes(app: &AppHandle) {
+    let rects = window_rects();
+    if rects.is_empty() {
+        return;
+    }
+    let monitors = crate::commands::monitor::live_monitors(app);
+    apply_geometry_updates(app, plan_geometry_updates(&rects, &monitors, false));
+}
+
+/// Closes the wallpaper window of `monitor_id` (no-op when none is open).
+pub fn close_monitor(monitor_id: &str) {
+    let removed = WINDOWS.lock().remove(monitor_id);
+    if let (Some(app), Some(w)) = (APP.get(), removed) {
+        destroy(app, &w.label);
+    }
+}
+
+/// Closes every wallpaper window (shutdown).
+pub fn close_all() {
+    let windows: Vec<WebWindow> = WINDOWS.lock().drain().map(|(_, w)| w).collect();
+    if let Some(app) = APP.get() {
+        for w in windows {
+            destroy(app, &w.label);
+        }
+    }
+}
+
+/// Labels of the open windows showing `wallpaper_id` with `kind`.
+fn labels_for(wallpaper_id: &str, kind: WebviewKind) -> Vec<String> {
+    WINDOWS
+        .lock()
+        .values()
+        .filter(|w| w.wallpaper_id == wallpaper_id && w.kind == kind)
+        .map(|w| w.label.clone())
+        .collect()
+}
+
+/// Runs `js` in every Web (`kind = Web`) or Video window showing `wallpaper_id`.
+pub fn eval_for_wallpaper(wallpaper_id: &str, kind: WebviewKind, js: &str) {
+    let Some(app) = APP.get() else {
+        return;
+    };
+    for label in labels_for(wallpaper_id, kind) {
+        eval(app, &label, js);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bridge thread
+// ---------------------------------------------------------------------------------------------
+
+/// Starts the webview bridge thread (also owns the audio-worker demand for scenes).
+pub fn start(app: AppHandle, host: Arc<WallpaperHost>) {
+    let _ = APP.set(app.clone());
+    let spawned = std::thread::Builder::new()
+        .name("truongpaper-webview-bridge".into())
+        .spawn(move || bridge_main(app, host));
+    if let Err(err) = spawned {
+        tracing::error!("failed to start the webview bridge thread: {err}");
+    }
+}
+
+/// A loaded, playing Web page (snapshot taken once per bridge tick).
+struct LiveWebPage {
+    monitor_id: String,
+    label: String,
+    audio_reactive: bool,
+    css_size: (f64, f64),
+    last_cursor: Option<CursorSample>,
+}
+
+fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
+    let mut throttle = AudioPushThrottle::new();
+    let mut cursor = CursorPoller::new();
+    let mut geoms = Vec::new();
+    let mut geoms_at: Option<Instant> = None;
+    let mut display_check_at: Option<Instant> = None;
+
+    while !host.is_shutting_down() {
+        let snapshot = host.monitors_snapshot();
+        let rt_of = |id: &str| snapshot.iter().find(|(m, _)| m == id).map(|(_, rt)| rt);
+
+        // 1. Close windows whose monitor switched to another source.
+        let stale: Vec<String> = WINDOWS
+            .lock()
+            .iter()
+            .filter(|(id, w)| !window_matches_host(w, rt_of(id)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            close_monitor(&id);
+        }
+
+        // 1b. Follow display changes (moved / resized / disconnected monitors).
+        if display_check_at.is_none_or(|t| t.elapsed() >= GEOMETRY_REFRESH) {
+            follow_display_changes(&app);
+            display_check_at = Some(Instant::now());
+        }
+
+        // 2. Audio loopback worker runs only while an audio-reactive wallpaper plays.
+        crate::audio_bridge::set_demand(host.audio_demand());
+
+        // 3. Pause / resume (user pause + Smart Pause).
+        let states: Vec<WindowPauseState> = WINDOWS
+            .lock()
+            .iter()
+            .map(|(id, w)| WindowPauseState {
+                monitor_id: id.clone(),
+                label: w.label.clone(),
+                kind: w.kind,
+                loaded: w.loaded,
+                paused_sent: w.paused_sent,
+            })
+            .collect();
+        let suspended = crate::power::rendering_suspended();
+        let playing = |id: &str| !suspended && host.monitor_should_render(id);
+        for (label, js, paused) in plan_pause_updates(&states, playing) {
+            eval(&app, &label, &js);
+            if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
+                w.paused_sent = Some(paused);
+            }
+        }
+
+        // 4. Audio frames + cursor events for playing Web pages.
+        let live: Vec<LiveWebPage> = WINDOWS
+            .lock()
+            .iter()
+            .filter(|(id, w)| w.kind == WebviewKind::Web && w.loaded && playing(id))
+            .map(|(id, w)| LiveWebPage {
+                monitor_id: id.clone(),
+                label: w.label.clone(),
+                audio_reactive: w.audio_reactive,
+                css_size: w.css_size,
+                last_cursor: w.last_cursor,
+            })
+            .collect();
+        if !live.is_empty() {
+            let now = Instant::now();
+            if live.iter().any(|p| p.audio_reactive) && throttle.ready(now) {
+                if let Some(frame) = crate::audio_bridge::latest_frame() {
+                    let js =
+                        audio_dispatch_js(&pack_web_audio_frame(&frame.left_64, &frame.right_64));
+                    for page in live.iter().filter(|p| p.audio_reactive) {
+                        eval(&app, &page.label, &js);
+                    }
+                }
+            }
+            if geoms_at.is_none_or(|t| t.elapsed() >= GEOMETRY_REFRESH) {
+                geoms = monitor_geometries(&app);
+                geoms_at = Some(now);
+            }
+            for page in &live {
+                let sample = cursor.poll(&geoms, &page.monitor_id);
+                let (w, h) = page.css_size;
+                for (kind, pos) in cursor_transitions(page.last_cursor, sample) {
+                    match cursor_event_js(kind, f64::from(pos[0]) * w, f64::from(pos[1]) * h) {
+                        Ok(js) => eval(&app, &page.label, &js),
+                        Err(err) => tracing::debug!("cursor event: {err}"),
+                    }
+                }
+                if let Some(win) = WINDOWS.lock().get_mut(&page.monitor_id) {
+                    win.last_cursor = sample;
+                }
+            }
+        }
+
+        std::thread::sleep(if live.is_empty() {
+            IDLE_TICK
+        } else {
+            ACTIVE_TICK
+        });
+    }
+    close_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::UniversalAdjustments;
+
+    #[test]
+    fn labels_are_sanitized() {
+        assert_eq!(wallpaper_window_label("DISPLAY-1"), "wallpaper-DISPLAY-1");
+        assert_eq!(
+            wallpaper_window_label("LG UltraFine #2"),
+            "wallpaper-LG_UltraFine__2"
+        );
+        assert_eq!(
+            wallpaper_window_label("\\\\.\\DISPLAY1"),
+            "wallpaper-____DISPLAY1"
+        );
+        assert_eq!(wallpaper_window_label("Écran"), "wallpaper-_cran");
+        let label = wallpaper_window_label("a/b:c");
+        assert!(label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn pause_scripts_per_kind() {
+        assert_eq!(
+            pause_script(WebviewKind::Video, true),
+            "window.__truongpaper_set_paused(true);"
+        );
+        assert_eq!(
+            pause_script(WebviewKind::Video, false),
+            "window.__truongpaper_set_paused(false);"
+        );
+        assert_eq!(pause_script(WebviewKind::Web, true), WEB_MEDIA_PAUSE_JS);
+        assert!(WEB_MEDIA_PAUSE_JS.contains("document.querySelectorAll('video, audio')"));
+        assert!(pause_script(WebviewKind::Web, false).contains("el.play()"));
+    }
+
+    #[test]
+    fn pause_updates_go_only_to_loaded_windows_that_changed() {
+        let w = |id: &str, kind, loaded, sent| WindowPauseState {
+            monitor_id: id.into(),
+            label: wallpaper_window_label(id),
+            kind,
+            loaded,
+            paused_sent: sent,
+        };
+        let windows = [
+            w("A", WebviewKind::Video, true, None),
+            w("B", WebviewKind::Web, true, Some(false)),
+            w("C", WebviewKind::Web, false, None),
+            w("D", WebviewKind::Video, true, Some(true)),
+        ];
+        // A and D playing; B and C paused.
+        let playing = |id: &str| id == "A" || id == "D";
+        let plan = plan_pause_updates(&windows, playing);
+        assert_eq!(
+            plan,
+            vec![
+                ("wallpaper-A".to_string(), video_set_paused_js(false), false),
+                (
+                    "wallpaper-B".to_string(),
+                    WEB_MEDIA_PAUSE_JS.to_string(),
+                    true
+                ),
+                ("wallpaper-D".to_string(), video_set_paused_js(false), false),
+            ]
+        );
+        // Nothing to send once every loaded window is in sync.
+        let synced = [
+            w("A", WebviewKind::Video, true, Some(false)),
+            w("B", WebviewKind::Web, true, Some(true)),
+        ];
+        assert!(plan_pause_updates(&synced, playing).is_empty());
+    }
+
+    #[test]
+    fn audio_push_is_throttled_to_60_hz() {
+        let mut t = AudioPushThrottle::new();
+        let t0 = Instant::now();
+        assert!(t.ready(t0));
+        assert!(!t.ready(t0 + Duration::from_millis(5)));
+        assert!(!t.ready(t0 + Duration::from_millis(16)));
+        assert!(t.ready(t0 + Duration::from_millis(17)));
+        assert!(!t.ready(t0 + Duration::from_millis(20)));
+        assert!(t.ready(t0 + Duration::from_millis(40)));
+        // Clock going backwards never panics and does not push.
+        assert!(!t.ready(t0));
+    }
+
+    #[test]
+    fn windows_follow_their_monitor_and_close_when_it_disconnects() {
+        let monitor = |id: &str, x: i32, w: u32, scale: f64| LiveMonitor {
+            id: id.into(),
+            name: id.into(),
+            width: w,
+            height: 2160,
+            x,
+            y: 0,
+            scale_factor: scale,
+            is_primary: x == 0,
+        };
+        let windows = vec![
+            ("BUILTIN".to_string(), (0.0, 0.0, 1920.0, 1080.0)),
+            ("EXT".to_string(), (1920.0, 0.0, 3840.0, 2160.0)),
+            ("GONE".to_string(), (0.0, 0.0, 1920.0, 1080.0)),
+        ];
+        // BUILTIN switched from 2x to 1x scaling; EXT is unchanged; GONE was unplugged.
+        let live = vec![
+            monitor("BUILTIN", 0, 3840, 1.0),
+            monitor("EXT", 3840, 3840, 1.0),
+        ];
+        let plan = plan_geometry_updates(&windows, &live, false);
+        assert_eq!(
+            plan,
+            vec![
+                GeometryUpdate::Place {
+                    monitor_id: "BUILTIN".into(),
+                    logical: (0.0, 0.0, 3840.0, 2160.0),
+                    physical: (0, 0, 3840, 2160),
+                },
+                GeometryUpdate::Place {
+                    monitor_id: "EXT".into(),
+                    logical: (3840.0, 0.0, 3840.0, 2160.0),
+                    physical: (3840, 0, 3840, 2160),
+                },
+                GeometryUpdate::Close {
+                    monitor_id: "GONE".into()
+                },
+            ]
+        );
+        // Unchanged windows are left alone unless the desktop surfaces were recreated.
+        let settled = vec![("EXT".to_string(), live[1].logical_rect())];
+        assert!(plan_geometry_updates(&settled, &live, false).is_empty());
+        assert_eq!(plan_geometry_updates(&settled, &live, true).len(), 1);
+        // A failed monitor query never closes everything.
+        assert!(plan_geometry_updates(&windows, &[], true).is_empty());
+    }
+
+    #[test]
+    fn windows_are_kept_only_while_the_host_shows_them() {
+        let window = WebWindow {
+            label: "wallpaper-A".into(),
+            kind: WebviewKind::Web,
+            wallpaper_id: "w1".into(),
+            audio_reactive: false,
+            loaded: true,
+            paused_sent: None,
+            logical: (0.0, 0.0, 100.0, 100.0),
+            css_size: (100.0, 100.0),
+            last_cursor: None,
+        };
+        let host = WallpaperHost::new();
+        host.set_source(
+            "A",
+            crate::models::WallpaperSource::Workshop {
+                wallpaper_id: "w1".into(),
+            },
+            Some("w1".into()),
+            Default::default(),
+        );
+        host.set_runtime(
+            "A",
+            ActiveRuntime::Webview {
+                kind: WebviewKind::Web,
+                label: "wallpaper-A".into(),
+            },
+            UniversalAdjustments::default(),
+            false,
+        );
+        assert!(window_matches_host(&window, host.monitor("A").as_ref()));
+        // Same monitor now shows a video page: the web window must go.
+        host.set_runtime(
+            "A",
+            ActiveRuntime::Webview {
+                kind: WebviewKind::Video,
+                label: "wallpaper-A".into(),
+            },
+            UniversalAdjustments::default(),
+            false,
+        );
+        assert!(!window_matches_host(&window, host.monitor("A").as_ref()));
+        host.ensure_photo_runtime("A");
+        assert!(!window_matches_host(&window, host.monitor("A").as_ref()));
+        assert!(!window_matches_host(&window, None));
+    }
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-steam-logout"
+description = "Enables the steam_logout command without any pre-configured scope."
+commands.allow = ["steam_logout"]
+
+[[permission]]
+identifier = "deny-steam-logout"
+description = "Denies the steam_logout command without any pre-configured scope."
+commands.deny = ["steam_logout"]

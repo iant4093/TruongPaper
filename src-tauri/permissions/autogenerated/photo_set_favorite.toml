@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-photo-set-favorite"
+description = "Enables the photo_set_favorite command without any pre-configured scope."
+commands.allow = ["photo_set_favorite"]
+
+[[permission]]
+identifier = "deny-photo-set-favorite"
+description = "Denies the photo_set_favorite command without any pre-configured scope."
+commands.deny = ["photo_set_favorite"]

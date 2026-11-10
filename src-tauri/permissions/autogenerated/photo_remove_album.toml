@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-photo-remove-album"
+description = "Enables the photo_remove_album command without any pre-configured scope."
+commands.allow = ["photo_remove_album"]
+
+[[permission]]
+identifier = "deny-photo-remove-album"
+description = "Denies the photo_remove_album command without any pre-configured scope."
+commands.deny = ["photo_remove_album"]

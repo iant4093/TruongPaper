@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Type-check & frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            bundles: app,dmg
+          - name: Windows
+            os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          base=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
+          echo "version=${base}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+
+      - name: Bundle DepotDownloader sidecar
+        # Sidecars must exist before tauri-build validates the bundle configuration.
+        working-directory: .
+        run: node scripts/bundle-depotdownloader.mjs
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --workspace --locked
+
+      - name: Windows desktop wallpaper smoke test
+        if: matrix.os == 'windows-latest'
+        working-directory: src-tauri
+        env:
+          TRUONGPAPER_SMOKE_PROBE: "1"
+        run: cargo run --example wallpaper_smoke
+
+      - name: Build installers
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          VERSION: ${{ steps.version.outputs.version }}
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          # Signed updater archives need the private key (absent on fork PRs).
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then updater=true; else updater=false; fi
+          npx tauri build --bundles "$BUNDLES" \
+            --config "{\"version\":\"$VERSION\",\"bundle\":{\"createUpdaterArtifacts\":$updater}}"
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          b=src-tauri/target/release/bundle
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cp "$b"/dmg/*.dmg release-assets/TruongPaper-macOS.dmg
+            if [ -f "$b/macos/TruongPaper.app.tar.gz.sig" ]; then
+              cp "$b/macos/TruongPaper.app.tar.gz" release-assets/TruongPaper-macOS.app.tar.gz
+              cp "$b/macos/TruongPaper.app.tar.gz.sig" release-assets/TruongPaper-macOS.app.tar.gz.sig
+            fi
+          else
+            setup=$(ls "$b"/nsis/*-setup.exe | head -1)
+            cp "$setup" release-assets/TruongPaper-Windows-Setup.exe
+            if [ -f "$setup.sig" ]; then cp "$setup.sig" release-assets/TruongPaper-Windows-Setup.exe.sig; fi
+          fi
+          ls -la release-assets
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers-${{ matrix.name }}
+          path: release-assets/
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history + tags, for release notes since the previous release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Release notes from commit messages
+        shell: bash
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)
+          range="${prev:+$prev..}HEAD"
+          git log "$range" --no-merges --pretty='- %s' -n 60 \
+            | grep -viE '^- (merge|wip|bump version)\b' > release-notes.txt || true
+          [ -s release-notes.txt ] || echo "- Maintenance release" > release-notes.txt
+          {
+            echo "## What's new"
+            echo
+            cat release-notes.txt
+            echo
+            if [ -n "$prev" ]; then
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_SHA::7}"
+            else
+              echo "Built from ${GITHUB_SHA::7}."
+            fi
+          } > release-body.md
+          cat release-body.md
+
+      - name: Compose updater manifest and checksums
+        shell: bash
+        run: |
+          base=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
+          version="${base}.${GITHUB_RUN_NUMBER}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          VERSION="$version" node -e '
+            const fs = require("fs");
+            const v = process.env.VERSION;
+            const url = (f) => `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/v${v}/${f}`;
+            const sig = (f) => fs.readFileSync(`release-assets/${f}.sig`, "utf8").trim();
+            const platforms = {};
+            if (fs.existsSync("release-assets/TruongPaper-macOS.app.tar.gz.sig"))
+              platforms["darwin-aarch64"] = { signature: sig("TruongPaper-macOS.app.tar.gz"), url: url("TruongPaper-macOS.app.tar.gz") };
+            if (fs.existsSync("release-assets/TruongPaper-Windows-Setup.exe.sig"))
+              platforms["windows-x86_64"] = { signature: sig("TruongPaper-Windows-Setup.exe"), url: url("TruongPaper-Windows-Setup.exe") };
+            const notes = fs.readFileSync("release-notes.txt", "utf8").trim() || `TruongPaper ${v}`;
+            const manifest = { version: v, notes, pub_date: new Date().toISOString(), platforms };
+            fs.writeFileSync("release-assets/latest.json", JSON.stringify(manifest, null, 2));
+            console.log(Object.keys(platforms));
+          '
+          rm -f release-assets/*.sig
+          (cd release-assets && sha256sum -- * > SHA256SUMS)
+          ls -la release-assets
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "TruongPaper ${VERSION}" \
+            --notes-file release-body.md \
+            --latest

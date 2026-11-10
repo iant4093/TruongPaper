@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-steam-sync-local-folders"
+description = "Enables the steam_sync_local_folders command without any pre-configured scope."
+commands.allow = ["steam_sync_local_folders"]
+
+[[permission]]
+identifier = "deny-steam-sync-local-folders"
+description = "Denies the steam_sync_local_folders command without any pre-configured scope."
+commands.deny = ["steam_sync_local_folders"]

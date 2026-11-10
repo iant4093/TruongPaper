@@ -1,0 +1,28 @@
+[package]
+name = "truongpaper-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+truongpaper-core = { path = "../truongpaper-core" }
+truongpaper-we-formats = { path = "../truongpaper-we-formats" }
+anyhow.workspace = true
+thiserror.workspace = true
+http.workspace = true
+percent-encoding.workspace = true
+raw-window-handle.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-graphics.workspace = true
+core-graphics.workspace = true
+core-foundation.workspace = true

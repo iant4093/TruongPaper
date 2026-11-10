@@ -1,0 +1,145 @@
+[package]
+name = "truongpaper"
+version = "1.0.0"
+description = "TruongPaper — dynamic desktop wallpaper engine & Ian Truong Photography API client"
+authors = ["Ian Truong"]
+edition = "2021"
+
+[lib]
+name = "truongpaper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/truongpaper-core",
+    "crates/truongpaper-photo-api",
+    "crates/truongpaper-steam",
+    "crates/truongpaper-we-formats",
+    "crates/truongpaper-renderer",
+    "crates/truongpaper-scenescript",
+    "crates/truongpaper-audio",
+    "crates/truongpaper-platform",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+truongpaper-core = { path = "crates/truongpaper-core" }
+truongpaper-photo-api = { path = "crates/truongpaper-photo-api" }
+truongpaper-steam = { path = "crates/truongpaper-steam" }
+truongpaper-we-formats = { path = "crates/truongpaper-we-formats" }
+truongpaper-renderer = { path = "crates/truongpaper-renderer" }
+truongpaper-scenescript = { path = "crates/truongpaper-scenescript" }
+truongpaper-audio = { path = "crates/truongpaper-audio" }
+truongpaper-platform = { path = "crates/truongpaper-platform" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+keyring.workspace = true
+wgpu.workspace = true
+pollster = "0.4"
+tauri.workspace = true
+tauri-plugin-shell.workspace = true
+tauri-plugin-dialog.workspace = true
+tauri-plugin-autostart.workspace = true
+tauri-plugin-updater.workspace = true
+tauri-plugin-process.workspace = true
+tauri-plugin-single-instance.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+
+[workspace.dependencies]
+tokio = { version = "1.42", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+arc-swap = "1.7"
+crossbeam-channel = "0.5"
+rand = "0.8"
+url = "2.5"
+http = "1.2"
+percent-encoding = "2.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
+wgpu = "23.0"
+naga = { version = "23.0", features = ["glsl-in", "wgsl-out", "spv-out"] }
+bytemuck = { version = "1.20", features = ["derive"] }
+glam = { version = "0.29", features = ["bytemuck", "serde"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tga"] }
+imagesize = "0.13"
+lz4_flex = "0.11"
+memmap2 = "0.9"
+rustfft = "6.2"
+cpal = "0.15"
+kira = "0.9"
+rquickjs = { version = "0.8", features = ["bindgen", "classes", "array-buffer", "loader"] }
+keyvalues-parser = "0.2"
+notify = { version = "8.0", default-features = false, features = ["macos_fsevent"] }
+raw-window-handle = "0.6"
+tauri = { version = "2.2", features = ["macos-private-api", "tray-icon", "protocol-asset"] }
+tauri-plugin-shell = "2.2"
+tauri-plugin-dialog = "2.2"
+tauri-plugin-autostart = "2.2"
+tauri-plugin-updater = "2.2"
+tauri-plugin-process = "2.2"
+tauri-plugin-single-instance = "2.2"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemServices",
+    "Win32_Media_Audio",
+    "Win32_UI_Shell",
+] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-graphics = "0.3"
+core-graphics = "0.25"
+core-foundation = "0.10"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# Proc-macros are dlopen'ed at compile time; stripping them breaks loading on macOS.
+[profile.release.build-override]
+strip = false

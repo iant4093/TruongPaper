@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-photo-trigger-refill"
+description = "Enables the photo_trigger_refill command without any pre-configured scope."
+commands.allow = ["photo_trigger_refill"]
+
+[[permission]]
+identifier = "deny-photo-trigger-refill"
+description = "Denies the photo_trigger_refill command without any pre-configured scope."
+commands.deny = ["photo_trigger_refill"]

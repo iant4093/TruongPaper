@@ -1,0 +1,89 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TruongPaper",
+  "version": "1.0.0",
+  "identifier": "com.iantruong.truongpaper",
+  "build": {
+    "beforeDevCommand": "npm run bundle:depotdownloader && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run bundle:depotdownloader && npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "TruongPaper",
+        "url": "index.html",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 640,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "center": true,
+        "theme": "Dark"
+      },
+      {
+        "label": "tray-popover",
+        "title": "TruongPaper Quick Controls",
+        "url": "tray.html",
+        "width": 360,
+        "height": 480,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost https://*.iantruongphotography.com https://*.cloudfront.net https://*.steamstatic.com https://*.akamaihd.net data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://photos-api.iantruongphotography.com https://iantruongphotography.com https://api.steampowered.com",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/TruongPaper/**",
+          "$APPDATA/wallpapers/**",
+          "$HOME/Library/Application Support/com.iantruong.truongpaper/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Dynamic desktop wallpaper engine & Ian Truong Photography API client",
+    "externalBin": [
+      "bin/DepotDownloader"
+    ],
+    "resources": {
+      "bin/licenses/": "sidecar-licenses/"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "-",
+      "entitlements": "./Entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_MINISIGN_PUBKEY_FROM_TAURI_SIGNER_GENERATE",
+      "endpoints": [
+        "https://github.com/iant4093/TruongPaper/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

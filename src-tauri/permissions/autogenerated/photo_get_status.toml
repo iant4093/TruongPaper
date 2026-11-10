@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-photo-get-status"
+description = "Enables the photo_get_status command without any pre-configured scope."
+commands.allow = ["photo_get_status"]
+
+[[permission]]
+identifier = "deny-photo-get-status"
+description = "Denies the photo_get_status command without any pre-configured scope."
+commands.deny = ["photo_get_status"]

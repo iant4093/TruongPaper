@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-steam-inspect-url"
+description = "Enables the steam_inspect_url command without any pre-configured scope."
+commands.allow = ["steam_inspect_url"]
+
+[[permission]]
+identifier = "deny-steam-inspect-url"
+description = "Denies the steam_inspect_url command without any pre-configured scope."
+commands.deny = ["steam_inspect_url"]

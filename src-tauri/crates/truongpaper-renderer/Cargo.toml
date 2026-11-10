@@ -1,0 +1,18 @@
+[package]
+name = "truongpaper-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+truongpaper-core = { path = "../truongpaper-core" }
+truongpaper-we-formats = { path = "../truongpaper-we-formats" }
+anyhow.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+naga.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+image.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true

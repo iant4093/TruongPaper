@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-runtime-shutdown-for-update"
+description = "Enables the runtime_shutdown_for_update command without any pre-configured scope."
+commands.allow = ["runtime_shutdown_for_update"]
+
+[[permission]]
+identifier = "deny-runtime-shutdown-for-update"
+description = "Denies the runtime_shutdown_for_update command without any pre-configured scope."
+commands.deny = ["runtime_shutdown_for_update"]

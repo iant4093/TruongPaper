@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallpaper-apply-preset"
+description = "Enables the wallpaper_apply_preset command without any pre-configured scope."
+commands.allow = ["wallpaper_apply_preset"]
+
+[[permission]]
+identifier = "deny-wallpaper-apply-preset"
+description = "Denies the wallpaper_apply_preset command without any pre-configured scope."
+commands.deny = ["wallpaper_apply_preset"]

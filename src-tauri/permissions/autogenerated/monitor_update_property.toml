@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-monitor-update-property"
+description = "Enables the monitor_update_property command without any pre-configured scope."
+commands.allow = ["monitor_update_property"]
+
+[[permission]]
+identifier = "deny-monitor-update-property"
+description = "Denies the monitor_update_property command without any pre-configured scope."
+commands.deny = ["monitor_update_property"]

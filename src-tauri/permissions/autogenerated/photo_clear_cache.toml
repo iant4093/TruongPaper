@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-photo-clear-cache"
+description = "Enables the photo_clear_cache command without any pre-configured scope."
+commands.allow = ["photo_clear_cache"]
+
+[[permission]]
+identifier = "deny-photo-clear-cache"
+description = "Denies the photo_clear_cache command without any pre-configured scope."
+commands.deny = ["photo_clear_cache"]

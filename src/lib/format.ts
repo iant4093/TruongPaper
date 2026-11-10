@@ -31,11 +31,11 @@ export function toAssetUrl(pathOrUrl: string | null | undefined): string | null 
 }
 
 export const WALLPAPER_TYPE_LABEL: Record<WallpaperType, string> = {
-  photo: 'PHOTO',
-  scene: 'SCENE',
-  video: 'VIDEO',
-  web: 'WEB',
-  application: 'EXE (Windows Only)',
+  photo: 'Photo',
+  scene: 'Scene',
+  video: 'Video',
+  web: 'Web',
+  application: 'Application',
 };
 
 /** Wallpaper Engine Workshop items carry their type as a tag ("Scene", "Video", "Web", "Application"). */

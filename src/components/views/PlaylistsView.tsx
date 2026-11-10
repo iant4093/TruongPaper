@@ -257,8 +257,8 @@ export const PlaylistsView: React.FC = () => {
           onChange={(next) => void updateSettings({ rotationIntervalSeconds: Number(next) })}
         />
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 12 }}>
-          Global hotkey for Next Wallpaper: <code style={{ fontFamily: 'var(--font-mono)' }}>Cmd+Shift+N</code> (macOS) /{' '}
-          <code style={{ fontFamily: 'var(--font-mono)' }}>Ctrl+Shift+N</code> (Windows)
+          Photo rotation runs on this timer, at launch, and after wake. Choose Never for manual-only rotation.
+          Playlists use their own saved interval.
         </div>
       </div>
 

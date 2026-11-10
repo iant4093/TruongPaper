@@ -95,7 +95,12 @@ mod tests {
         let b = serve(Some(&host), "wallpaper-B", req("clip.mp4", None));
         assert_eq!(b.body().as_ref(), b"abc");
         let a = serve(Some(&host), "wallpaper-A", req("clip.mp4", None));
-        assert_eq!(a.body().as_ref(), b"0123456789");
+        assert_eq!(a.status(), StatusCode::NOT_FOUND);
+        host.unmount_if("workshop:2");
+        assert_eq!(
+            serve(Some(&host), "wallpaper-B", req("clip.mp4", None)).status(),
+            StatusCode::NOT_FOUND
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1047,6 +1047,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_monitor_applies_lock_unique_ids_in_stable_order() {
+        use crate::commands::monitor::lock_monitor_applies;
+        let guards = lock_monitor_applies(["CLONE-B", "CLONE-A", "CLONE-B"]).await;
+        assert_eq!(guards.len(), 2);
+        let pending = tokio::spawn(async { lock_monitor_applies(["CLONE-A", "CLONE-B"]).await });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        drop(guards);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn monitor_applies_are_serialized_per_monitor() {
         let a = lock_monitor_apply("SERIAL-A").await;
         // Another monitor is independent.

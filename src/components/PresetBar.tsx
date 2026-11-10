@@ -27,9 +27,9 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
   };
 
   return (
-    <div className="glass-panel" style={{ padding: 12, marginBottom: 12 }}>
+    <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
       <select
-        className="glass-button"
+        className="button"
         aria-label="Preset"
         style={{ width: '100%', fontSize: 12 }}
         value={selected}
@@ -53,10 +53,10 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
           onChange={(e) => setName(e.target.value)}
           placeholder="Save current as preset…"
           aria-label="Preset name"
-          className="glass-button"
+          className="button"
           style={{ flex: 1, textAlign: 'left', cursor: 'text', fontSize: 12, padding: '6px 10px' }}
         />
-        <button type="submit" className="glass-button" aria-label="Save preset" style={{ padding: '6px 10px' }}>
+        <button type="submit" className="button" aria-label="Save preset" style={{ padding: '6px 10px' }}>
           <Save size={12} />
         </button>
       </form>

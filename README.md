@@ -4,7 +4,7 @@
 
 # TruongPaper
 
-A native macOS and Windows desktop wallpaper engine built in Rust and WebGPU that combines the [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with full Steam Workshop & Wallpaper Engine compatibility inside a unified Apple Liquid Glass interface.
+A native macOS and Windows desktop wallpaper engine built in Rust and WebGPU that combines the [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with Steam Workshop downloads & experimental Wallpaper Engine compatibility inside a unified simple dark interface.
 
 [Download for macOS](https://github.com/iant4093/TruongPaper/releases/latest/download/TruongPaper-macOS.dmg) · [Download for Windows](https://github.com/iant4093/TruongPaper/releases/latest/download/TruongPaper-Windows-Setup.exe) · [Releases](https://github.com/iant4093/TruongPaper/releases) · [Build status](https://github.com/iant4093/TruongPaper/actions) · [Report an issue](https://github.com/iant4093/TruongPaper/issues)
 
@@ -22,15 +22,15 @@ A native macOS and Windows desktop wallpaper engine built in Rust and WebGPU tha
 
 ---
 
-TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in an Apple Liquid Glass interface that looks identical on macOS and Windows.
+TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in an simple dark interface that looks identical on macOS and Windows.
 
 ## Screenshots
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/studio-library.webp" width="100%" alt="TruongPaper main Liquid Glass studio window showing unified library, top paste omnibar, active 5-photo queue and live property inspector">
-      <p align="center"><sub><b>Liquid Glass Studio</b> · unified library, paste omnibar and live inspector</sub></p>
+      <img src="docs/screenshots/studio-library.webp" width="100%" alt="TruongPaper main dark studio window showing unified library, top paste omnibar, active 5-photo queue and live property inspector">
+      <p align="center"><sub><b>Wallpaper Library</b> · unified library, paste omnibar and live inspector</sub></p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/screenshots/photos-api.webp" width="100%" alt="Ian Truong Photography API studio view showing saved albums, featured filter, 5-photo offline queue, cache slider and history controls">
@@ -81,24 +81,24 @@ TruongPaper renders live, audio-reactive and high-resolution photographic wallpa
 **Scene, Video, Web & Application Runtimes**
 
 - **Scene wallpapers**: native Rust `.pkg` (`PKGV0001`–`PKGV0022+`) memory-mapped archive reader, `.tex` (`TEXV0005` / `TEXB0001`–`TEXB0004` / `TEXS0001`–`TEXS0003`) LZ4/DXT1/DXT3/DXT5/RG88/R8/MP4 texture decoder, 4-layer Virtual File System, HLSL/GLSL-to-WGSL shader preprocessor, multi-pass FBO effects, GPU/SIMD particle systems, `.mdl` skeletal puppet warp, and an embedded `rquickjs` SceneScript runtime (`init`, `update`, `cursorMove`, `applyUserProperties`, `engine.registerAudioBuffers`)
-- **Video wallpapers**: hardware-accelerated looping playback (`VideoToolbox` on macOS, `D3D11VA` on Windows) for MP4, WebM, MKV and MOV with gapless loop, playback speed (`0.1x`–`3.0x`) and volume control
+- **Video wallpapers**: looping playback through WKWebView / WebView2 (codec support depends on the platform), plus AVFoundation decoding for embedded scene videos on macOS with gapless loop, playback speed (`0.1x`–`3.0x`) and volume control
 - **Web wallpapers**: embedded `wry` desktop WebView with `window.wallpaperPropertyListener` and 60 Hz 128-band stereo `window.wallpaperRegisterAudioListener` injection
 - **Application wallpapers** (Windows): launches Windows application wallpapers with desktop bounds; flagged as `Windows Only` on macOS
 
 **Inspector, Audio Reactivity & Desktop Interaction**
 
-- Dynamic `project.json` inspector: automatically generates Liquid Glass sliders, switches, color pickers, dropdowns, text inputs and file pickers for every wallpaper property, evaluating visibility `condition` expressions and localization tables in real time
+- Dynamic `project.json` inspector: automatically generates sliders, switches, color pickers, dropdowns, text inputs and file pickers for every wallpaper property, evaluating visibility `condition` expressions and localization tables in real time
 - Universal per-wallpaper adjustments (Volume, Playback Speed, Fit Mode, Zoom/Offset, Brightness, Contrast, Saturation, Hue Shift) and named user presets
 - System audio loopback + 2048-point Hann-windowed FFT (`WASAPI Loopback` on Windows, `CoreAudio Tap` / input capture on macOS) driving 16-, 32- and 64-band logarithmic stereo spectrums at 60 Hz
 - Passive desktop cursor forwarding: tracks cursor movement and clicks over unoccluded desktop regions without stealing clicks from Finder or Windows desktop icons
 
 **Multi-Monitor, GPU Transitions & Smart Pause**
 
-- Independent per-monitor wallpapers, Clone across all displays, or Span a single canvas across all monitors, with full support for both classic Windows 10/11 `WorkerW` and Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP`) raised layered desktops
+- Independent per-monitor wallpapers, Clone across all displays, with platform support for both classic Windows 10/11 `WorkerW` and Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP`) raised layered desktops
 - Smart orientation matching: skips portrait photos on landscape monitors (and vice-versa) by default, or displays mismatched aspect ratios over a dual-pass Kawase GPU-blurred ambient backdrop (`Fit + Blur`)
 - Custom `wgpu` transitions: **Smooth Crossfade**, **Blur-Dissolve**, and **Liquid Glass Morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
-- Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`), on app launch, on display wake, or via global hotkey
-- Smart pause & battery saver: drops to 0% GPU/CPU and mutes audio when a fullscreen game or maximized window covers a monitor, when running on laptop battery / Low Power Mode, or when the screen locks or sleeps
+- Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`), on app launch, on display wake
+- Smart pause & battery saver: suspends animation and FFT work and mutes audio when a fullscreen game or maximized window covers a monitor, when running on laptop battery / Low Power Mode, or when the screen locks or sleeps
 
 ## Install
 
@@ -121,7 +121,7 @@ Installed copies check for a new version once a day (or from **Settings › Abou
 | Area | Technologies |
 |---|---|
 | App shell | Tauri 2 (Rust), WKWebView on macOS, WebView2 on Windows |
-| Interface | React 19, TypeScript, Vite, Framer Motion, Zustand, lucide-react, custom cross-platform Apple Liquid Glass SVG/CSS refraction system |
+| Interface | React 19, TypeScript, Vite, Framer Motion, Zustand, lucide-react, custom cross-platform Apple neutral dark theme |
 | Desktop & GPU Engine | `wgpu` (Metal on macOS, DirectX 12 / Vulkan on Windows), `naga` (GLSL/WGSL shader translation), Win32 `Progman`/`WorkerW` (23H2 & 24H2) and macOS `NSWindow` (`kCGDesktopWindowLevel`) |
 | Wallpaper Engine Formats | Custom Rust `.pkg` memory-mapped VFS, `.tex` decoder (`lz4_flex`, BC1/BC2/BC3, RG88, R8, RGBA8, MP4 streams), `.mdl` puppet mesh deformer, `rquickjs` SceneScript sandbox |
 | Steam Workshop | Bundled checksum-verified `DepotDownloader` v3.4.0 sidecar, Steam Web API metadata client, `notify` local `431960` folder watcher, OS Keychain (`keyring`) |
@@ -179,7 +179,7 @@ Pull requests and pushes to `main` run:
 2. macOS and Windows builds: `DepotDownloader` sidecar bundling, Rust tests and installer packaging.
 3. A Windows wallpaper smoke test that initializes a `wgpu` adapter, compiles the compositor shaders and locates the `Progman` desktop window, failing the build if either step breaks.
 
-After all builds pass, pushes to `main` (and manual runs on `main`) publish a GitHub Release `v<major>.<minor>.<run number>` containing `TruongPaper-macOS.dmg`, `TruongPaper-Windows-Setup.exe`, the macOS updater archive (`TruongPaper-macOS.app.tar.gz`), `latest.json` (with the update signatures) and `SHA256SUMS`. The release notes are generated from the commit messages since the previous release, and the same list appears in the app's update prompt. Installed apps pick up the new version through `latest.json`. Pull requests never publish.
+Pushes to `main` produce test installers in the Actions artifacts. After desktop acceptance testing, manually run **CI** on `main` with **publish** enabled to publish a GitHub Release `v<major>.<minor>.<run number>` containing `TruongPaper-macOS.dmg`, `TruongPaper-Windows-Setup.exe`, the macOS updater archive (`TruongPaper-macOS.app.tar.gz`), `latest.json` (with the update signatures) and `SHA256SUMS`. The release notes are generated from the commit messages since the previous release, and the same list appears in the app's update prompt. Installed apps pick up the new version through `latest.json`. Pull requests and ordinary pushes never publish.
 
 The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Builds without it (such as fork pull requests) still produce installers, just without update signatures. GitHub Actions are pinned to commit SHAs, and Dependabot checks them weekly.
 
@@ -187,7 +187,7 @@ The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository 
 
 ```text
 .
-├── src/                    React app (Liquid Glass Studio & Menu Bar / Tray Popover)
+├── src/                    React app (Wallpaper Library & Menu Bar / Tray Popover)
 │   ├── components/         Studio views (views/), PropertyInspector, Omnibar, LiquidGlassFilters,
 │   │                       AmbientBacklightCanvas, Steam sign-in and Workshop preview modals
 │   ├── services/           Signed auto-updater client (updates.ts)

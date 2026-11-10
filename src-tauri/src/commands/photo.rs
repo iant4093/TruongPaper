@@ -6,7 +6,7 @@
 //! are provided by `truongpaper-photo-api` / `truongpaper-core` and reused here. Those helpers
 //! bind every value as a SQL parameter instead of interpolating strings.
 
-use crate::commands::monitor::live_monitor_orientations;
+use crate::commands::monitor::{live_monitor_orientations, lock_monitor_applies};
 use crate::host::WallpaperHost;
 use crate::models::{
     IpcTransitionType, WallpaperChangedPayload, WallpaperSource, EVENT_PHOTO_QUEUE_UPDATED,
@@ -296,26 +296,67 @@ pub(crate) async fn rotate_photo_next(
     state: &PhotoServiceState,
     monitor_id: Option<String>,
 ) -> Result<PhotoItem, String> {
+    let live = live_monitor_orientations(app);
+    let assigned = crate::db::monitor_sources(&state.db.lock())?;
+    let targets = select_rotation_targets(&live, &assigned, monitor_id.as_deref());
+    // Acquire every target in stable order, including clone-mode draws. Re-read the source
+    // after waiting: a queued photo command must not overwrite a Workshop apply.
+    let _apply = lock_monitor_applies(targets.iter().map(|(id, _)| id.as_str())).await;
+    let current = crate::db::monitor_sources(&state.db.lock())?;
+    let host = app.try_state::<AppState>().map(|s| Arc::clone(&s.host));
+    let targets = targets
+        .into_iter()
+        .filter(|(id, _)| {
+            let source = current.get(id).cloned().unwrap_or_default();
+            let unchanged = assigned.get(id).cloned().unwrap_or_default() == source;
+            let photo_runtime = host
+                .as_ref()
+                .and_then(|h| h.monitor(id))
+                .is_some_and(|rt| matches!(rt.active, crate::host::ActiveRuntime::Photo { .. }));
+            unchanged && photo_rotation_allowed(&source, monitor_id.is_some(), photo_runtime)
+        })
+        .collect();
+    rotate_photo_targets(app, state, monitor_id, targets).await
+}
+
+/// Only called by `show_photo` while its caller holds this monitor's apply lock.
+pub(crate) async fn rotate_photo_for_locked_monitor(
+    app: &AppHandle,
+    state: &PhotoServiceState,
+    monitor_id: &str,
+) -> Result<PhotoItem, String> {
+    let live = live_monitor_orientations(app);
+    let targets = select_rotation_targets(&live, &HashMap::new(), Some(monitor_id));
+    rotate_photo_targets(app, state, Some(monitor_id.to_string()), targets).await
+}
+
+fn photo_rotation_allowed(source: &WallpaperSource, explicit: bool, photo_runtime: bool) -> bool {
+    matches!(source, WallpaperSource::PhotoApi)
+        || (explicit && photo_runtime && matches!(source, WallpaperSource::Playlist { .. }))
+}
+
+async fn rotate_photo_targets(
+    app: &AppHandle,
+    state: &PhotoServiceState,
+    monitor_id: Option<String>,
+    target_monitors: Vec<(String, bool)>,
+) -> Result<PhotoItem, String> {
+    if target_monitors.is_empty() {
+        return Err("No monitor is showing the Photos API source".into());
+    }
     let (_, mut base_filter, max_cache_bytes, mut displayed_ids) =
         state.load_active_filter(None)?;
     let host = app.try_state::<AppState>().map(|s| Arc::clone(&s.host));
-
-    let live = live_monitor_orientations(app);
-    let (skip_mismatched, multi_monitor_mode, target_monitors) = {
+    let (skip_mismatched, multi_monitor_mode) = {
         let conn = state.db.lock();
         let skip: bool = get_setting(&conn, SETTING_SKIP_MISMATCHED_ORIENTATION)
             .map_err(e)?
             .unwrap_or(true);
-        let mm_mode: String = get_setting(&conn, SETTING_MULTI_MONITOR_MODE)
+        let mode: String = get_setting(&conn, SETTING_MULTI_MONITOR_MODE)
             .map_err(e)?
             .unwrap_or_else(|| "independent".to_string());
-        let assigned = crate::db::monitor_sources(&conn)?;
-        let targets = select_rotation_targets(&live, &assigned, monitor_id.as_deref());
-        (skip, mm_mode, targets)
+        (skip, mode)
     };
-    if target_monitors.is_empty() {
-        return Err("No monitor is showing the Photos API source".into());
-    }
 
     let mut last_applied_item: Option<PhotoItem> = None;
 
@@ -717,6 +758,25 @@ mod tests {
             Client::new(),
             Arc::new(Mutex::new(AppSettings::default())),
         )
+    }
+
+    #[test]
+    fn photo_rotation_does_not_replace_workshop_or_playlist_scene() {
+        let workshop = WallpaperSource::Workshop {
+            wallpaper_id: "w".into(),
+        };
+        let playlist = WallpaperSource::Playlist {
+            playlist_id: "p".into(),
+        };
+        assert!(!photo_rotation_allowed(&workshop, true, true));
+        assert!(!photo_rotation_allowed(&playlist, true, false));
+        assert!(!photo_rotation_allowed(&playlist, false, true));
+        assert!(photo_rotation_allowed(&playlist, true, true));
+        assert!(photo_rotation_allowed(
+            &WallpaperSource::PhotoApi,
+            false,
+            false
+        ));
     }
 
     #[test]

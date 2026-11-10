@@ -1,5 +1,6 @@
 // src/components/UniversalOmnibar.tsx
 import React, { useEffect, useState } from 'react';
+import { Link2, Plus } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 
 export type ParsedOmnibarTarget =
@@ -104,27 +105,15 @@ export const UniversalOmnibar: React.FC = () => {
         e.preventDefault();
         void handleResolvedInput(input);
       }}
-      style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}
+      className="omnibar"
     >
-      <input
-        type="text"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        placeholder="Paste Steam Workshop URL / ID or Ian's Photo Album URL / Slug (Cmd/Ctrl+V anywhere)..."
-        className="glass-button"
-        style={{
-          flex: 1,
-          justifyContent: 'flex-start',
-          textAlign: 'left',
-          padding: '10px 16px',
-          cursor: 'text',
-        }}
-      />
-      <button type="submit" className="glass-button glass-button-primary">
-        + Import
-      </button>
+      <div className="omnibar-field">
+        <Link2 size={15} aria-hidden="true" />
+        <input type="text" aria-label="Import a Workshop wallpaper or photo album" value={input} onChange={(e) => setInput(e.target.value)} placeholder="Paste Steam Workshop URL or photo album link…" />
+      </div>
+      <button type="submit" className="button"><Plus size={14} />Import</button>
       {statusMsg && (
-        <span style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+        <span className="omnibar-status" role="status">
           {statusMsg}
         </span>
       )}

@@ -48,8 +48,36 @@ pub struct SceneDescriptor {
     pub core_assets_dir: PathBuf,
     /// `project.json` `file` (usually `scene.json`).
     pub scene_file: String,
+    /// Metadata revision of scene assets, refreshed on apply (properties remain live).
+    pub content_revision: u64,
     /// JSON object `{ key: value }` of every user property (project defaults + overrides).
     pub user_properties_json: String,
+}
+
+/// Detect changed/deleted/replaced assets without hashing large media files on the render
+/// thread. Called on a blocking worker when applying a scene. Symlinks are not followed.
+pub(crate) fn scene_content_revision(roots: &[PathBuf]) -> std::io::Result<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut files = Vec::new();
+    let mut pending = roots.to_vec();
+    while let Some(path) = pending.pop() {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else {
+            files.push((path, metadata.len(), metadata.modified().ok()));
+        }
+    }
+    files.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    files.hash(&mut hasher);
+    Ok(hasher.finish())
 }
 
 /// The live runtime a monitor is showing.
@@ -393,13 +421,18 @@ impl WallpaperHost {
             .insert(label.to_string(), (wallpaper_id.to_string(), vfs));
     }
 
-    /// The VFS `wpe://` serves to webview `label`: its own wallpaper's VFS, else the active one.
+    /// Wallpaper windows only read their own mount. Studio windows can use the active mount.
     pub fn vfs_for_webview(&self, label: &str) -> Option<Arc<WeVirtualFileSystem>> {
         self.webview_vfs
             .read()
             .get(label)
             .map(|(_, v)| Arc::clone(v))
-            .or_else(|| self.active_vfs())
+            // A stale/deleted wallpaper window must never inherit another wallpaper's files.
+            .or_else(|| {
+                (!label.starts_with("wallpaper-"))
+                    .then(|| self.active_vfs())
+                    .flatten()
+            })
     }
 
     pub fn active_vfs(&self) -> Option<Arc<WeVirtualFileSystem>> {
@@ -580,6 +613,7 @@ mod tests {
             install_dir: PathBuf::from("/w/1"),
             core_assets_dir: PathBuf::from("/core"),
             scene_file: "scene.json".into(),
+            content_revision: 0,
             user_properties_json: "{}".into(),
         })
     }
@@ -757,16 +791,10 @@ mod tests {
         ));
         // Switching the monitor to a scene drops the window's VFS.
         host.set_runtime("A", scene(), UniversalAdjustments::default(), false);
-        assert!(Arc::ptr_eq(
-            &host.vfs_for_webview("wallpaper-A").unwrap(),
-            &vs
-        ));
+        assert!(host.vfs_for_webview("wallpaper-A").is_none());
 
         host.unmount_if("wb");
-        assert!(Arc::ptr_eq(
-            &host.vfs_for_webview("wallpaper-B").unwrap(),
-            &vs
-        ));
+        assert!(host.vfs_for_webview("wallpaper-B").is_none());
         host.set_webview_vfs("wallpaper-B", "wb", vb);
         host.shutdown();
         assert!(host.vfs_for_webview("wallpaper-B").is_none());

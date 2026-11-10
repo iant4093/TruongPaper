@@ -86,7 +86,7 @@ export const SettingsView: React.FC = () => {
 
   if (!settings) {
     return (
-      <div>
+      <div className="settings-view">
         <ViewHeader title="Settings" />
         <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading settings…</div>
       </div>
@@ -94,11 +94,11 @@ export const SettingsView: React.FC = () => {
   }
 
   return (
-    <div>
+    <div className="settings-view">
       <ViewHeader title="Settings" subtitle={version ? `TruongPaper v${version}` : undefined} />
 
       <SectionTitle>Performance</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <div style={{ fontSize: 13, marginBottom: 8 }}>Frame rate cap</div>
         <SegmentedControl
           value={String(settings.fpsCap)}
@@ -114,7 +114,7 @@ export const SettingsView: React.FC = () => {
       </div>
 
       <SectionTitle>Smart Pause</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <ToggleRow
           label="Pause when a fullscreen app or game is active"
           checked={settings.pauseOnFullscreen}
@@ -134,7 +134,7 @@ export const SettingsView: React.FC = () => {
       </div>
 
       <SectionTitle>Startup</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <ToggleRow
           label="Launch TruongPaper at login"
           checked={settings.launchAtLogin}
@@ -143,23 +143,23 @@ export const SettingsView: React.FC = () => {
       </div>
 
       <SectionTitle>Steam Account</SectionTitle>
-      <div className="glass-card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button type="button" className="glass-button" onClick={openSteamAuthModal}>
+      <div className="card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" className="button" onClick={openSteamAuthModal}>
           <LogIn size={14} /> Sign in to Steam
         </button>
-        <button type="button" className="glass-button" onClick={() => void steamLogout()}>
+        <button type="button" className="button" onClick={() => void steamLogout()}>
           <LogOut size={14} /> Sign Out & Forget Refresh Token
         </button>
       </div>
 
       <SectionTitle>Updates</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button type="button" className="glass-button" disabled={checking} onClick={() => void runCheck()}>
+          <button type="button" className="button" disabled={checking} onClick={() => void runCheck()}>
             <RefreshCw size={14} /> {checking ? 'Checking…' : 'Check for Updates'}
           </button>
           {update && (
-            <button type="button" className="glass-button glass-button-primary" disabled={!!progress} onClick={() => void runInstall()}>
+            <button type="button" className="button button-primary" disabled={!!progress} onClick={() => void runInstall()}>
               <Download size={14} /> Install {update.version} & Restart
             </button>
           )}

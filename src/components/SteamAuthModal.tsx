@@ -66,14 +66,13 @@ export const SteamAuthModal: React.FC = () => {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'rgba(5, 7, 14, 0.65)',
-        backdropFilter: 'blur(12px)',
+        background: 'rgba(0, 0, 0, 0.65)',
       }}
     >
-      <div className="glass-panel" style={{ width: 420, padding: 24 }}>
+      <div className="panel" style={{ width: 420, padding: 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <h3 style={{ margin: 0, fontSize: 18 }}>Sign in to Steam Workshop</h3>
-          <button type="button" className="glass-button" onClick={closeSteamAuthModal}>
+          <button type="button" className="button" onClick={closeSteamAuthModal}>
             Close
           </button>
         </div>
@@ -81,7 +80,7 @@ export const SteamAuthModal: React.FC = () => {
         <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
           <button
             type="button"
-            className={`glass-button ${tab === 'qr' ? 'glass-button-primary' : ''}`}
+            className={`button ${tab === 'qr' ? 'button-primary' : ''}`}
             style={{ flex: 1 }}
             onClick={() => setTab('qr')}
           >
@@ -89,7 +88,7 @@ export const SteamAuthModal: React.FC = () => {
           </button>
           <button
             type="button"
-            className={`glass-button ${tab === 'password' ? 'glass-button-primary' : ''}`}
+            className={`button ${tab === 'password' ? 'button-primary' : ''}`}
             style={{ flex: 1 }}
             onClick={() => setTab('password')}
           >
@@ -138,7 +137,7 @@ export const SteamAuthModal: React.FC = () => {
                   placeholder="Steam Username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="glass-button"
+                  className="button"
                   style={{ width: '100%', textAlign: 'left', cursor: 'text' }}
                   required
                 />
@@ -147,11 +146,11 @@ export const SteamAuthModal: React.FC = () => {
                   placeholder="Steam Password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="glass-button"
+                  className="button"
                   style={{ width: '100%', textAlign: 'left', cursor: 'text' }}
                   required
                 />
-                <button type="submit" className="glass-button glass-button-primary">
+                <button type="submit" className="button button-primary">
                   Sign In
                 </button>
               </form>
@@ -169,12 +168,12 @@ export const SteamAuthModal: React.FC = () => {
                   placeholder={need2Fa.kind === 'email' ? 'Email Steam Guard Code' : 'Authenticator 2FA Code'}
                   value={twoFaCode}
                   onChange={(e) => setTwoFaCode(e.target.value)}
-                  className="glass-button"
+                  className="button"
                   style={{ width: '100%', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 16 }}
                   autoFocus
                   required
                 />
-                <button type="submit" className="glass-button glass-button-primary">
+                <button type="submit" className="button button-primary">
                   Verify Steam Guard Code
                 </button>
               </form>

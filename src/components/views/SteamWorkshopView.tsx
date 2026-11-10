@@ -5,7 +5,7 @@ import { AudioLines, LogIn, LogOut, MonitorSmartphone, RefreshCw, Search, Trash2
 import { useAppStore } from '../../store/useAppStore';
 import { WALLPAPER_TYPE_LABEL } from '../../lib/format';
 import type { WallpaperItem } from '../../types/ipc';
-import { Badge, SectionTitle, SegmentedControl, Thumb, ViewHeader, cardGrid, spotlightHandlers } from '../ui';
+import { Badge, SectionTitle, SegmentedControl, Thumb, ViewHeader, cardGrid } from '../ui';
 
 export type WorkshopFilter =
   | 'all'
@@ -109,25 +109,25 @@ export const SteamWorkshopView: React.FC = () => {
   return (
     <div>
       <ViewHeader
-        title="Steam Workshop Library"
+        title="Workshop"
         subtitle={`${workshopCount} Wallpaper Engine items • ${localCount} from the local Steam library`}
       />
 
       {/* Steam Connection Pill */}
-      <div className="glass-card" style={{ padding: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <div className="card" style={{ padding: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <div style={{ flex: 1, fontSize: 13 }}>
           <div style={{ fontWeight: 600 }}>Steam Account</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
             {syncMsg ?? 'Sign in once to download Workshop items via DepotDownloader.'}
           </div>
         </div>
-        <button type="button" className="glass-button" onClick={openSteamAuthModal}>
+        <button type="button" className="button" onClick={openSteamAuthModal}>
           <LogIn size={14} /> Manage Steam Account
         </button>
-        <button type="button" className="glass-button" onClick={() => void steamLogout()}>
+        <button type="button" className="button" onClick={() => void steamLogout()}>
           <LogOut size={14} /> Sign Out
         </button>
-        <button type="button" className="glass-button glass-button-primary" onClick={() => void runSync()}>
+        <button type="button" className="button button-primary" onClick={() => void runSync()}>
           <RefreshCw size={14} /> Sync Local Steam Library
         </button>
       </div>
@@ -136,7 +136,7 @@ export const SteamWorkshopView: React.FC = () => {
         <>
           <SectionTitle>Downloads</SectionTitle>
           {activeDownloads.map((d) => (
-            <div key={d.workshopId} className="glass-card" style={{ padding: 12, marginBottom: 8 }}>
+            <div key={d.workshopId} className="card" style={{ padding: 12, marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
                 <span>{d.title}</span>
                 <span>{d.state === 'error' ? 'Failed' : `${Math.round(d.progressPercent)}%`}</span>
@@ -162,7 +162,7 @@ export const SteamWorkshopView: React.FC = () => {
 
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', margin: '16px 0', flexWrap: 'wrap' }}>
         <SegmentedControl value={filter} options={FILTERS} onChange={setFilter} />
-        <div className="glass-button" style={{ flex: 1, minWidth: 200, cursor: 'text', justifyContent: 'flex-start' }}>
+        <div className="button" style={{ flex: 1, minWidth: 200, cursor: 'text', justifyContent: 'flex-start' }}>
           <Search size={14} />
           <input
             type="search"
@@ -179,7 +179,7 @@ export const SteamWorkshopView: React.FC = () => {
         {items.map((w) => (
           <div
             key={w.wallpaperId}
-            className="glass-card"
+            className="card"
             role="button"
             tabIndex={0}
             aria-pressed={w.wallpaperId === selectedWallpaperId}
@@ -190,7 +190,7 @@ export const SteamWorkshopView: React.FC = () => {
             }}
             onClick={() => selectWallpaper(w.wallpaperId)}
             onKeyDown={(e) => e.key === 'Enter' && selectWallpaper(w.wallpaperId)}
-            {...spotlightHandlers()}
+
           >
             {/* preview.gif / preview.jpg from the Workshop item (GIF previews animate natively) */}
             <Thumb src={w.previewPath} alt={w.title} height={110} />
@@ -210,7 +210,7 @@ export const SteamWorkshopView: React.FC = () => {
             <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
               <button
                 type="button"
-                className="glass-button glass-button-primary"
+                className="button button-primary"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                 disabled={!activeMonitorId}
                 onClick={(e) => {
@@ -224,7 +224,7 @@ export const SteamWorkshopView: React.FC = () => {
               </button>
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 aria-label={`Delete ${w.title}`}
                 style={{ fontSize: 11, padding: '6px 10px' }}
                 onClick={(e) => {

@@ -166,7 +166,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   };
 
   return (
-    <aside className="glass-panel" style={{ padding: 20, overflowY: 'auto' }}>
+    <aside className="panel" style={{ padding: 20, overflowY: 'auto' }}>
       <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 600 }}>
         {project.title}
       </h3>
@@ -183,7 +183,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
           </div>
           <input
             type="range"
-            className="glass-slider"
+            className="slider"
             min={0}
             max={1}
             step={0.01}
@@ -202,7 +202,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
           </div>
           <input
             type="range"
-            className="glass-slider"
+            className="slider"
             min={0.1}
             max={3.0}
             step={0.05}
@@ -261,7 +261,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 </div>
                 <input
                   type="range"
-                  className="glass-slider"
+                  className="slider"
                   min={min}
                   max={max}
                   step={step}
@@ -323,7 +323,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
               <div key={prop.key} style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
                 <select
-                  className="glass-button"
+                  className="button"
                   style={{ width: '100%' }}
                   value={String(currentVal)}
                   onChange={(e) => void handleChange(prop.key, e.target.value)}
@@ -344,7 +344,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
                 <button
                   type="button"
-                  className="glass-button"
+                  className="button"
                   onClick={async () => {
                     const selected = await open({
                       directory: prop.type === 'directory',
@@ -366,7 +366,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
               <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
               <input
                 type="text"
-                className="glass-button"
+                className="button"
                 style={{ width: '100%', textAlign: 'left' }}
                 value={String(currentVal ?? '')}
                 onChange={(e) => void handleChange(prop.key, e.target.value)}

@@ -1,5 +1,7 @@
 # 04 — Apple Liquid Glass UI/UX & Tauri IPC Specification
 
+> **2026-11-10 user override:** The original Liquid Glass appearance is superseded by a simple, neutral dark desktop theme inspired by Codex. Use `src/styles/theme.css`, a flat sidebar, compact toolbar/playback controls, and a contextual inspector. Existing IPC contracts and view functionality below remain authoritative.
+
 ## 1. Cross-Platform "Apple Liquid Glass" Design System
 
 To guarantee that TruongPaper looks **100% identical on macOS and Windows** (rather than relying on OS-divergent Windows 11 Mica/Acrylic vs. macOS `NSVisualEffectView`), TruongPaper renders its own GPU-accelerated **Liquid Glass** surface hierarchy inside a frameless transparent Tauri v2 window (`decorations: false`, `transparent: true`).

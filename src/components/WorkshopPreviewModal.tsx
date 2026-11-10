@@ -43,12 +43,11 @@ export const WorkshopPreviewModal: React.FC = () => {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'rgba(5, 7, 14, 0.55)',
-            backdropFilter: 'blur(10px)',
+            background: 'rgba(0, 0, 0, 0.65)',
           }}
         >
           <motion.div
-            className="glass-panel"
+            className="panel"
             initial={{ scale: 0.96, y: 12 }}
             animate={{ scale: 1, y: 0 }}
             exit={{ scale: 0.96, y: 12 }}
@@ -59,7 +58,7 @@ export const WorkshopPreviewModal: React.FC = () => {
                 <Badge>{workshopTypeFromTags(preview.tags)}</Badge>
                 <Badge tone="muted">#{preview.workshopId}</Badge>
               </div>
-              <button type="button" className="glass-button" aria-label="Close preview" style={{ padding: '6px 10px' }} onClick={closeWorkshopPreview}>
+              <button type="button" className="button" aria-label="Close preview" style={{ padding: '6px 10px' }} onClick={closeWorkshopPreview}>
                 <X size={14} />
               </button>
             </div>
@@ -105,7 +104,7 @@ export const WorkshopPreviewModal: React.FC = () => {
                   {installed && monitorId && (
                     <button
                       type="button"
-                      className="glass-button glass-button-primary"
+                      className="button button-primary"
                       onClick={() => {
                         selectWallpaper(installed.wallpaperId);
                         void applyMonitorSource(monitorId, { kind: 'workshop', wallpaperId: installed.wallpaperId }).then(

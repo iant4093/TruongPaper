@@ -2,7 +2,7 @@
 //! `monitors_list`, `monitor_apply_wallpaper`, `monitor_update_property`,
 //! `monitor_update_adjustments`, `playback_set_paused`.
 
-use crate::commands::photo::{rotate_photo_next, PhotoServiceState};
+use crate::commands::photo::{rotate_photo_for_locked_monitor, PhotoServiceState};
 use crate::db;
 use crate::host::{ActiveRuntime, RenderEvent, SceneDescriptor, WebviewKind};
 use crate::models::{
@@ -152,6 +152,18 @@ pub(crate) async fn lock_monitor_apply(monitor_id: &str) -> tokio::sync::OwnedMu
     lock.lock_owned().await
 }
 
+/// Multi-monitor applies always lock sorted, unique IDs to avoid opposing clone deadlocks.
+pub(crate) async fn lock_monitor_applies<'a>(
+    monitor_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    let ids: std::collections::BTreeSet<_> = monitor_ids.into_iter().collect();
+    let mut guards = Vec::with_capacity(ids.len());
+    for id in ids {
+        guards.push(lock_monitor_apply(id).await);
+    }
+    guards
+}
+
 fn settings_modes(state: &AppState) -> (IpcFitMode, IpcTransitionType) {
     let s = state.settings.lock();
     (
@@ -247,12 +259,19 @@ async fn start_wallpaper_runtime(
             } else {
                 project_file
             };
+            let roots = vec![install_dir.to_path_buf(), core_assets_dir.clone()];
+            let content_revision =
+                tokio::task::spawn_blocking(move || crate::host::scene_content_revision(&roots))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
             host.set_runtime(
                 monitor_id,
                 ActiveRuntime::Scene(SceneDescriptor {
                     install_dir: install_dir.to_path_buf(),
                     core_assets_dir,
                     scene_file,
+                    content_revision,
                     user_properties_json: Value::Object(props).to_string(),
                 }),
                 adjustments,
@@ -555,7 +574,7 @@ pub(crate) async fn show_photo(
         }
         None => {
             // The source is already persisted; an empty queue / offline API is not fatal here.
-            if let Err(err) = rotate_photo_next(app, photo, Some(monitor_id.to_string())).await {
+            if let Err(err) = rotate_photo_for_locked_monitor(app, photo, monitor_id).await {
                 tracing::warn!("no photo available for {monitor_id} yet: {err}");
             }
         }

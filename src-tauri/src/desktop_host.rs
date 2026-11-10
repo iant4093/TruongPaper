@@ -208,6 +208,7 @@ pub fn same_scene(a: &SceneDescriptor, b: &SceneDescriptor) -> bool {
     a.install_dir == b.install_dir
         && a.core_assets_dir == b.core_assets_dir
         && a.scene_file == b.scene_file
+        && a.content_revision == b.content_revision
 }
 
 /// Which monitor plays the sounds of each scene: for every scene key (`None` = no scene), the
@@ -1612,9 +1613,13 @@ mod tests {
             install_dir: std::path::PathBuf::from(dir),
             core_assets_dir: std::path::PathBuf::from("/core"),
             scene_file: "scene.json".into(),
+            content_revision: 0,
             user_properties_json: props.into(),
         };
         assert!(same_scene(&desc("/w/1", "{}"), &desc("/w/1", "{\"a\":1}")));
+        let mut updated = desc("/w/1", "{}");
+        updated.content_revision = 1;
+        assert!(!same_scene(&desc("/w/1", "{}"), &updated));
         assert!(!same_scene(&desc("/w/1", "{}"), &desc("/w/2", "{}")));
         assert_eq!(
             scene_key(&desc("/w/1", "{}")),

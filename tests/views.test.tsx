@@ -9,11 +9,11 @@ import { TrayApp } from '../src/tray/TrayApp';
 import { useAppStore } from '../src/store/useAppStore';
 
 const HEADINGS: Record<string, RegExp> = {
-  all: /^All Wallpapers$/,
-  photos: /^Ian Truong Photography API$/,
-  workshop: /^Steam Workshop Library$/,
-  playlists: /^Unified Playlists & Rotation$/,
-  monitors: /^Monitors & Fit$/,
+  all: /^Library$/,
+  photos: /^Photography$/,
+  workshop: /^Workshop$/,
+  playlists: /^Playlists$/,
+  monitors: /^Displays$/,
   settings: /^Settings$/,
 };
 
@@ -58,7 +58,7 @@ describe('Main studio window', () => {
     });
     const nav = screen.getByRole('navigation', { name: 'Studio views' });
     await act(async () => {
-      fireEvent.click(within(nav).getByRole('button', { name: 'Steam Workshop' }));
+      fireEvent.click(within(nav).getByRole('button', { name: 'Workshop' }));
     });
     await screen.findByRole('heading', { level: 2, name: HEADINGS.workshop }, { timeout: 2000 });
     expect(await screen.findByText('WALLPAPER PROPERTIES')).toBeTruthy();

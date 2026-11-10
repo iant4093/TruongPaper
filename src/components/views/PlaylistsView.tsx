@@ -167,14 +167,14 @@ export const PlaylistsView: React.FC = () => {
   return (
     <div>
       <ViewHeader
-        title="Unified Playlists & Rotation"
+        title="Playlists"
         subtitle={msg ?? 'Mix Ian Truong Photo API draws with Wallpaper Engine items'}
         actions={
           <>
-            <button type="button" className="glass-button" onClick={exportPlaylists}>
+            <button type="button" className="button" onClick={exportPlaylists}>
               <Download size={14} /> Export .json
             </button>
-            <button type="button" className="glass-button" onClick={() => fileRef.current?.click()}>
+            <button type="button" className="button" onClick={() => fileRef.current?.click()}>
               <Upload size={14} /> Import .json
             </button>
             <input
@@ -190,7 +190,7 @@ export const PlaylistsView: React.FC = () => {
       />
 
       {/* Mode Selector */}
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>Rotation Source</div>
           <SegmentedControl
@@ -213,7 +213,7 @@ export const PlaylistsView: React.FC = () => {
         />
         {mode === 'workshop' && (
           <select
-            className="glass-button"
+            className="button"
             aria-label="Wallpaper Engine item"
             style={{ width: '100%', marginTop: 12 }}
             value={singleId}
@@ -229,7 +229,7 @@ export const PlaylistsView: React.FC = () => {
         )}
         {mode === 'playlist' && (
           <select
-            className="glass-button"
+            className="button"
             aria-label="Playlist"
             style={{ width: '100%', marginTop: 12 }}
             value={playlistId}
@@ -243,14 +243,14 @@ export const PlaylistsView: React.FC = () => {
             ))}
           </select>
         )}
-        <button type="button" className="glass-button glass-button-primary" style={{ marginTop: 12 }} onClick={() => void applyRotation()}>
+        <button type="button" className="button button-primary" style={{ marginTop: 12 }} onClick={() => void applyRotation()}>
           Apply Rotation Source
         </button>
       </div>
 
       {/* Rotation Interval & Trigger Controls */}
       <SectionTitle>Rotation Interval & Triggers</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <SegmentedControl
           value={String(settings?.rotationIntervalSeconds ?? 1800)}
           options={ROTATION_INTERVALS.map((r) => [String(r.seconds), r.label] as const)}
@@ -264,7 +264,7 @@ export const PlaylistsView: React.FC = () => {
 
       {/* GPU Transition Selector */}
       <SectionTitle>GPU Transition</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <SegmentedControl
           value={settings?.transitionType ?? 'liquid_glass'}
           options={(Object.keys(TRANSITION_LABEL) as TransitionType[]).map((k) => [k, TRANSITION_LABEL[k]] as const)}
@@ -277,7 +277,7 @@ export const PlaylistsView: React.FC = () => {
           </div>
           <input
             type="range"
-            className="glass-slider"
+            className="slider"
             aria-label="Transition Duration"
             min={0.3}
             max={3.0}
@@ -292,7 +292,7 @@ export const PlaylistsView: React.FC = () => {
       <SectionTitle>Playlists</SectionTitle>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {playlists.map((p) => (
-          <div key={p.playlistId} className="glass-card" style={{ padding: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div key={p.playlistId} className="card" style={{ padding: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
               <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
@@ -300,26 +300,26 @@ export const PlaylistsView: React.FC = () => {
                 {ROTATION_INTERVALS.find((r) => r.seconds === p.intervalSeconds)?.label ?? `${p.intervalSeconds}s`}
               </div>
             </div>
-            <button type="button" className="glass-button" onClick={() => setDraft(JSON.parse(JSON.stringify(p)) as Playlist)}>
+            <button type="button" className="button" onClick={() => setDraft(JSON.parse(JSON.stringify(p)) as Playlist)}>
               Edit
             </button>
           </div>
         ))}
         {!draft && (
-          <button type="button" className="glass-button" style={{ alignSelf: 'flex-start' }} onClick={startNewPlaylist}>
+          <button type="button" className="button" style={{ alignSelf: 'flex-start' }} onClick={startNewPlaylist}>
             <Plus size={14} /> New Playlist
           </button>
         )}
       </div>
 
       {draft && (
-        <div className="glass-card" style={{ padding: 16, marginTop: 12 }}>
+        <div className="card" style={{ padding: 16, marginTop: 12 }}>
           <input
             type="text"
             aria-label="Playlist name"
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            className="glass-button"
+            className="button"
             style={{ width: '100%', textAlign: 'left', cursor: 'text', marginBottom: 12 }}
           />
           <SegmentedControl
@@ -343,7 +343,7 @@ export const PlaylistsView: React.FC = () => {
             }
           />
           <select
-            className="glass-button"
+            className="button"
             aria-label="Playlist interval"
             style={{ width: '100%', marginTop: 12 }}
             value={String(draft.intervalSeconds)}
@@ -407,13 +407,13 @@ export const PlaylistsView: React.FC = () => {
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             <button
               type="button"
-              className="glass-button glass-button-primary"
+              className="button button-primary"
               disabled={draft.items.length === 0 || !draft.name.trim()}
               onClick={() => void saveDraft()}
             >
               <Save size={14} /> Save Playlist
             </button>
-            <button type="button" className="glass-button" onClick={() => setDraft(null)}>
+            <button type="button" className="button" onClick={() => setDraft(null)}>
               Cancel
             </button>
           </div>

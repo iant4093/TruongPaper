@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release after desktop acceptance testing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -127,7 +132,8 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # First builds are test installers. Publishing is an explicit action after live testing.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

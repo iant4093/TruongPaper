@@ -2,10 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
-import { AmbientBacklightCanvas } from '../components/AmbientBacklightCanvas';
-import { LiquidGlassFilters } from '../components/LiquidGlassFilters';
 import { parseOmnibarInput } from '../components/UniversalOmnibar';
-import { toAssetUrl } from '../lib/format';
 import { useAppStore } from '../store/useAppStore';
 import type { TransitionType } from '../types/ipc';
 
@@ -61,16 +58,14 @@ export const TrayApp: React.FC = () => {
   };
 
   return (
-    <div className="app-window-frame" style={{ width: 360, height: 480, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <LiquidGlassFilters />
-      <AmbientBacklightCanvas activeThumbnailUrl={toAssetUrl(currentPhoto?.filePath)} />
+    <div className="app-window-frame tray-shell" style={{ width: 360, height: 480, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
 
       <div style={{ position: 'relative', zIndex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <strong style={{ fontSize: 15, letterSpacing: '-0.01em' }}>TruongPaper</strong>
         <div style={{ display: 'flex', gap: 6 }}>
           <button
             type="button"
-            className="glass-button"
+            className="button"
             style={{ padding: '5px 12px', fontSize: 12 }}
             onClick={async () => {
               // Bring the main studio window forward, then dismiss this popover.
@@ -94,7 +89,7 @@ export const TrayApp: React.FC = () => {
           value={quickLink}
           onChange={(e) => setQuickLink(e.target.value)}
           placeholder="Paste Workshop or Photo Album Link..."
-          className="glass-button"
+          className="button"
           style={{ width: '100%', textAlign: 'left', fontSize: 12, padding: '7px 12px', cursor: 'text' }}
         />
       </form>
@@ -104,7 +99,7 @@ export const TrayApp: React.FC = () => {
           <button
             key={m.monitorId}
             type="button"
-            className={`glass-button ${m.monitorId === activeMonitorId ? 'glass-button-primary' : ''}`}
+            className={`button ${m.monitorId === activeMonitorId ? 'button-primary' : ''}`}
             style={{ fontSize: 11, padding: '4px 10px' }}
             onClick={() => useAppStore.setState({ selectedMonitorId: m.monitorId })}
           >
@@ -113,7 +108,7 @@ export const TrayApp: React.FC = () => {
         ))}
       </div>
 
-      <div className="glass-card" style={{ position: 'relative', zIndex: 1, padding: 14, flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+      <div className="card" style={{ position: 'relative', zIndex: 1, padding: 14, flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
         <div>
           <div style={{ fontSize: 11, color: 'var(--accent-cyan)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Current Wallpaper
@@ -132,7 +127,7 @@ export const TrayApp: React.FC = () => {
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               type="button"
-              className="glass-button"
+              className="button"
               style={{ flex: 1 }}
               onClick={() => void setPlaybackPaused(!isPaused, activeMonitorId)}
             >
@@ -140,7 +135,7 @@ export const TrayApp: React.FC = () => {
             </button>
             <button
               type="button"
-              className="glass-button glass-button-primary"
+              className="button button-primary"
               style={{ flex: 1 }}
               onClick={() => void rotateNextPhoto(activeMonitorId)}
             >
@@ -152,7 +147,7 @@ export const TrayApp: React.FC = () => {
             <div style={{ display: 'flex', gap: 6 }}>
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                 onClick={() => void setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite)}
               >
@@ -160,7 +155,7 @@ export const TrayApp: React.FC = () => {
               </button>
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                 onClick={() => void blacklistAndSkipPhoto(currentPhoto.id)}
               >
@@ -168,7 +163,7 @@ export const TrayApp: React.FC = () => {
               </button>
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                 onClick={() => void open(currentPhoto.albumUrl)}
               >
@@ -182,7 +177,7 @@ export const TrayApp: React.FC = () => {
       <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
         <span style={{ color: 'var(--text-secondary)' }}>GPU Transition</span>
         <select
-          className="glass-button"
+          className="button"
           style={{ fontSize: 12, padding: '4px 10px' }}
           value={settings?.transitionType ?? 'liquid_glass'}
           onChange={(e) => void updateSettings({ transitionType: e.target.value as TransitionType })}

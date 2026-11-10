@@ -18,7 +18,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { parseOmnibarInput } from '../UniversalOmnibar';
 import { GB, MB, formatBytes } from '../../lib/format';
 import type { FilterMode, PhotoItem } from '../../types/ipc';
-import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid, spotlightHandlers } from '../ui';
+import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 
 const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
@@ -112,19 +112,19 @@ export const PhotosApiView: React.FC = () => {
   return (
     <div>
       <ViewHeader
-        title="Ian Truong Photography API"
+        title="Photography"
         subtitle={`Rate limit remaining: ${photoStatus?.rateLimitRemaining ?? '—'} • ${
           photoStatus?.isRefilling ? 'Refilling queue…' : 'Queue idle'
         }`}
         actions={
-          <button type="button" className="glass-button" onClick={() => void openCatalog()}>
+          <button type="button" className="button" onClick={() => void openCatalog()}>
             <BookOpen size={14} /> {catalogOpen ? 'Hide Album Catalog' : 'Browse Official Album Catalog'}
           </button>
         }
       />
 
       {/* Filter Controls Card */}
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Photo Pool</div>
         <SegmentedControl
           value={mode}
@@ -157,7 +157,7 @@ export const PhotosApiView: React.FC = () => {
             {catalogError && <div style={{ fontSize: 12, color: '#fca5a5', marginBottom: 8 }}>{catalogError}</div>}
             <div style={cardGrid}>
               {publicCatalog.map((album) => (
-                <div key={album.albumId} className="glass-card" style={{ padding: 12 }} {...spotlightHandlers()}>
+                <div key={album.albumId} className="card" style={{ padding: 12 }}>
                   <Thumb src={album.coverThumbnailUrl} alt={album.title} height={110} />
                   <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                     <Badge>{album.category}</Badge>
@@ -166,7 +166,7 @@ export const PhotosApiView: React.FC = () => {
                   <div style={{ fontWeight: 600, marginTop: 6 }}>{album.title}</div>
                   <button
                     type="button"
-                    className="glass-button glass-button-primary"
+                    className="button button-primary"
                     style={{ width: '100%', marginTop: 10, fontSize: 12 }}
                     disabled={savedSlugs.has(album.slug)}
                     onClick={() => void addAlbum(album.slug, album.title)}
@@ -191,17 +191,17 @@ export const PhotosApiView: React.FC = () => {
           value={albumInput}
           onChange={(e) => setAlbumInput(e.target.value)}
           placeholder="Add Album URL/Slug (e.g. bald-mountain-11-1)"
-          className="glass-button"
+          className="button"
           style={{ flex: 1, textAlign: 'left', cursor: 'text', justifyContent: 'flex-start' }}
         />
-        <button type="submit" className="glass-button">
+        <button type="submit" className="button">
           <Plus size={14} /> Add Album
         </button>
       </form>
       {albumMsg && <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{albumMsg}</div>}
       <div style={cardGrid}>
         {savedAlbums.map((album) => (
-          <div key={album.albumSlug} className="glass-card" style={{ padding: 12 }} {...spotlightHandlers()}>
+          <div key={album.albumSlug} className="card" style={{ padding: 12 }}>
             <Thumb src={album.coverThumbnailUrl} alt={album.displayName} height={90} />
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, fontSize: 13, fontWeight: 600 }}>
               <input
@@ -218,7 +218,7 @@ export const PhotosApiView: React.FC = () => {
             <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                 onClick={() => void openExternal(album.albumUrl)}
               >
@@ -226,7 +226,7 @@ export const PhotosApiView: React.FC = () => {
               </button>
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 aria-label={`Remove ${album.displayName}`}
                 style={{ fontSize: 11, padding: '6px 10px' }}
                 onClick={() => void removeAlbum(album.albumSlug)}
@@ -246,7 +246,7 @@ export const PhotosApiView: React.FC = () => {
       {/* Currently Displayed Photo Card */}
       <SectionTitle>Currently Displayed</SectionTitle>
       {currentPhoto ? (
-        <div className="glass-card" style={{ padding: 14, display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
+        <div className="card" style={{ padding: 14, display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           <Thumb src={currentPhoto.filePath} alt={currentPhoto.albumSlug} height={200} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', gap: 6 }}>
@@ -258,16 +258,16 @@ export const PhotosApiView: React.FC = () => {
             </div>
             <button
               type="button"
-              className="glass-button"
+              className="button"
               onClick={() => void setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite)}
             >
               <Heart size={14} fill={currentPhoto.isFavorite ? 'currentColor' : 'none'} />
               {currentPhoto.isFavorite ? 'Favorited (Kept on Disk)' : 'Favorite / Keep on Disk'}
             </button>
-            <button type="button" className="glass-button" onClick={() => void blacklistAndSkipPhoto(currentPhoto.id)}>
+            <button type="button" className="button" onClick={() => void blacklistAndSkipPhoto(currentPhoto.id)}>
               <EyeOff size={14} /> Hide / Never Show Again
             </button>
-            <button type="button" className="glass-button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
+            <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
               <ExternalLink size={14} /> View Album on iantruongphotography.com
             </button>
           </div>
@@ -284,7 +284,7 @@ export const PhotosApiView: React.FC = () => {
       </SectionTitle>
       <div style={cardGrid}>
         {queue.map((photo, idx) => (
-          <div key={photo.id} className="glass-card" style={{ padding: 12 }} {...spotlightHandlers()}>
+          <div key={photo.id} className="card" style={{ padding: 12 }}>
             <Thumb src={photo.filePath} alt={photo.albumSlug} height={100} />
             <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
               <Badge>{photo.albumSlug}</Badge>
@@ -297,7 +297,7 @@ export const PhotosApiView: React.FC = () => {
               {idx === 0 && (
                 <button
                   type="button"
-                  className="glass-button glass-button-primary"
+                  className="button button-primary"
                   style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                   onClick={() => void rotateNextPhoto(activeMonitorId)}
                 >
@@ -306,7 +306,7 @@ export const PhotosApiView: React.FC = () => {
               )}
               <button
                 type="button"
-                className="glass-button"
+                className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                 onClick={() => void blacklistAndSkipPhoto(photo.id)}
               >
@@ -322,7 +322,7 @@ export const PhotosApiView: React.FC = () => {
 
       {/* Storage & History Bar */}
       <SectionTitle>Storage & History</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
           <span>Image Cache</span>
           <span>
@@ -352,7 +352,7 @@ export const PhotosApiView: React.FC = () => {
           </div>
           <input
             type="range"
-            className="glass-slider"
+            className="slider"
             aria-label="Cache Size Limit"
             min={MIN_CACHE}
             max={MAX_CACHE}
@@ -376,13 +376,13 @@ export const PhotosApiView: React.FC = () => {
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="glass-button glass-button-primary" onClick={() => void triggerPhotoRefill()}>
+          <button type="button" className="button button-primary" onClick={() => void triggerPhotoRefill()}>
             <RefreshCw size={14} /> Refill Queue Now
           </button>
-          <button type="button" className="glass-button" onClick={() => void clearPhotoCache()}>
+          <button type="button" className="button" onClick={() => void clearPhotoCache()}>
             <Trash2 size={14} /> Clear Image Cache (Keep History)
           </button>
-          <button type="button" className="glass-button" onClick={() => void resetPhotoHistory()}>
+          <button type="button" className="button" onClick={() => void resetPhotoHistory()}>
             <History size={14} /> Reset Shown History
           </button>
         </div>

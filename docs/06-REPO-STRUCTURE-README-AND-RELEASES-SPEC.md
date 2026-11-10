@@ -1,5 +1,7 @@
 # 06 — Repository Layout, `README.md`, CI/CD & Auto-Update Release Specification (Aligned with `TruongFlix`)
 
+> **2026-11-10 release-readiness override:** Push/PR builds produce test installers only. Publishing requires a manual CI run on `main` with `publish: true` after desktop acceptance testing. The UI now follows the user-requested neutral dark theme in `src/styles/theme.css`.
+
 > **Reference Standard**: [`https://github.com/iant4093/TruongFlix`](https://github.com/iant4093/TruongFlix)  
 > TruongPaper MUST follow the exact repository layout, `README.md` structure, `package.json` scripts, sidecar bundling workflow (`scripts/bundle-depotdownloader.mjs`), local release script (`scripts/release.mjs`), GitHub Actions CI & automated release pipeline (`.github/workflows/ci.yml`), signed auto-updater (`latest.json` + `SHA256SUMS`), and Windows test manifest (`windows-app-manifest.xml`) established in `TruongFlix`.
 

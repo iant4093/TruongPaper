@@ -80,7 +80,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_MINISIGN_PUBKEY_FROM_TAURI_SIGNER_GENERATE",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4NTMyRDQ1NTdDOTYxMTcKUldRWFljbFhSUzFUNkZ5Wm43anhwUmdYWUgvYTdsR3ZWUWU4Y3c4aDNpUmx0TFBjUkZuTHFJZ1QK",
       "endpoints": [
         "https://github.com/iant4093/TruongPaper/releases/latest/download/latest.json"
       ]

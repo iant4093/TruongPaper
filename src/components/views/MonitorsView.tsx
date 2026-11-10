@@ -63,13 +63,13 @@ export const MonitorsView: React.FC = () => {
   return (
     <div>
       <ViewHeader
-        title="Monitors & Fit"
+        title="Displays"
         subtitle={msg ?? `${monitors.length} display${monitors.length === 1 ? '' : 's'} connected`}
       />
 
       {/* Interactive visual diagram */}
       <div
-        className="glass-card"
+        className="card"
         style={{ padding: 20, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 18, minHeight: DIAGRAM_HEIGHT + 40, flexWrap: 'wrap' }}
       >
         {monitors.map((m) => {
@@ -82,7 +82,7 @@ export const MonitorsView: React.FC = () => {
               type="button"
               aria-pressed={selected}
               onClick={() => selectMonitor(m.monitorId)}
-              className="glass-button"
+              className="button"
               style={{
                 width: Math.max(90, w * scale),
                 height: Math.max(60, h * scale),
@@ -107,7 +107,7 @@ export const MonitorsView: React.FC = () => {
       {active && (
         <>
           <SectionTitle>{active.name}</SectionTitle>
-          <div className="glass-card" style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12, fontSize: 13 }}>
+          <div className="card" style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12, fontSize: 13 }}>
             <div>
               <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Resolution</div>
               {active.width} × {active.height}
@@ -136,7 +136,7 @@ export const MonitorsView: React.FC = () => {
           {active.activeSource.kind !== 'photo_api' && (
             <button
               type="button"
-              className="glass-button"
+              className="button"
               style={{ marginTop: 10 }}
               onClick={() => void applyMonitorSource(active.monitorId, { kind: 'photo_api' })}
             >
@@ -147,7 +147,7 @@ export const MonitorsView: React.FC = () => {
       )}
 
       <SectionTitle>Orientation Matching for Photo API</SectionTitle>
-      <div className="glass-card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16 }}>
         <ToggleRow
           label="Skip portrait photos on landscape monitors (and vice-versa)"
           checked={settings?.skipMismatchedOrientation ?? true}
@@ -162,14 +162,14 @@ export const MonitorsView: React.FC = () => {
       </div>
 
       <SectionTitle>Multi-Monitor Mode</SectionTitle>
-      <div className="glass-card" style={{ padding: 16, fontSize: 13 }}>
+      <div className="card" style={{ padding: 16, fontSize: 13 }}>
         <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>
           Each monitor keeps its own source (Independent per monitor). Clone the selected monitor's source to every
           other display to show the same wallpaper everywhere.
         </div>
         <button
           type="button"
-          className="glass-button glass-button-primary"
+          className="button button-primary"
           disabled={!active || monitors.length < 2}
           onClick={() => void cloneToAll()}
         >

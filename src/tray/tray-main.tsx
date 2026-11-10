@@ -3,7 +3,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { installBrowserPreviewMocksIfNeeded } from '../dev/mockTauri';
 import { TrayApp } from './TrayApp';
-import '../styles/liquid-glass.css';
+import '../styles/theme.css';
 
 installBrowserPreviewMocksIfNeeded();
 

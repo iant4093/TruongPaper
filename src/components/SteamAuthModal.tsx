@@ -105,11 +105,13 @@ export const SteamAuthModal: React.FC = () => {
         {tab === 'qr' ? (
           <div style={{ textAlign: 'center' }}>
             <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 14 }}>
-              Scan with the Steam Mobile App to authenticate DepotDownloader and save a persistent refresh token in your OS Keychain.
+              Sign in with the Steam Mobile App. DepotDownloader remembers your login on this computer.
             </p>
             {qrMatrix ? (
               <canvas
                 ref={qrCanvasRef}
+                role="img"
+                aria-label="Steam sign-in QR code"
                 style={{
                   borderRadius: 14,
                   boxShadow: '0 12px 32px rgba(0, 0, 0, 0.45)',

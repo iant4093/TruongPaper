@@ -20,6 +20,7 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 - Generated an updater key, restricted the local private key file to mode 0600, configured the public key, and installed the GitHub `TAURI_SIGNING_PRIVATE_KEY` secret. The private key is outside the repository at `~/.tauri/truongpaper.key`; keep a secure backup.
 - Pushed the repository and started real macOS/Windows CI. The first Windows build compiled and reached tests; a CRLF-sensitive shader/doc test stopped it. Added LF checkout rules and normalized the test comparison. CI retains caches on failure for follow-up builds.
 - CI builds test installers by default. Publishing requires a manual run on `main` with `publish` enabled. No public release is published by an ordinary push.
+- Fixed QR delivery before login: the parser now emits a complete square QR immediately, since DepotDownloader waits for a scan without printing a blank terminator or closing stdout. A duplex-pipe regression test holds stdout open while requiring delivery.
 - Fixed macOS packaged DepotDownloader startup: hardened runtime signing now includes the .NET JIT entitlement required by [Microsoft’s deployment guidance](https://learn.microsoft.com/en-us/dotnet/core/deploying/macos). Added a network-free launch probe of the actual bundled downloader to local release builds and CI.
 - Excluded Rust build output from Vite watching after observing excessive development-server CPU usage.
 - Added browser-preview screenshots and a real native macOS photo-library screenshot. README claims were narrowed to match current limitations.
@@ -30,12 +31,14 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 |---|---|
 | Frontend tests | 158 passed |
 | TypeScript / Vite build | Passed |
-| Rust workspace tests (`--locked`) | 400 passed |
+| Rust workspace tests (`--locked`) | 401 passed |
 | Clippy (workspace, all targets, locked) | Passed without warnings |
 | Rust formatting | Passed |
 | GPU smoke example | Passed on Apple M3 Max; initializes adapter and compiles shaders |
 | AVFoundation video probe | Passed; ten 1920×1080 BGRA frames decoded |
 | Public random-photo API and album catalog | HTTP 200 with expected response shapes |
+| Live Steam QR probe | Delivered a real 74×74 QR before authentication; challenge was neither printed nor saved |
+| Packaged downloader startup | Passed with required JIT entitlement; CI also checks the bundled binary without network access |
 | Public Workshop live probe | Guest catalog: 30 results, five filter groups; filtered mountain/Scene search on page 2 passed |
 | Native macOS app | Opened with real photo data; Next rotated through the backend |
 | Browser visual checks | Library, Photography, Workshop, inspector, Displays, Playlists, Settings, download dialog, tray; minimum 980×640 layout checked |

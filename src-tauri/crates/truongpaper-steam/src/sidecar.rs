@@ -114,6 +114,14 @@ impl StdoutParser {
         if self.in_qr {
             if is_qr_line(line) {
                 self.qr_lines.push(line.to_string());
+                // DepotDownloader 3.4 prints a square QR and immediately waits for
+                // authentication, without a blank terminator or closing stdout.
+                // Each character is two vertical pixels (half blocks); the full
+                // block renderer uses two characters per module horizontally.
+                let width = self.qr_lines[0].chars().count();
+                if self.qr_lines.len() * 2 >= width {
+                    self.flush_qr(&mut out);
+                }
                 return out;
             } else if !self.qr_lines.is_empty() {
                 self.flush_qr(&mut out);
@@ -352,15 +360,43 @@ mod tests {
     fn stdout_parser_flushes_qr_at_eof() {
         let mut p = StdoutParser::new();
         assert!(p.feed_line(QR_HEADER).is_empty());
-        assert!(p.feed_line("██").is_empty());
+        assert!(p.feed_line("██  ").is_empty());
         assert_eq!(
             p.finish(),
             vec![SidecarEvent::QrMatrix(vec![
-                vec![true, true],
-                vec![true, true]
+                vec![true, true, false, false],
+                vec![true, true, false, false]
             ])]
         );
         assert!(p.finish().is_empty());
+    }
+
+    #[tokio::test]
+    async fn qr_is_delivered_while_stdout_stays_open_waiting_for_scan() {
+        let (mut producer, reader) = tokio::io::duplex(1024);
+        let (events, mut received) = mpsc::channel(8);
+        let pump = tokio::spawn(async move { pump_stdout(reader, &events).await });
+        // Same double-width full-block framing as QRCoder.GetLineByLineGraphic(1).
+        producer
+            .write_all(format!("{QR_HEADER}:\n        \n  ████  \n  ████  \n        \n").as_bytes())
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let SidecarEvent::QrMatrix(matrix) = event else {
+            panic!("missing QR event")
+        };
+        assert_eq!(matrix.len(), 8);
+        assert!(matrix.iter().all(|row| row.len() == 8));
+        assert_eq!(
+            matrix[2],
+            vec![false, false, true, true, true, true, false, false]
+        );
+        // The writer remains open until AFTER the QR event is received.
+        drop(producer);
+        pump.await.unwrap().unwrap();
     }
 
     #[tokio::test]

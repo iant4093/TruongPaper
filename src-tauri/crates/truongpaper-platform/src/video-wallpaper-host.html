@@ -212,6 +212,12 @@
         }
       };
 
+      // WKWebView can suspend muted media while the desktop window is occluded.
+      // Recover on reveal, including when the fast copy was prepared in the background.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && !paused && fgVideo.paused) fgVideo.play().catch(() => {});
+      });
+
       watchVideo(fgVideo);
       fgVideo.addEventListener('loadedmetadata', () => {
         originalWidth = fgVideo.videoWidth;

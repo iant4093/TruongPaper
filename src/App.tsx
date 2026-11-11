@@ -13,7 +13,7 @@ import { PlaylistsView } from './components/views/PlaylistsView';
 import { SettingsView } from './components/views/SettingsView';
 import { SteamWorkshopView } from './components/views/SteamWorkshopView';
 import { Thumb } from './components/ui';
-import { formatBytes } from './lib/format';
+import { ResourceUsage } from './components/ResourceUsage';
 import { useAppStore } from './store/useAppStore';
 
 export type StudioTab = 'all' | 'photos' | 'workshop' | 'playlists' | 'monitors' | 'settings';
@@ -100,7 +100,7 @@ export const App: React.FC = () => {
             </button>
           ))}
           <div className="sidebar-spacer" />
-          <div className="sidebar-status" title="Space used by cached photos on disk"><span>Disk cache</span><span className="sidebar-cache">{formatBytes(photoStatus?.cachedBytes ?? 0)}</span></div>
+          <ResourceUsage cachedBytes={photoStatus?.cachedBytes ?? 0} />
           <button type="button" className={`nav-item ${activeTab === 'settings' ? 'is-active' : ''}`}
             aria-current={activeTab === 'settings' ? 'page' : undefined} onClick={() => setActiveTab('settings')}>
             <SettingsIcon size={16} strokeWidth={1.6} /><span>Settings</span>

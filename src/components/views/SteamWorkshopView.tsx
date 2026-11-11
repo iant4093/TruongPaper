@@ -2,6 +2,7 @@
 // §2.3 View 2: "Steam Workshop" Library View
 import React, { useMemo, useState } from 'react';
 import { LogIn, LogOut, RefreshCw, Search } from 'lucide-react';
+import { WorkshopBrowser } from '../WorkshopBrowser';
 import { WallpaperCard } from '../WallpaperCard';
 import { useAppStore } from '../../store/useAppStore';
 import { WALLPAPER_TYPE_LABEL } from '../../lib/format';
@@ -74,7 +75,7 @@ export function filterWorkshopItems(
   });
 }
 
-export const SteamWorkshopView: React.FC = () => {
+const InstalledWorkshopView: React.FC = () => {
   const wallpapers = useAppStore((s) => s.wallpapers);
   const downloadsById = useAppStore((s) => s.downloadsById);
   const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
@@ -109,10 +110,7 @@ export const SteamWorkshopView: React.FC = () => {
 
   return (
     <div>
-      <ViewHeader
-        title="Workshop"
-        subtitle={`${workshopCount} Wallpaper Engine items • ${localCount} from the local Steam library`}
-      />
+      <div className="workshop-installed-summary">{workshopCount} installed items · {localCount} from your local Steam library</div>
 
       {/* Steam Connection Pill */}
       <div className="card" style={{ padding: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -193,4 +191,13 @@ export const SteamWorkshopView: React.FC = () => {
       </div>
     </div>
   );
+};
+
+export const SteamWorkshopView: React.FC = () => {
+  const [tab, setTab] = useState<'discover' | 'installed'>('discover');
+  return <div>
+    <ViewHeader title="Workshop" subtitle="Find your next wallpaper." />
+    <div className="workshop-tabs"><SegmentedControl value={tab} options={[["discover", "Discover"], ["installed", "Installed"]]} onChange={setTab} /></div>
+    {tab === 'discover' ? <WorkshopBrowser /> : <InstalledWorkshopView />}
+  </div>;
 };

@@ -61,6 +61,7 @@ describe('Main studio window', () => {
       fireEvent.click(within(nav).getByRole('button', { name: 'Workshop' }));
     });
     await screen.findByRole('heading', { level: 2, name: HEADINGS.workshop }, { timeout: 2000 });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Installed' })); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select Neon Rain City' })); });
     expect(await screen.findByText('Wallpaper properties')).toBeTruthy();
     expect(screen.getByText('Scheme Color')).toBeTruthy();

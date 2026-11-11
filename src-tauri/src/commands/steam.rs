@@ -458,3 +458,14 @@ mod tests {
         assert_eq!(session.running_count(), 0);
     }
 }
+
+/// Public, guest-visible wallpapers. Download authentication is a separate flow.
+#[tauri::command]
+pub async fn steam_browse_workshop(
+    state: State<'_, AppState>,
+    query: truongpaper_steam::WorkshopBrowseQuery,
+) -> Result<truongpaper_steam::WorkshopBrowsePage, String> {
+    truongpaper_steam::browse_workshop(&state.http, &query)
+        .await
+        .map_err(|e| e.to_string())
+}

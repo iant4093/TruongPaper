@@ -4,6 +4,8 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 
 ## Completed in this pass
 
+- Added native guest Workshop discovery: keyword search, sort/trending periods, Steam tag filters, pagination/jump, thumbnails, creator/rating/subscriber information, item previews, and explicit downloads. Direct-link/ID import and the installed library remain available. This reads Steam Community’s public server-rendered JSON; a page-format change can require a parser update. It does not inherit account-specific browsing preferences from DepotDownloader.
+- Added a separate RAM reading refreshed every three seconds, using main-process RSS on macOS and working set on Windows. The adjacent Disk cache number remains disk usage, with no status dot. Helper-process and GPU memory are outside the reported value.
 - Replaced the Liquid Glass design with a simple neutral dark theme, flat sidebar, compact import/display toolbar, wallpaper grid, contextual inspector, and bottom playback bar. The tray, settings, dialogs, and shared controls use the same theme.
 - Library selection no longer automatically opens an unrelated first item's inspector. Added title/type filtering and keyboard-accessible thumbnail selection separate from Apply.
 - Removed unused ambient/refraction components and unused Tailwind/PostCSS/Autoprefixer direct dependencies. Upgraded Vitest to 5.1 and kept Vite on its patched 6.4 line; Node 22.12+ is required. `npm audit` reported zero vulnerabilities after the upgrade.
@@ -24,14 +26,15 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 
 | Check | Result |
 |---|---|
-| Frontend tests | 149 passed |
+| Frontend tests | 158 passed |
 | TypeScript / Vite build | Passed |
-| Rust workspace tests (`--locked`) | 396 passed |
+| Rust workspace tests (`--locked`) | 400 passed |
 | Clippy (workspace, all targets, locked) | Passed without warnings |
 | Rust formatting | Passed |
 | GPU smoke example | Passed on Apple M3 Max; initializes adapter and compiles shaders |
 | AVFoundation video probe | Passed; ten 1920×1080 BGRA frames decoded |
 | Public random-photo API and album catalog | HTTP 200 with expected response shapes |
+| Public Workshop live probe | Guest catalog: 30 results, five filter groups; filtered mountain/Scene search on page 2 passed |
 | Native macOS app | Opened with real photo data; Next rotated through the backend |
 | Browser visual checks | Library, Photography, Workshop, inspector, Displays, Playlists, Settings, download dialog, tray; minimum 980×640 layout checked |
 

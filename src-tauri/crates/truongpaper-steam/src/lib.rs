@@ -2,6 +2,9 @@
 //! `DepotDownloader` v3.4.0 sidecar controller, and local Steam `431960` folder sync.
 //! Complete specification: `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Section 1).
 
+pub mod browse;
+pub use browse::{browse_workshop, WorkshopBrowsePage, WorkshopBrowseQuery};
+
 pub mod commands;
 pub mod local_sync;
 pub mod metadata;

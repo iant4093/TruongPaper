@@ -2072,6 +2072,7 @@ invoke<void>('photo_clear_cache'); // Deletes non-favorited .jpg files, NEVER de
 invoke<void>('photo_reset_history', { albumSlug?: string });
 
 // --- Steam Workshop & Wallpaper Engine Commands ---
+invoke<WorkshopBrowsePage>('steam_browse_workshop', { query: WorkshopBrowseQuery }); // Guest public catalog: search, sort, page, days, tags
 invoke<WorkshopPreview>('steam_inspect_url', { urlOrId: string });
 invoke<string>('steam_download_workshop_item', { urlOrId: string });
 invoke<void>('steam_login_qr');
@@ -2098,6 +2099,7 @@ invoke<AppSettings>('settings_get');
 invoke<void>('settings_update', { settings: Partial<AppSettings> });
 invoke<string>('update_feed_status');
 invoke<void>('runtime_shutdown_for_update');
+invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: number }, main process RAM only
 ```
 
 #### Rust $\to$ Frontend Event Channels (`app.emit(...)`)

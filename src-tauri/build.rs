@@ -19,6 +19,7 @@ const APP_COMMANDS: &[&str] = &[
     "photo_set_cache_limit",
     "photo_clear_cache",
     "photo_reset_history",
+    "steam_browse_workshop",
     "steam_inspect_url",
     "steam_download_workshop_item",
     "steam_login_qr",
@@ -41,6 +42,7 @@ const APP_COMMANDS: &[&str] = &[
     "settings_update",
     "update_feed_status",
     "runtime_shutdown_for_update",
+    "runtime_get_memory_usage",
 ];
 
 fn attributes() -> tauri_build::Attributes {

@@ -1,0 +1,134 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { ChevronLeft, ChevronRight, Search, SlidersHorizontal, Star } from 'lucide-react';
+import type { WorkshopBrowsePage, WorkshopBrowseQuery, WorkshopSort } from '../types/ipc';
+import { useAppStore } from '../store/useAppStore';
+import { parseOmnibarInput } from './UniversalOmnibar';
+import { Thumb } from './ui';
+import { workshopTypeFromTags } from '../lib/format';
+
+const DEFAULT_QUERY: WorkshopBrowseQuery = { search: '', sort: 'trending', page: 1, days: 7, tags: [] };
+const count = (value: number) => new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+
+export const WorkshopBrowser: React.FC = () => {
+  const [query, setQuery] = useState(DEFAULT_QUERY);
+  const [input, setInput] = useState('');
+  const [data, setData] = useState<WorkshopBrowsePage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const [more, setMore] = useState(false);
+  const [previewing, setPreviewing] = useState<string | null>(null);
+  const [jump, setJump] = useState('');
+  const inspect = useAppStore((s) => s.inspectWorkshopUrl);
+  const openAuth = useAppStore((s) => s.openSteamAuthModal);
+  const wallpapers = useAppStore((s) => s.wallpapers);
+  const previewRequest = useRef(0);
+  const top = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (parseOmnibarInput(input)?.kind === 'steam_workshop') return;
+      setQuery((q) => q.search === input.trim() ? q : { ...q, search: input.trim(), page: 1 });
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [input]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError(null);
+    void invoke<WorkshopBrowsePage>('steam_browse_workshop', { query }).then((page) => {
+      if (!cancelled) { setData(page); setLoading(false); }
+    }, (err) => {
+      if (!cancelled) { setError(String(err)); setLoading(false); }
+    });
+    return () => { cancelled = true; };
+  }, [query, retry]);
+
+  useEffect(() => () => { previewRequest.current++; }, []);
+  const preview = async (id: string) => {
+    const request = ++previewRequest.current;
+    setPreviewing(id); setPreviewError(null);
+    try { await inspect(id); }
+    catch (err) { if (request === previewRequest.current) setPreviewError(String(err)); }
+    finally { if (request === previewRequest.current) setPreviewing(null); }
+  };
+  const update = (partial: Partial<WorkshopBrowseQuery>) => setQuery((q) => ({ ...q, ...partial, page: 1 }));
+  const chooseTag = (name: string, value: string) => {
+    const group = data?.tagGroups.find((g) => g.name === name);
+    update({ tags: [...query.tags.filter((tag) => !group?.tags.some((t) => t.tag === tag)), ...(value ? [value] : [])] });
+  };
+  const changePage = (page: number) => {
+    setQuery((q) => ({ ...q, page })); setJump('');
+    top.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
+  const selectFilter = (name: string, label: string) => {
+    const group = data?.tagGroups.find((g) => g.name === name);
+    return <label className="workshop-filter" key={name}><span>{label}</span>
+      <select aria-label={`Workshop ${label.toLowerCase()}`} value={query.tags.find((t) => group?.tags.some((tag) => tag.tag === t)) ?? ''}
+        onChange={(e) => chooseTag(name, e.target.value)}>
+        <option value="">All</option>{group?.tags.map((t) => <option key={t.tag} value={t.tag}>{t.label}</option>)}
+      </select></label>;
+  };
+
+  return <div ref={top} className="workshop-discover">
+    <div className="workshop-search-row">
+      <form className="workshop-search" onSubmit={(e) => {
+        e.preventDefault();
+        const target = parseOmnibarInput(input);
+        if (target?.kind === 'steam_workshop') void preview(target.workshopId);
+        else update({ search: input.trim() });
+      }}>
+        <Search size={16} aria-hidden="true" />
+        <input aria-label="Search Steam Workshop" type="search" maxLength={200} placeholder="Search wallpapers, or paste a Workshop link or ID…" value={input} onChange={(e) => setInput(e.target.value)} />
+        <button className="button" type="submit">Search</button>
+      </form>
+      <button className="button" onClick={openAuth}>Steam account</button>
+    </div>
+    <div className="workshop-filters">
+      <label className="workshop-filter"><span>Sort</span><select aria-label="Workshop sort" value={query.sort} onChange={(e) => update({ sort: e.target.value as WorkshopSort })}>
+        <option value="trending">Trending</option><option value="most_subscribed">Most subscribed</option><option value="newest">Newest</option><option value="top_rated">Top rated</option>
+      </select></label>
+      {query.sort === 'trending' && <label className="workshop-filter"><span>Period</span><select aria-label="Trending period" value={query.days} onChange={(e) => update({ days: Number(e.target.value) })}>
+        <option value={7}>This week</option><option value={30}>This month</option><option value={90}>3 months</option><option value={365}>This year</option><option value={-1}>All time</option>
+      </select></label>}
+      {selectFilter('Type', 'Type')}{selectFilter('Genre', 'Genre')}{selectFilter('Resolution', 'Resolution')}
+      <button className="button" aria-expanded={more} onClick={() => setMore(!more)}><SlidersHorizontal size={14} />Filters{query.tags.length > 0 ? ` (${query.tags.length})` : ''}</button>
+      {(query.tags.length > 0 || query.search) && <button className="button button-quiet" onClick={() => { setInput(''); update({ search: '', tags: [] }); }}>Clear</button>}
+    </div>
+    {more && <div className="card workshop-more-filters">
+      {selectFilter('Age Rating', 'Age rating')}
+      <div className="workshop-tags">{data?.tagGroups.find((g) => g.name === 'Miscellaneous')?.tags.map((tag) => <label key={tag.tag}>
+        <input type="checkbox" checked={query.tags.includes(tag.tag)} onChange={(e) => update({ tags: e.target.checked ? [...query.tags, tag.tag] : query.tags.filter((t) => t !== tag.tag) })} />{tag.label}
+      </label>)}</div>
+    </div>}
+    <div className="workshop-results-info" role="status">
+      {loading ? 'Loading Steam Workshop…' : data ? `${data.totalItems.toLocaleString()} wallpapers · Page ${data.page.toLocaleString()} of ${data.totalPages.toLocaleString()}` : ''}
+      <span>Public catalog · Sign in to download</span>
+    </div>
+    {error && <div className="workshop-error" role="alert"><span>{error}</span><button className="button" onClick={() => setRetry((n) => n + 1)}>Retry</button></div>}
+    {previewError && <div className="workshop-error" role="alert">{previewError}</div>}
+    <div className="wallpaper-grid workshop-browse-grid" aria-busy={loading}>
+      {!loading && !error && data?.items.map((item) => <button key={item.workshopId} type="button" className="workshop-result card" aria-label={`Preview ${item.title}`} onClick={() => void preview(item.workshopId)} disabled={!!previewing}>
+        <Thumb src={item.previewUrl} alt={item.title} height={150} />
+        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{wallpapers.some((w) => w.workshopId === item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
+          <div className="workshop-result-title" title={item.title}>{item.title}</div>
+          <div className="workshop-result-author">{item.author || 'Workshop creator'}</div>
+          <div className="workshop-result-stats"><span>{count(item.subscribers)} subscribers</span>{item.rating > 0 && <span aria-label={`${item.rating} out of 5 stars`}><Star size={11} fill="currentColor" />{item.rating}/5</span>}</div>
+        </div>
+      </button>)}
+      {loading && Array.from({ length: 9 }, (_, i) => <div className="workshop-skeleton card" key={i}><div /><span /></div>)}
+    </div>
+    {!loading && !error && data?.items.length === 0 && <div className="workshop-empty">No wallpapers match these filters. Try a different search or clear the filters.</div>}
+    {data && data.totalPages > 1 && <div className="workshop-pagination">
+      <button className="button" disabled={loading || data.page <= 1} onClick={() => changePage(1)}>First</button>
+      <button className="button" aria-label="Previous Workshop page" disabled={loading || data.page <= 1} onClick={() => changePage(data.page - 1)}><ChevronLeft size={15} />Previous</button>
+      <form onSubmit={(e) => { e.preventDefault(); const page = Number(jump); if (Number.isInteger(page) && page >= 1 && page <= data.totalPages) changePage(page); }}>
+        <input type="number" min={1} max={data.totalPages} aria-label="Workshop page number" placeholder={String(data.page)} value={jump} onChange={(e) => setJump(e.target.value)} disabled={loading} /><button className="button" type="submit" disabled={loading || !jump}>Go</button>
+      </form>
+      <button className="button" aria-label="Next Workshop page" disabled={loading || data.page >= data.totalPages} onClick={() => changePage(data.page + 1)}>Next<ChevronRight size={15} /></button>
+      <button className="button" disabled={loading || data.page >= data.totalPages} onClick={() => changePage(data.totalPages)}>Last</button>
+    </div>}
+  </div>;
+};

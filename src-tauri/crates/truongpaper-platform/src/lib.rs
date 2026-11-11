@@ -139,3 +139,6 @@ mod tests {
         assert!(WEB_WALLPAPER_PRELOAD_JS.contains("wallpaperRequestRandomFileForProperty"));
     }
 }
+
+/// Native resident-memory readings for the current app process.
+pub mod memory;

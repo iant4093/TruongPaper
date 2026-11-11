@@ -31,6 +31,7 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   photo_blacklist_and_skip: { photoId: 'demo-photo-0003' },
   photo_set_cache_limit: { maxBytes: 500 * 1024 * 1024 },
   photo_reset_history: { albumSlug: 'bald-mountain-11-1' },
+  steam_browse_workshop: {query: {search:'',sort:'trending',page:1,days:7,tags:[]}},
   steam_inspect_url: { urlOrId: 'https://steamcommunity.com/sharedfiles/filedetails/?id=2841928371' },
   steam_download_workshop_item: { urlOrId: '3000000001' },
   steam_login_credentials: { username: 'ian', password: 'secret' },

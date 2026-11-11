@@ -8,3 +8,5 @@ pub mod playlist;
 pub mod settings;
 pub mod steam;
 pub mod updater;
+
+pub mod runtime;

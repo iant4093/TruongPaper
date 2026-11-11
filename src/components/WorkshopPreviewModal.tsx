@@ -1,7 +1,7 @@
 // src/components/WorkshopPreviewModal.tsx
 // §2.1 Floating Liquid Glass "Workshop Preview & Download" modal driven by
 // `steam_inspect_url` + `steam-download://progress` events.
-import React from 'react';
+import React, { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { MonitorSmartphone, X } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
@@ -18,6 +18,21 @@ export const WorkshopPreviewModal: React.FC = () => {
   const closeWorkshopPreview = useAppStore((s) => s.closeWorkshopPreview);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const selectWallpaper = useAppStore((s) => s.selectWallpaper);
+
+  const download = useAppStore((s) => s.downloadWorkshopItem);
+  const openAuth = useAppStore((s) => s.openSteamAuthModal);
+  const [starting, setStarting] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  React.useEffect(() => { setDownloadError(null); setStarting(false); }, [preview?.workshopId]);
+  const startDownload = async () => {
+    if (!preview) return;
+    setStarting(true); setDownloadError(null);
+    try { await download(preview.workshopId); }
+    catch (err) {
+      const message = String(err); setDownloadError(message);
+      if (/auth|login|sign in/i.test(message)) openAuth();
+    } finally { setStarting(false); }
+  };
 
   const open = !!preview && !authModalOpen;
   const progress = preview ? downloadsById[preview.workshopId] : undefined;
@@ -51,7 +66,7 @@ export const WorkshopPreviewModal: React.FC = () => {
             initial={{ scale: 0.96, y: 12 }}
             animate={{ scale: 1, y: 0 }}
             exit={{ scale: 0.96, y: 12 }}
-            style={{ width: 460, padding: 22 }}
+            style={{ width: 460, maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100vh - 32px)', overflowY: 'auto', padding: 22 }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <div style={{ display: 'flex', gap: 6 }}>
@@ -75,7 +90,8 @@ export const WorkshopPreviewModal: React.FC = () => {
             )}
 
             <div style={{ marginTop: 16 }}>
-              {!progress && <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Starting download…</div>}
+              {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && <button className="button button-primary" disabled={starting} onClick={() => void startDownload()}>{starting ? 'Starting download…' : progress?.state === 'error' ? 'Retry download' : 'Download wallpaper'}</button>}
+              {downloadError && <p role="alert" className="workshop-error">{downloadError}</p>}
               {progress?.state === 'downloading' && (
                 <>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
@@ -98,7 +114,7 @@ export const WorkshopPreviewModal: React.FC = () => {
               {progress?.state === 'error' && (
                 <div style={{ fontSize: 12, color: '#fca5a5' }}>Download failed: {progress.error}</div>
               )}
-              {progress?.state === 'completed' && (
+              {(installed || progress?.state === 'completed') && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 12, color: 'var(--accent-cyan)', flex: 1 }}>Added to your library</span>
                   {installed && monitorId && (

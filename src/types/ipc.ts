@@ -5,6 +5,10 @@ export type WallpaperType = 'photo' | 'scene' | 'video' | 'web' | 'application';
 export type FitMode = 'fill' | 'fit_blur' | 'fit_black' | 'stretch';
 export type TransitionType = 'crossfade' | 'blur_dissolve' | 'liquid_glass';
 
+export interface RuntimeMemoryUsage {
+  residentBytes: number;
+}
+
 export interface PhotoItem {
   id: string;
   albumSlug: string;
@@ -126,6 +130,27 @@ export interface WallpaperPreset {
   adjustments: UniversalAdjustments;
 }
 
+export type WorkshopSort = 'trending' | 'most_subscribed' | 'newest' | 'top_rated';
+export interface WorkshopBrowseQuery {
+  search: string;
+  sort: WorkshopSort;
+  page: number;
+  days: number;
+  tags: string[];
+}
+export interface WorkshopBrowseItem extends WorkshopPreview {
+  author: string;
+  subscribers: number;
+  rating: number;
+}
+export interface WorkshopBrowsePage {
+  items: WorkshopBrowseItem[];
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  tagGroups: Array<{name: string; tags: Array<{tag: string; label: string}>}>;
+}
+
 export interface WorkshopPreview {
   workshopId: string;
   title: string;
@@ -198,6 +223,7 @@ export const IPC_COMMANDS = [
   'photo_clear_cache',
   'photo_reset_history',
   // Steam Workshop & Wallpaper Engine
+  'steam_browse_workshop',
   'steam_inspect_url',
   'steam_download_workshop_item',
   'steam_login_qr',
@@ -222,6 +248,7 @@ export const IPC_COMMANDS = [
   'settings_update',
   'update_feed_status',
   'runtime_shutdown_for_update',
+  'runtime_get_memory_usage',
 ] as const;
 
 export type IpcCommand = (typeof IPC_COMMANDS)[number];

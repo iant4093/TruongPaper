@@ -6,7 +6,7 @@ Start with the macOS checks (about 20–30 minutes), then Steam and one wallpape
 
 ## Priority retest: fill, gray flashes, and branding
 
-The follow-up test build is **1.0.1**. Confirm that version in Settings before judging the fix.
+The current local Mac test build is **1.0.2**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current main commit.
 
 1. In Displays, choose **Fill / Center Crop**. It should affect the photo already on the desktop immediately. New installations now default to Fill; existing explicit fit choices are preserved.
 2. Minimize Studio and watch the desktop for at least 60 seconds. The picture should reach every edge without blurred strips, and should not alternate with a blank gray screen.
@@ -66,10 +66,21 @@ Use an animated wallpaper after step 5 for the strongest pause check; a still ph
 
 **Pass:** User pause, automatic pause, audio, and resume agree. Record any mismatch between the label and actual behavior.
 
+## 5a. Public Workshop browsing — no login needed
+
+1. Open Workshop → Discover before signing in. Real thumbnails, creator names, ratings, and subscriber counts should appear.
+2. Search `mountain`. Try Trending / Most subscribed / Newest / Top rated, change the period, then filter Type to Scene, choose a Genre or Resolution, and try the extra Filters. Clear everything afterward.
+3. Use Next, Previous, and the page number field. The page label and wallpaper results should change. Steam caps public browsing at 1,000 pages; narrow a search to reach more specific results.
+4. Click a wallpaper. Its preview should open without downloading. Close it, then try pasting a Workshop link or numeric ID into Discover's search field and press Search.
+5. Disconnect Wi-Fi and change the search; expect an error and Retry. Reconnect and retry. Installed wallpapers should remain available under Installed.
+6. Check the sidebar's separate Disk cache and RAM rows. RAM updates about every three seconds and means the main app process's resident memory; WebKit helpers and GPU allocations are separate. It should not equal the photo-cache size or show a colored status dot.
+
+**Pass:** Browsing is available without sign-in. Previewing never auto-downloads. The top Import field still accepts direct Workshop links/IDs and photo album links as before. Steam's guest visibility/content restrictions apply; the downloader's login does not become a browsing session.
+
 ## 5. Steam sign-in and real downloads — your account is needed
 
-1. Go to Workshop → Manage Steam Account. Complete the Steam Mobile QR flow yourself. Do not paste passwords, QR screenshots, Steam Guard codes, or tokens into this chat.
-2. Import a small Wallpaper Engine Workshop item you have access to. If core assets need to download, let that finish too.
+1. Go to Workshop → Steam account (or Installed → Manage Steam Account). Complete the Steam Mobile QR flow yourself. Do not paste passwords, QR screenshots, Steam Guard codes, or tokens into this chat.
+2. In Discover, preview a small Wallpaper Engine Workshop item you have access to, then choose Download wallpaper. Also test a direct link/ID using the top Import field. If core assets need to download, let that finish too.
 3. Confirm download progress reaches completion, a thumbnail appears, and Apply works.
 4. Test a password/Steam Guard login separately if you use that method. Sign out first; enter credentials only in the app.
 5. If Steam is installed locally, use Sync Local Steam Library. Confirm a subscribed wallpaper appears with its preview and can be applied.

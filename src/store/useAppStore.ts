@@ -132,6 +132,7 @@ function writeJson(key: string, value: unknown): void {
 const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export const useAppStore = create<AppState>((set, get) => {
+  let previewRequest = 0;
   const refreshPhotoStatus = async () => {
     const photoStatus = await invoke<PhotoStatus>('photo_get_status');
     set({ photoStatus });
@@ -348,12 +349,13 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     inspectWorkshopUrl: async (urlOrId) => {
+      const request = ++previewRequest;
       const preview = await invoke<WorkshopPreview>('steam_inspect_url', { urlOrId });
-      set({ inspectedWorkshop: preview });
+      if (request === previewRequest) set({ inspectedWorkshop: preview });
       return preview;
     },
 
-    closeWorkshopPreview: () => set({ inspectedWorkshop: null }),
+    closeWorkshopPreview: () => { previewRequest++; set({ inspectedWorkshop: null }); },
 
     downloadWorkshopItem: async (urlOrId) => {
       await invoke<string>('steam_download_workshop_item', { urlOrId });

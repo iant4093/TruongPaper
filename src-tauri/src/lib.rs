@@ -99,6 +99,7 @@ pub fn run() {
             commands::photo::photo_clear_cache,
             commands::photo::photo_reset_history,
             // --- Steam Workshop & Wallpaper Engine ---
+            commands::steam::steam_browse_workshop,
             commands::steam::steam_inspect_url,
             commands::steam::steam_download_workshop_item,
             commands::steam::steam_login_qr,
@@ -123,6 +124,7 @@ pub fn run() {
             commands::settings::settings_update,
             commands::updater::update_feed_status,
             commands::updater::runtime_shutdown_for_update,
+            commands::runtime::runtime_get_memory_usage,
         ])
         .build(tauri::generate_context!())
         .expect("error while building TruongPaper Tauri application");
@@ -180,7 +182,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 35, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 37, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 
@@ -214,6 +216,7 @@ mod tests {
             .find(|d| d.starts_with("img-src"))
             .unwrap();
         assert!(img_src.contains("https://*.cloudfront.net"));
+        assert!(img_src.contains("https://*.steamusercontent.com"));
         let labels: Vec<&str> = conf["app"]["windows"]
             .as_array()
             .unwrap()

@@ -2,7 +2,10 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for TruongPaper Main Studio and Tray Popover windows",
-  "windows": ["main", "tray-popover"],
+  "windows": [
+    "main",
+    "tray-popover"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -46,6 +49,7 @@
     "allow-photo-set-cache-limit",
     "allow-photo-clear-cache",
     "allow-photo-reset-history",
+    "allow-steam-browse-workshop",
     "allow-steam-inspect-url",
     "allow-steam-download-workshop-item",
     "allow-steam-login-qr",
@@ -67,6 +71,7 @@
     "allow-settings-get",
     "allow-settings-update",
     "allow-update-feed-status",
-    "allow-runtime-shutdown-for-update"
+    "allow-runtime-shutdown-for-update",
+    "allow-runtime-get-memory-usage"
   ]
 }

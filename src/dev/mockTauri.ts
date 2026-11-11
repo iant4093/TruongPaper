@@ -19,6 +19,7 @@ import type {
   WallpaperPreset,
   WallpaperSource,
   WorkshopPreview,
+  WorkshopBrowseQuery,
 } from '../types/ipc';
 
 type Args = Record<string, unknown>;
@@ -506,6 +507,18 @@ export function createMockBackend(
     },
 
     // --- Steam Workshop & Wallpaper Engine ---
+    steam_browse_workshop: (args) => {
+      const query = (args.query ?? {}) as Partial<WorkshopBrowseQuery>;
+      const page = query.page ?? 1;
+      const samples = [
+        { ...previewFor('3800000001'), title: 'Quiet mountain lake', tags: ['Scene', 'Nature', 'Wallpaper'], author: 'Landscape Studio', subscribers: 14250, rating: 5 },
+        { ...previewFor('3800000002'), title: 'City after dark', tags: ['Video', 'City', 'Wallpaper'], author: 'Nightfall', subscribers: 9600, rating: 4 },
+        { ...previewFor('3800000003'), title: 'Minimal orbit', tags: ['Web', 'Abstract', 'Wallpaper'], author: 'Orbit', subscribers: 4100, rating: 4 },
+      ];
+      const items = samples.filter((item) => (!query.search || item.title.toLowerCase().includes(query.search.toLowerCase())) && (query.tags ?? []).every((t) => item.tags.includes(t)));
+      return { items: page === 1 ? items : [...items].reverse(), page, totalPages: items.length ? 3 : 1, totalItems: items.length * 3,
+        tagGroups: [{name: 'Type', tags: ['Scene','Video','Web','Application'].map((tag) => ({tag, label: tag}))}, {name:'Genre', tags:['Nature','City','Abstract'].map((tag) => ({tag,label:tag}))}, {name:'Resolution', tags:[{tag:'1920 x 1080',label:'1920 x 1080'}]}, {name:'Miscellaneous', tags:[{tag:'Audio responsive',label:'Audio responsive'}]}, {name:'Age Rating', tags:[{tag:'Everyone',label:'Everyone'}]}] };
+    },
     steam_inspect_url: (args) => previewFor(parseWorkshopId(args.urlOrId)),
     steam_download_workshop_item: (args) => {
       const workshopId = parseWorkshopId(args.urlOrId);
@@ -633,6 +646,7 @@ export function createMockBackend(
     },
     update_feed_status: () => 'ok',
     runtime_shutdown_for_update: () => null,
+    runtime_get_memory_usage: () => ({ residentBytes: 164 * MB }),
   };
 
   const handlePlugin = (cmd: string, args: Args): unknown => {

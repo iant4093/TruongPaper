@@ -32,13 +32,14 @@ impl AppState {
     /// Builds the state around an already-initialized connection and loads persisted settings.
     pub fn new(conn: Connection, app_data_dir: PathBuf, http: reqwest::Client) -> Self {
         let settings = load_settings(&conn);
+        let steam = Arc::new(SteamSession::new(app_data_dir.join("steam-downloader")));
         Self {
             settings: Arc::new(Mutex::new(settings)),
             db: Arc::new(Mutex::new(conn)),
             app_data_dir,
             http,
             host: Arc::new(WallpaperHost::new()),
-            steam: Arc::new(SteamSession::default()),
+            steam,
         }
     }
 

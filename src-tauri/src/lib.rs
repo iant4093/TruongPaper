@@ -62,11 +62,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(main_win) = app.get_webview_window("main") {
-                let _ = main_win.unminimize();
-                let _ = main_win.show();
-                let _ = main_win.set_focus();
-            }
+            tray::show_studio(app);
         }))
         .register_asynchronous_uri_scheme_protocol(
             protocol::WPE_SCHEME,
@@ -129,12 +125,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building TruongPaper Tauri application");
 
-    app.run(|handle, event| {
-        if let tauri::RunEvent::Exit = event {
+    app.run(|handle, event| match event {
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => tray::show_studio(handle),
+        tauri::RunEvent::Exit => {
             if let Some(state) = handle.try_state::<AppState>() {
                 state.shutdown_now();
             }
         }
+        _ => {}
     });
 }
 

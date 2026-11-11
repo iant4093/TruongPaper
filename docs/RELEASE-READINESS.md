@@ -31,7 +31,7 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 |---|---|
 | Frontend tests | 158 passed |
 | TypeScript / Vite build | Passed |
-| Rust workspace tests (`--locked`) | 401 passed |
+| Rust workspace tests (`--locked`) | 403 passed |
 | Clippy (workspace, all targets, locked) | Passed without warnings |
 | Rust formatting | Passed |
 | GPU smoke example | Passed on Apple M3 Max; initializes adapter and compiles shaders |
@@ -57,6 +57,13 @@ The user observed Fit+Blur edge strips, repeated gray-screen flashing, and the i
 - The user confirmed the corrected test build was stable and filled the screen after minimizing and observing the desktop. Longer sleep/wake and repeated-rotation checks remain in the priority checklist; shader smoke tests alone cannot establish WindowServer stability.
 
 Lock-screen support was also requested for feasibility review. Windows supports still images/snapshots through its personalization API, but not arbitrary live wallpaper on its secure lock screen. macOS needs separate native wallpaper/screensaver integration; the current desktop overlay is not lock-screen support. No lock-screen implementation is included in this build.
+
+## Follow-up in local Mac build 1.0.3
+
+- Reproduced DepotDownloader's SIGABRT by running the manifest probe with Finder's root working directory. Its attempt to write `/depots` failed on macOS. Sidecars now use a writable directory under app data. Sign-in completes after Steam supplies the authenticated account's license list, and the app ends the manifest probe at that point.
+- Retried Workshop item `3836199874` with the user's saved session. Steam reported that the account lacked access to Wallpaper Engine. The preview displayed the specific response once. A download and playback test still needs a Steam account with access to Wallpaper Engine.
+- Dock reopen now shows and focuses Studio through the same function as the tray. The user confirmed that clicking the Dock icon restored the window after closing it.
+- The test Mac used macOS's transparent menu bar. The user confirmed that enabling **Show menu bar background** removed the top fade. This is a macOS appearance preference.
 
 ## Remaining code limitations
 

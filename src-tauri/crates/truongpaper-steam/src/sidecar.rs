@@ -21,6 +21,7 @@ pub enum SidecarEvent {
     QrMatrix(Vec<Vec<bool>>),
     Need2Fa { kind: &'static str, prompt: String },
     LoggedInUsername(String),
+    Authenticated,
     ProgressPercent(f32),
     Completed,
 }
@@ -155,14 +156,56 @@ impl StdoutParser {
     }
 }
 
+/// Translate known failures into user-facing text. Raw output can contain
+/// Steam account names or authentication challenges, so never return it to the UI.
+fn download_failure(output: &str) -> Option<&'static str> {
+    let output = output.to_ascii_lowercase();
+    if output.contains("is not available from this account") {
+        Some("Steam says this account does not have access to Wallpaper Engine. Use a Steam account that owns it.")
+    } else if output.contains("enter account password for")
+        || output.contains("access token was rejected")
+        || output.contains("unable to login to steam3: expired")
+        || output.contains("unable to login to steam3: invalidpassword")
+    {
+        Some("Sign in to Steam again. The saved Steam session is missing or expired.")
+    } else if output.contains("read-only file system")
+        || output.contains("unauthorizedaccessexception")
+        || output.contains("failed to save account settings")
+        || output.contains("unable to create install directories")
+    {
+        Some("The Steam downloader could not write its files. Check that TruongPaper can write to its app data folder.")
+    } else if output.contains("unable to locate manifest id for published file")
+        || output.contains("failed to get published file details")
+    {
+        Some("Steam could not find downloadable files for this Workshop item.")
+    } else if output.contains("could not connect to steam after") {
+        Some("The downloader could not connect to Steam. Try again when Steam is reachable.")
+    } else {
+        None
+    }
+}
+
 /// Reads `stdout` line by line and forwards parsed events.
 pub async fn pump_stdout<R: AsyncRead + Unpin>(
     stdout: R,
     event_tx: &mpsc::Sender<SidecarEvent>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<&'static str>> {
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = StdoutParser::new();
+    let mut failure = None;
     while let Some(line) = lines.next_line().await? {
+        failure = failure.or_else(|| download_failure(&line));
+        // The license list arrives after the account is logged in. A bare
+        // "Done!" can also mean the transport connected, especially on retry.
+        if failure.is_none()
+            && line
+                .trim()
+                .strip_prefix("Got ")
+                .and_then(|line| line.strip_suffix(" licenses for account!"))
+                .is_some_and(|count| count.parse::<u32>().is_ok())
+        {
+            let _ = event_tx.send(SidecarEvent::Authenticated).await;
+        }
         for ev in parser.feed_line(&line) {
             let _ = event_tx.send(ev).await;
         }
@@ -170,7 +213,7 @@ pub async fn pump_stdout<R: AsyncRead + Unpin>(
     for ev in parser.finish() {
         let _ = event_tx.send(ev).await;
     }
-    Ok(())
+    Ok(failure)
 }
 
 /// Reads `stderr` in raw chunks. On a 2FA prompt, emits `Need2Fa`, waits for a code on
@@ -180,20 +223,22 @@ pub async fn pump_stderr<R, W>(
     stdin: &mut W,
     two_fa_rx: &mut mpsc::Receiver<String>,
     event_tx: &mpsc::Sender<SidecarEvent>,
-) where
+) -> Option<&'static str>
+where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut scanner = StderrPromptScanner::new();
+    let mut failure = None;
     let mut buf = [0u8; 1024];
     loop {
         let n = match stderr.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        let Some(prompt) = scanner.push(&buf[..n]) else {
-            continue;
-        };
+        let prompt = scanner.push(&buf[..n]);
+        failure = failure.or_else(|| download_failure(&String::from_utf8_lossy(&scanner.window)));
+        let Some(prompt) = prompt else { continue };
         let _ = event_tx
             .send(SidecarEvent::Need2Fa {
                 kind: prompt.kind,
@@ -222,6 +267,7 @@ pub async fn pump_stderr<R, W>(
             None => break,
         }
     }
+    failure
 }
 
 /// Drives both pipes concurrently until both reach EOF.
@@ -231,29 +277,36 @@ pub async fn drive_streams<O, E, I>(
     mut stdin: I,
     two_fa_rx: &mut mpsc::Receiver<String>,
     event_tx: &mpsc::Sender<SidecarEvent>,
-) -> std::io::Result<()>
+) -> std::io::Result<Option<&'static str>>
 where
     O: AsyncRead + Unpin,
     E: AsyncRead + Unpin,
     I: AsyncWrite + Unpin,
 {
-    let (out, ()) = tokio::join!(
+    let (out, err) = tokio::join!(
         pump_stdout(stdout, event_tx),
         pump_stderr(stderr, &mut stdin, two_fa_rx, event_tx)
     );
-    out
+    Ok(out?.or(err))
 }
 
 /// Spawns `sidecar_bin` with `args`, streams events, and errors on a non-zero exit.
 pub async fn run_depot_downloader_sidecar(
     sidecar_bin: &Path,
+    working_dir: &Path,
     args: &[String],
-    mut two_fa_rx: mpsc::Receiver<String>,
+    two_fa_rx: Option<mpsc::Receiver<String>>,
     event_tx: mpsc::Sender<SidecarEvent>,
 ) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(working_dir).await?;
     let mut cmd = Command::new(sidecar_bin);
-    cmd.args(args)
-        .stdin(Stdio::piped())
+    cmd.current_dir(working_dir)
+        .args(args)
+        .stdin(if two_fa_rx.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -262,10 +315,7 @@ pub async fn run_depot_downloader_sidecar(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let mut child = cmd.spawn()?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("sidecar stdin was not piped"))?;
+    let stdin = child.stdin.take();
     let stdout = child
         .stdout
         .take()
@@ -275,9 +325,18 @@ pub async fn run_depot_downloader_sidecar(
         .take()
         .ok_or_else(|| anyhow::anyhow!("sidecar stderr was not piped"))?;
 
-    drive_streams(stdout, stderr, stdin, &mut two_fa_rx, &event_tx).await?;
+    let failure = if let (Some(stdin), Some(mut codes)) = (stdin, two_fa_rx) {
+        drive_streams(stdout, stderr, stdin, &mut codes, &event_tx).await?
+    } else {
+        let (unused, mut codes) = mpsc::channel(1);
+        drop(unused);
+        drive_streams(stdout, stderr, tokio::io::sink(), &mut codes, &event_tx).await?
+    };
 
     let status = child.wait().await?;
+    if let Some(failure) = failure {
+        anyhow::bail!("{failure}");
+    }
     if !status.success() {
         anyhow::bail!("DepotDownloader exited with status: {status}");
     }
@@ -422,6 +481,33 @@ mod tests {
         let mut stdin: Vec<u8> = Vec::new();
         pump_stderr(EMAIL.as_bytes(), &mut stdin, &mut code_rx, &event_tx).await;
         assert!(stdin.is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirms_login_after_the_license_list_and_reports_missing_access() {
+        let (events, mut received) = mpsc::channel(8);
+        let stdout = "Connecting to Steam3... Done!\n Done!\nGot 12 licenses for account!\nApp 431960 (Wallpaper Engine) is not available from this account.\n";
+        let failure = pump_stdout(stdout.as_bytes(), &events)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failure.contains("does not have access to Wallpaper Engine"));
+        assert_eq!(received.try_recv().unwrap(), SidecarEvent::Authenticated);
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_login_storage_does_not_confirm_a_remembered_session() {
+        let (events, mut received) = mpsc::channel(8);
+        let stdout =
+            "Failed to save account settings: private-path\nGot 12 licenses for account!\n";
+        let failure = pump_stdout(stdout.as_bytes(), &events)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failure.contains("could not write its files"));
+        assert!(!failure.contains("private-path"));
+        assert!(received.try_recv().is_err());
     }
 
     #[tokio::test]

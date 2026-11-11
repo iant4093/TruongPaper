@@ -6,6 +6,14 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
 };
 
+pub(crate) fn show_studio(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_studio = MenuItem::with_id(
         app,
@@ -57,11 +65,7 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open_studio" => {
-                if let Some(main_win) = app.get_webview_window("main") {
-                    let _ = main_win.unminimize();
-                    let _ = main_win.show();
-                    let _ = main_win.set_focus();
-                }
+                show_studio(app);
             }
             "next_wallpaper" => {
                 let _ = app.emit("tray://next-requested", ());

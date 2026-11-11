@@ -6,7 +6,7 @@ Start with the macOS checks (about 20–30 minutes), then Steam and one wallpape
 
 ## Start here: the new Workshop browser and RAM meter
 
-The local Mac build is **1.0.2** and is already running. These are the first checks that need your account or your observation:
+The local Mac build is **1.0.3** and is already running. These are the first checks that need your account or your observation:
 
 1. Open Workshop → Discover without signing in. Search a subject, change Type/Genre/Resolution, and try Next/Previous. Open a preview; it must wait for Download wallpaper.
 2. Check that the sidebar has separate RAM and Disk cache rows and no status dot. RAM refreshes about every three seconds and reports the main process; helper processes and GPU memory are separate.
@@ -14,17 +14,18 @@ The local Mac build is **1.0.2** and is already running. These are the first che
 4. Paste another direct Workshop URL or ID into the top Import field. Also check an existing photo-album link.
 5. Watch the wallpaper for three loops, try Pause/Resume, then lock/unlock and sleep/wake. Repeat the guest browsing and download/apply checks on Windows when available.
 
-The native guest gallery, a real Steam QR appearing before login, the packaged downloader starting, 158 frontend tests, and 401 Rust tests have already passed. Completing Steam authentication, a real account download, wallpaper compatibility, and Windows desktop behavior still need your testing. Detailed checks follow below.
+The native guest gallery, a real Steam QR appearing before login, the packaged downloader starting, 158 frontend tests, and 403 Rust tests have already passed. Completing Steam authentication, a real account download, wallpaper compatibility, and Windows desktop behavior still need your testing. Detailed checks follow below.
 
 ## Priority retest: fill, gray flashes, and branding
 
-The current local Mac test build is **1.0.2**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current app changes.
+The current local Mac test build is **1.0.3**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current app changes.
 
 1. In Displays, choose **Fill / Center Crop**. It should affect the photo already on the desktop immediately. New installations now default to Fill; existing explicit fit choices are preserved.
 2. Minimize Studio and watch the desktop for at least 60 seconds. The picture should reach every edge without blurred strips, and should not alternate with a blank gray screen.
 3. Bring Studio forward and hide it several times, rotate through three photos, and test Pause/Resume. Then lock/unlock once. A static photo should redraw after resume without repeated window destruction.
 4. Check the new layered-photo icon in the Dock, Finder, app sidebar, and browser tab. The menu bar should use a small transparent photo mark rather than a solid black tile.
-5. Report immediately if gray flashing remains; the automated GPU/shader checks do not establish WindowServer stability.
+5. Check for gray flashing after sleep or repeated rotations.
+6. If you prefer a defined menu bar edge, enable System Settings → Menu Bar → Show menu bar background. This removed the wide fade on the test Mac.
 
 ## 1. Open the current build
 
@@ -47,7 +48,7 @@ The current local Mac test build is **1.0.2**, including the wallpaper fixes, ne
 3. After importing a Workshop wallpaper in step 5, click its thumbnail. Its details and property controls should open. Toggle details off, select another wallpaper, and confirm details update.
 4. In Library, search for a title and try the Scene, Video, and Web filters. Clear the search.
 5. Press Tab through the visible controls. Focus should remain visible and fields should accept normal text selection/copy/paste.
-6. Close the Studio window. The wallpaper should keep running. Reopen Studio from its menu-bar/system-tray control.
+6. Close the Studio window. The wallpaper should keep running. On macOS, click the TruongPaper Dock icon to reopen Studio. Also check Open TruongPaper Studio from the menu bar or Windows system tray.
 
 **Pass:** Text is readable, controls fit, scrolling reaches every setting, and selecting a thumbnail does not apply a wallpaper until Apply is used. Closing Studio hides the window without quitting the engine.
 
@@ -91,7 +92,7 @@ Use an animated wallpaper after step 5 for the strongest pause check; a still ph
 
 ## 5. Steam sign-in and real downloads — your account is needed
 
-1. Go to Workshop → Steam account (or Installed → Manage Steam Account). Complete the Steam Mobile QR flow yourself. Do not paste passwords, QR screenshots, Steam Guard codes, or tokens into this chat.
+1. Go to Workshop → Steam account (or Installed → Manage Steam Account). Complete the Steam Mobile QR flow yourself. Use an account with access to Wallpaper Engine for the download test. Do not paste passwords, QR screenshots, Steam Guard codes, or tokens into this chat.
 2. In Discover, preview a small Wallpaper Engine Workshop item you have access to, then choose Download wallpaper. Also test a direct link/ID using the top Import field. If core assets need to download, let that finish too.
 3. Confirm download progress reaches completion, a thumbnail appears, and Apply works.
 4. Test a password/Steam Guard login separately if you use that method. Sign out first; enter credentials only in the app.

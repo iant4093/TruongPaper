@@ -11,10 +11,13 @@ async fn main() -> anyhow::Result<()> {
             .nth(1)
             .context("Pass the bundled DepotDownloader path")?,
     );
+    let binary = binary.canonicalize()?;
+    let working_dir = std::env::temp_dir().join("truongpaper-steam-qr-probe");
     let (_code_tx, codes) = mpsc::channel(1);
     let (events, mut received) = mpsc::channel(16);
     let task = tokio::spawn(async move {
-        run_depot_downloader_sidecar(&binary, &qr_login_args(), codes, events).await
+        run_depot_downloader_sidecar(&binary, &working_dir, &qr_login_args(), Some(codes), events)
+            .await
     });
     let result = tokio::time::timeout(Duration::from_secs(45), async {
         while let Some(event) = received.recv().await {

@@ -70,7 +70,7 @@ export const UniversalOmnibar: React.FC = () => {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.toLowerCase().includes('auth') || msg.toLowerCase().includes('login')) {
+      if (parsed.kind === 'steam_workshop' && /^(sign in to steam|steam login required)/i.test(msg)) {
         openSteamAuthModal();
       }
       setStatusMsg(msg);

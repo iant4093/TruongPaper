@@ -29,13 +29,15 @@ export const WorkshopPreviewModal: React.FC = () => {
     setStarting(true); setDownloadError(null);
     try { await download(preview.workshopId); }
     catch (err) {
-      const message = String(err); setDownloadError(message);
-      if (/auth|login|sign in/i.test(message)) openAuth();
+      const message = err instanceof Error ? err.message : String(err);
+      setDownloadError(message);
+      if (/^(sign in to steam|steam login required)/i.test(message)) openAuth();
     } finally { setStarting(false); }
   };
 
   const open = !!preview && !authModalOpen;
   const progress = preview ? downloadsById[preview.workshopId] : undefined;
+  const error = downloadError ?? (progress?.state === 'error' ? progress.error : null);
   const installed = preview ? wallpapers.find((w) => w.workshopId === preview.workshopId) : undefined;
   const monitorId = selectedMonitorId ?? monitors[0]?.monitorId;
 
@@ -91,7 +93,7 @@ export const WorkshopPreviewModal: React.FC = () => {
 
             <div style={{ marginTop: 16 }}>
               {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && <button className="button button-primary" disabled={starting} onClick={() => void startDownload()}>{starting ? 'Starting download…' : progress?.state === 'error' ? 'Retry download' : 'Download wallpaper'}</button>}
-              {downloadError && <p role="alert" className="workshop-error">{downloadError}</p>}
+              {error && <p role="alert" className="workshop-error">{error}</p>}
               {progress?.state === 'downloading' && (
                 <>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
@@ -110,9 +112,6 @@ export const WorkshopPreviewModal: React.FC = () => {
                     />
                   </div>
                 </>
-              )}
-              {progress?.state === 'error' && (
-                <div style={{ fontSize: 12, color: '#fca5a5' }}>Download failed: {progress.error}</div>
               )}
               {(installed || progress?.state === 'completed') && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

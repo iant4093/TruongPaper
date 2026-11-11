@@ -36,16 +36,30 @@ const SIDECAR_NAME: &str = "DepotDownloader";
 /// Running DepotDownloader processes and the 2FA code channel of the interactive one.
 #[derive(Default)]
 pub struct SteamSession {
+    working_dir: PathBuf,
     two_fa_tx: Mutex<Option<(u64, mpsc::Sender<String>)>>,
     tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     next_id: AtomicU64,
 }
 
 impl SteamSession {
-    fn register(&self, handle: tokio::task::AbortHandle, two_fa: mpsc::Sender<String>) -> u64 {
+    pub fn new(working_dir: PathBuf) -> Self {
+        Self {
+            working_dir,
+            ..Self::default()
+        }
+    }
+
+    fn register(
+        &self,
+        handle: tokio::task::AbortHandle,
+        two_fa: Option<mpsc::Sender<String>>,
+    ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.tasks.lock().insert(id, handle);
-        *self.two_fa_tx.lock() = Some((id, two_fa));
+        if let Some(two_fa) = two_fa {
+            *self.two_fa_tx.lock() = Some((id, two_fa));
+        }
         id
     }
 
@@ -125,23 +139,42 @@ fn resolve_sidecar() -> Result<PathBuf, String> {
 async fn run_sidecar(
     session: &Arc<SteamSession>,
     args: Vec<String>,
+    signing_in: bool,
     mut on_event: impl FnMut(SidecarEvent) + Send,
 ) -> Result<(), String> {
     let bin = resolve_sidecar()?;
+    let working_dir = session.working_dir.clone();
     let (two_fa_tx, two_fa_rx) = mpsc::channel::<String>(4);
     let (event_tx, mut event_rx) = mpsc::channel::<SidecarEvent>(64);
     let task = tokio::spawn(async move {
-        run_depot_downloader_sidecar(&bin, &args, two_fa_rx, event_tx)
-            .await
-            .map_err(|e| e.to_string())
+        run_depot_downloader_sidecar(
+            &bin,
+            &working_dir,
+            &args,
+            signing_in.then_some(two_fa_rx),
+            event_tx,
+        )
+        .await
+        .map_err(|e| e.to_string())
     });
-    let id = session.register(task.abort_handle(), two_fa_tx);
+    let id = session.register(task.abort_handle(), signing_in.then_some(two_fa_tx));
     while let Some(ev) = event_rx.recv().await {
+        if signing_in && ev == SidecarEvent::Authenticated {
+            // The token is saved before Steam confirms the session. End the
+            // manifest probe here so sign-in does not depend on a depot license.
+            task.abort();
+            let _ = task.await;
+            session.unregister(id);
+            return Ok(());
+        }
         on_event(ev);
     }
     let res = task.await;
     session.unregister(id);
     match res {
+        Ok(Ok(())) if signing_in => {
+            Err("Steam ended the sign-in without confirming the session.".into())
+        }
         Ok(r) => r,
         Err(err) if err.is_cancelled() => Err("Steam task was cancelled".into()),
         Err(err) => Err(err.to_string()),
@@ -240,7 +273,7 @@ async fn bootstrap_core_assets_if_needed(session: Arc<SteamSession>, root: PathB
             return;
         }
     };
-    if let Err(err) = run_sidecar(&session, args, |_| {}).await {
+    if let Err(err) = run_sidecar(&session, args, false, |_| {}).await {
         tracing::warn!("core assets bootstrap failed: {err}");
     }
 }
@@ -280,7 +313,7 @@ pub async fn steam_download_workshop_item(
     emit_progress(&app, &workshop_id, &title, 0.0, "downloading", None);
     let progress_app = app.clone();
     let (pid, ptitle) = (workshop_id.clone(), title.clone());
-    let result = run_sidecar(&state.steam, args, move |ev| match &ev {
+    let result = run_sidecar(&state.steam, args, false, move |ev| match &ev {
         SidecarEvent::ProgressPercent(pct) => {
             emit_progress(&progress_app, &pid, &ptitle, *pct, "downloading", None)
         }
@@ -320,26 +353,14 @@ pub async fn steam_download_workshop_item(
 /// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves the account name on success.
 #[tauri::command]
 pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let captured: Arc<Mutex<Option<String>>> = Arc::default();
-    let sink = Arc::clone(&captured);
-    let ev_app = app.clone();
-    let result = run_sidecar(&state.steam, qr_login_args(), move |ev| match &ev {
-        SidecarEvent::LoggedInUsername(user) => {
-            if let Err(err) = VAULT.put(SECRET_STEAM_USERNAME, Some(user)) {
-                tracing::warn!("could not save Steam account name: {err}");
-            }
-            *sink.lock() = Some(user.clone());
-        }
-        other => emit_auth(&ev_app, other),
+    let mut account = None;
+    run_sidecar(&state.steam, qr_login_args(), true, |ev| match &ev {
+        SidecarEvent::LoggedInUsername(user) => account = Some(user.clone()),
+        other => emit_auth(&app, other),
     })
-    .await;
-    let user = captured.lock().clone();
-    match (result, user) {
-        // Auth succeeded even if the `-manifest-only` probe exited non-zero afterwards.
-        (_, Some(_)) => Ok(()),
-        (Ok(()), None) => Err("Steam login finished but no account name was reported".into()),
-        (Err(err), None) => Err(err),
-    }
+    .await?;
+    let account = account.ok_or_else(|| "Steam signed in, but the downloader did not report the account name. Try Username & 2FA.".to_string())?;
+    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))
 }
 
 /// `-username -password` login; `steam-auth://need-2fa` is emitted when Steam Guard asks.
@@ -352,20 +373,8 @@ pub async fn steam_login_credentials(
 ) -> Result<(), String> {
     let args = password_login_args(&username, &password).map_err(|e| e.to_string())?;
     drop(password);
-    let captured: Arc<Mutex<Option<String>>> = Arc::default();
-    let sink = Arc::clone(&captured);
-    let ev_app = app.clone();
-    let result = run_sidecar(&state.steam, args, move |ev| match &ev {
-        SidecarEvent::LoggedInUsername(user) => *sink.lock() = Some(user.clone()),
-        other => emit_auth(&ev_app, other),
-    })
-    .await;
-    result?;
-    let account = captured
-        .lock()
-        .clone()
-        .unwrap_or_else(|| username.trim().to_string());
-    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))
+    run_sidecar(&state.steam, args, true, |ev| emit_auth(&app, &ev)).await?;
+    VAULT.put(SECRET_STEAM_USERNAME, Some(username.trim()))
 }
 
 #[tauri::command]
@@ -442,7 +451,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         });
         let (tx, mut rx) = mpsc::channel(1);
-        let id = session.register(task.abort_handle(), tx);
+        let id = session.register(task.abort_handle(), Some(tx));
         assert_eq!(session.running_count(), 1);
         session
             .two_fa_sender()

@@ -203,6 +203,7 @@ export interface AppSettings {
   pauseOnMaximized: boolean;
   batteryPolicy: 'continue' | 'pause_animations' | 'switch_to_photo';
   launchAtLogin: boolean;
+  syncLockScreen: boolean;
 }
 
 // ---------------------------------------------------------------------------

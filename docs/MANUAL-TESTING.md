@@ -12,7 +12,7 @@ Start with the macOS checks (about 20–30 minutes), then Steam and one wallpape
 4. Select **Switch to Photos**. With matching photos already in the offline queue, the desktop should switch promptly. Confirm the popover shows a miniature of the current photo above the controls.
 5. In **Photography**, enable **Match photo orientation to display**, then advance through several photos. Landscape and portrait displays should use photos of the corresponding orientation. When none fit the active pool, rotation keeps the current wallpaper and can refill the matching queue.
 6. Open **Scheme Color** in the inspector. Change a slider or enter a hex value, then try **Apply** and **Cancel**. The picker should appear inside Studio.
-7. On Mac, use **Displays → Prepare Lock Screen Still**. Add the JPEG revealed in Finder in **System Settings → Wallpaper**, enable **Show on all Spaces**, and lock with **Control–Command–Q**. On Windows, use **Displays → Set Lock Screen Still** and lock with **Win–L**.
+7. On Mac, use **Displays → Prepare Lock Screen Still**. Add the JPEG revealed in Finder in **System Settings → Wallpaper**, enable **Show on all Spaces**, and lock with **Control–Command–Q**. On Windows, enable **Displays → Follow the primary display**, switch to a different photo or Workshop wallpaper, then lock with **Win–L**. Repeat with a second wallpaper to verify the still changes, then turn the switch off and verify the lock screen keeps the last still.
 8. In **Playlists**, switch between the three rotation sources and check that **Apply Rotation Source** stays in place. Open the wallpaper and playlist menus. In the Library, verify the preset controls fit within the details panel.
 
 ## Workshop browser and RAM meter

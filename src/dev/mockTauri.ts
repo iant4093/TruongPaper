@@ -277,6 +277,7 @@ export function createMockBackend(
     pauseOnMaximized: false,
     batteryPolicy: 'pause_animations',
     launchAtLogin: true,
+    syncLockScreen: false,
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });

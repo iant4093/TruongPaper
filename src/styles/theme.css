@@ -137,6 +137,7 @@ input.button { cursor: text; }
 .tray-wallpaper-preview img { object-fit: contain; }
 .tray-transition { max-width: 185px; }
 .lock-screen-card { display: grid; gap: 8px; justify-items: start; padding: 14px 16px; }
+.lock-screen-card .toggle-row { justify-self: stretch; margin-bottom: 0; }
 .tray-wallpaper-error { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ffadad; }
 .playback-bar { display: flex; align-items: center; gap: 12px; min-height: 66px; padding: 12px 24px; background: #1c1c1c; border-top: 1px solid #303030; flex-shrink: 0; }
 .now-playing-image { width: 50px; flex-shrink: 0; }

@@ -46,6 +46,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // (photos and scenes). Both stop on `AppState::shutdown_now`.
     wallpaper_webview::start(app.handle().clone(), host.clone());
     desktop_host::start(app.handle().clone(), host, settings);
+    #[cfg(target_os = "windows")]
+    commands::lock_screen::start_sync(app.handle());
     scheduler::spawn(app.handle().clone());
     Ok(())
 }

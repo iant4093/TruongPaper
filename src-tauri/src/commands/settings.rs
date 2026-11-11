@@ -46,6 +46,10 @@ pub async fn settings_update(
     if before.launch_at_login != after.launch_at_login {
         apply_launch_at_login(&app, after.launch_at_login);
     }
+    #[cfg(target_os = "windows")]
+    if before.sync_lock_screen != after.sync_lock_screen {
+        super::lock_screen::request_sync(&app);
+    }
     Ok(())
 }
 

@@ -42,6 +42,7 @@ export const MonitorsView: React.FC = () => {
   const active = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0] ?? null;
   const { wallpaper, photo } = currentWallpaperForMonitor(active ?? undefined, wallpapers, photoStatus);
   const mac = /Mac/.test(navigator.platform);
+  const windows = /Win/.test(navigator.platform);
   const lookup = {
     wallpaperTitle: (id: string) => wallpapers.find((w) => w.wallpaperId === id)?.title,
     playlistName: (id: string) => playlists.find((p) => p.playlistId === id)?.name,
@@ -169,9 +170,20 @@ export const MonitorsView: React.FC = () => {
 
       <SectionTitle>Lock Screen</SectionTitle>
       <div className="card lock-screen-card">
+        {windows && (
+          <ToggleRow
+            label="Follow the primary display"
+            description="Update the lock screen still when the primary wallpaper changes."
+            checked={settings?.syncLockScreen ?? false}
+            onChange={(syncLockScreen) => {
+              setLockScreenStatus(null);
+              void updateSettings({ syncLockScreen }).catch((error) => setLockScreenStatus(String(error)));
+            }}
+          />
+        )}
         <div className="view-subtitle">
           Use a still of the selected display’s wallpaper. Workshop items use their preview image.
-          {mac && ' macOS lets you choose the shared image in System Settings → Wallpaper.'}
+          {mac && ' Choose the image in System Settings → Wallpaper. The lock screen keeps that still when TruongPaper rotates.'}
         </div>
         <button type="button" className="button" disabled={lockScreenPending || !(photo || wallpaper?.previewPath)}
           onClick={() => void setLockScreen()}>

@@ -18,31 +18,13 @@ use objc2_app_kit::{
     NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSRect, NSString, NSURL};
+use objc2_foundation::{NSArray, NSNumber, NSRect, NSString, NSURL};
 
-/// Sets the wallpaper for the current Space and reveals the still for use in Wallpaper settings.
-pub fn prepare_system_wallpaper(
-    mtm: MainThreadMarker,
-    path: &std::path::Path,
-) -> Result<(), String> {
-    let screen = NSScreen::screens(mtm)
-        .firstObject()
-        .ok_or("No primary display is available")?;
+/// Reveals a still for the user to choose in Wallpaper settings. Applying it through NSWorkspace
+/// would change only the current Space and could turn off "Show on all Spaces".
+pub fn reveal_system_wallpaper(_mtm: MainThreadMarker, path: &std::path::Path) {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    // SAFETY: the primary NSScreen is accessed on the main thread. Empty options use
-    // the system's default scaling.
-    let workspace = NSWorkspace::sharedWorkspace();
-    let result = unsafe {
-        workspace
-            .setDesktopImageURL_forScreen_options_error(&url, &screen, &NSDictionary::new())
-            .map_err(|error| error.localizedDescription().to_string())
-    };
-    // A desktop wallpaper error does not prevent choosing the prepared image manually.
-    if let Err(error) = result {
-        tracing::warn!("could not set desktop wallpaper for current Space: {error}");
-    }
-    workspace.activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
-    Ok(())
+    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
 }
 
 define_class!(

@@ -146,6 +146,8 @@ pub struct AppSettings {
     pub pause_on_maximized: bool,
     pub battery_policy: String,
     pub launch_at_login: bool,
+    #[serde(default)]
+    pub sync_lock_screen: bool,
 }
 
 impl Default for AppSettings {
@@ -164,6 +166,7 @@ impl Default for AppSettings {
             pause_on_maximized: false,
             battery_policy: "pause_animations".into(),
             launch_at_login: false,
+            sync_lock_screen: false,
         }
     }
 }

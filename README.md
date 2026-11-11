@@ -28,7 +28,7 @@ Workshop includes a native **Discover** gallery with public guest browsing, sear
 
 ## Screenshots
 
-The screenshots below use the interactive browser preview with sample wallpapers. The [native macOS screenshot](docs/screenshots/native-library.jpg) uses real photo API data.
+The Workshop gallery below is the native macOS app using the public Steam catalog. The other grid screenshots use the browser preview with sample data; the [native Library screenshot](docs/screenshots/native-library.jpg) uses real photo API data.
 
 <table>
   <tr>
@@ -43,8 +43,8 @@ The screenshots below use the interactive browser preview with sample wallpapers
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/workshop-download.jpg" width="100%" alt="Steam Workshop URL paste modal showing live depot download progress, the wallpaper details and download status">
-      <p align="center"><sub><b>Steam Workshop</b> · paste any Workshop link to download and apply</sub></p>
+      <img src="docs/screenshots/native-workshop.jpg" width="100%" alt="Native Steam Workshop discovery with search, tag filters, real public thumbnails and a separate RAM reading">
+      <p align="center"><sub><b>Steam Workshop</b> · browse the public catalog inside the app; direct links still work</sub></p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/screenshots/scene-inspector.jpg" width="100%" alt="Dynamic Wallpaper Engine property inspector with auto-generated sliders, color pickers, toggles, presets and audio FFT sensitivity">

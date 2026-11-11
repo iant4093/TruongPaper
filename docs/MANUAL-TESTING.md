@@ -4,9 +4,21 @@ Use this checklist after the automated checks pass. Test the actual desktop app,
 
 Start with the macOS checks (about 20–30 minutes), then Steam and one wallpaper of each type (another 15–30 minutes). Multi-display and Windows checks can be done separately when those devices are available. Stop at the first failure in a section and send the report format at the end; you do not need to debug it yourself.
 
+## Start here: the new Workshop browser and RAM meter
+
+The local Mac build is **1.0.2** and is already running. These are the first checks that need your account or your observation:
+
+1. Open Workshop → Discover without signing in. Search a subject, change Type/Genre/Resolution, and try Next/Previous. Open a preview; it must wait for Download wallpaper.
+2. Check that the sidebar has separate RAM and Disk cache rows and no status dot. RAM refreshes about every three seconds and reports the main process; helper processes and GPU memory are separate.
+3. Open Steam account, scan the QR yourself, preview a small wallpaper, and choose Download wallpaper. Apply it after completion. Record its Workshop ID if anything fails. Never send login secrets in your report.
+4. Paste another direct Workshop URL or ID into the top Import field. Also check an existing photo-album link.
+5. Watch the wallpaper for three loops, try Pause/Resume, then lock/unlock and sleep/wake. Repeat the guest browsing and download/apply checks on Windows when available.
+
+The native guest gallery, a real Steam QR appearing before login, the packaged downloader starting, 158 frontend tests, and 401 Rust tests have already passed. Completing Steam authentication, a real account download, wallpaper compatibility, and Windows desktop behavior still need your testing. Detailed checks follow below.
+
 ## Priority retest: fill, gray flashes, and branding
 
-The current local Mac test build is **1.0.2**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current main commit.
+The current local Mac test build is **1.0.2**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current app changes.
 
 1. In Displays, choose **Fill / Center Crop**. It should affect the photo already on the desktop immediately. New installations now default to Fill; existing explicit fit choices are preserved.
 2. Minimize Studio and watch the desktop for at least 60 seconds. The picture should reach every edge without blurred strips, and should not alternate with a blank gray screen.

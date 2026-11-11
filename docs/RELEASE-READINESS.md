@@ -40,10 +40,10 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 | Live Steam QR probe | Delivered a real 74×74 QR before authentication; challenge was neither printed nor saved |
 | Packaged downloader startup | Passed with required JIT entitlement; CI also checks the bundled binary without network access |
 | Public Workshop live probe | Guest catalog: 30 results, five filter groups; filtered mountain/Scene search on page 2 passed |
-| Native macOS app | Opened with real photo data; Next rotated through the backend |
+| Native macOS app | Final 1.0.2 opened with real photo data; guest search/filter/page 2 and metadata preview passed; RAM samples changed independently of disk cache; Steam QR rendered before login |
 | Browser visual checks | Library, Photography, Workshop, inspector, Displays, Playlists, Settings, download dialog, tray; minimum 980×640 layout checked |
 
-Installer build results and current CI status are available in [GitHub Actions](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml). Use the latest successful run for the current `main` commit, not the first run or an older artifact.
+Installer build results and current CI status are available in [GitHub Actions](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml). Use the latest successful run containing the current app changes, not the first run or an older artifact.
 
 ## Follow-up to the first desktop test
 

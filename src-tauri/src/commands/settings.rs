@@ -34,6 +34,15 @@ pub async fn settings_update(
         (before, after)
     };
 
+    if before.default_fit_mode != after.default_fit_mode
+        || before.transition_type != after.transition_type
+    {
+        state.host.update_photo_defaults(
+            crate::models::IpcFitMode::from_setting(&after.default_fit_mode),
+            crate::models::IpcTransitionType::from_setting(&after.transition_type),
+        );
+    }
+
     if before.launch_at_login != after.launch_at_login {
         apply_launch_at_login(&app, after.launch_at_login);
     }

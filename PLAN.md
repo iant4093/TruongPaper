@@ -1,5 +1,7 @@
 # TruongPaper — Master Architecture & Implementation Blueprint
 
+> **2026-11-10 user overrides:** The interface now uses a simple neutral dark theme rather than Liquid Glass. Photo fit defaults to **Fill / Center Crop**, and fit/transition changes must update the currently visible photo immediately. macOS uses an explicitly hosted Metal root layer and avoids rebuilding windows for unchanged display notifications. See `docs/RELEASE-READINESS.md` for verified follow-ups and limitations.
+
 > **Status**: Ready for Implementation (Zero Ambiguities — Copy-Paste-Ready Specifications)  
 > **Reference Repo Standard**: [`https://github.com/iant4093/TruongFlix`](https://github.com/iant4093/TruongFlix) (Identical repository layout, `README.md` structure, sidecar bundler pattern, GitHub Actions CI/Release workflow, and signed auto-updater)  
 > **Target Platforms**: macOS (`14.2+` Apple Silicon & Intel) & Windows (`10 1809+`, `11 23H2`, and `11 24H2` `x64` & `ARM64`)  

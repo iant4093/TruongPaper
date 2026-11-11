@@ -478,6 +478,20 @@ impl WallpaperHost {
         rt.uniforms = uniforms;
     }
 
+    /// Settings changes affect already-visible photos as well as the next source apply.
+    pub fn update_photo_defaults(
+        &self,
+        fit: crate::models::IpcFitMode,
+        transition: crate::models::IpcTransitionType,
+    ) {
+        for rt in self.monitors.lock().values_mut() {
+            if matches!(rt.active, ActiveRuntime::Photo { .. }) {
+                rt.adjustments.fit_mode = fit;
+                rt.uniforms = rt.adjustments.compositor_uniforms(transition);
+            }
+        }
+    }
+
     /// Updates compositor uniforms on every monitor currently showing `wallpaper_id`.
     pub fn update_uniforms_for_wallpaper(&self, wallpaper_id: &str, uniforms: CompositorUniforms) {
         for rt in self.monitors.lock().values_mut() {
@@ -543,6 +557,33 @@ impl WallpaperHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photo_fit_and_transition_settings_update_live_without_replacing_the_image() {
+        use crate::models::{IpcFitMode, IpcTransitionType};
+        let host = WallpaperHost::new();
+        host.set_photo("A", PathBuf::from("/photo.jpg"), None);
+        host.set_runtime("B", scene(), UniversalAdjustments::default(), false);
+        let scene_before = host.monitor("B").unwrap();
+        let photo_before = host.monitor("A").unwrap();
+        host.update_photo_defaults(IpcFitMode::Fill, IpcTransitionType::Crossfade);
+        let photo = host.monitor("A").unwrap();
+        assert_eq!(photo.generation, photo_before.generation);
+        assert_eq!(photo.active, photo_before.active);
+        assert_eq!(
+            photo.uniforms.to_fit_mode,
+            truongpaper_renderer::FitMode::Fill as u32
+        );
+        assert_eq!(
+            host.monitor("B").unwrap().uniforms.to_fit_mode,
+            scene_before.uniforms.to_fit_mode
+        );
+        host.update_photo_defaults(IpcFitMode::Stretch, IpcTransitionType::BlurDissolve);
+        assert_eq!(
+            host.monitor("A").unwrap().uniforms.to_fit_mode,
+            truongpaper_renderer::FitMode::Stretch as u32
+        );
+    }
 
     #[test]
     fn scene_revision_detects_asset_updates_and_ignores_extraction_cache() {

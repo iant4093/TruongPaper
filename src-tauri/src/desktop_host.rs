@@ -75,6 +75,14 @@ pub struct MonitorGeometry {
     pub physical: (i32, i32, u32, u32),
 }
 
+/// Display notifications can be emitted without any drawable geometry change. Recreating
+/// windows in response to those notifications exposes the blank AppKit backing between frames.
+pub fn surface_geometry_changed(current: &[MonitorGeometry], next: &[MonitorGeometry]) -> bool {
+    !next.is_empty()
+        && (current.len() != next.len()
+            || current.iter().any(|old| !next.iter().any(|new| old == new)))
+}
+
 /// Geometry of every connected monitor (ids as in `commands::monitor::live_monitors`).
 pub fn monitor_geometries(app: &AppHandle) -> Vec<MonitorGeometry> {
     live_monitors(app)
@@ -377,7 +385,7 @@ pub struct SurfaceTarget {
 mod platform {
     use super::{match_screens_to_monitors, MonitorGeometry, SurfaceTarget};
     use objc2::rc::Retained;
-    use objc2::MainThreadMarker;
+    use objc2::{class, msg_send, MainThreadMarker};
     use objc2_app_kit::{NSScreen, NSWindow};
     use std::cell::RefCell;
     use std::ptr::NonNull;
@@ -404,6 +412,19 @@ mod platform {
         let view = window
             .contentView()
             .ok_or("desktop window has no content view")?;
+        // Own the Metal root layer rather than let AppKit paint a backing layer under a
+        // wgpu-created sublayer. Layer-hosting views keep their last presented drawable even
+        // while the wallpaper is static/paused and AppKit invalidates the window.
+        // Apple requires setLayer before setWantsLayer for a layer-hosting view.
+        // https://developer.apple.com/documentation/appkit/nsview/wantslayer
+        unsafe {
+            let layer: Retained<objc2::runtime::AnyObject> = msg_send![class!(CAMetalLayer), new];
+            let _: () = msg_send![&*layer, setFrame: view.bounds()];
+            let _: () = msg_send![&*layer, setContentsScale: window.backingScaleFactor()];
+            let _: () = msg_send![&*layer, setOpaque: true];
+            let _: () = msg_send![&*view, setLayer: &*layer];
+            view.setWantsLayer(true);
+        }
         let ptr = NonNull::new(Retained::as_ptr(&view) as *mut std::ffi::c_void)
             .ok_or("null content view")?;
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -921,6 +942,7 @@ struct MonitorRenderer {
     transition_started: Option<Instant>,
     last_uniforms: Option<CompositorUniforms>,
     dirty: bool,
+    was_rendering: bool,
     started: Instant,
 }
 
@@ -976,6 +998,7 @@ impl MonitorRenderer {
             transition_started: None,
             last_uniforms: None,
             dirty: true,
+            was_rendering: false,
             started: Instant::now(),
         })
     }
@@ -1104,6 +1127,12 @@ impl MonitorRenderer {
         geoms: &[MonitorGeometry],
         cursor: &mut CursorPoller,
     ) -> bool {
+        // WindowServer can discard a drawable while hidden/asleep. Static photos must
+        // repaint once on resume even though their compositor settings did not change.
+        if should_render && !self.was_rendering {
+            self.dirty = true;
+        }
+        self.was_rendering = should_render;
         let base = rt.map(|r| r.uniforms).unwrap_or_default();
         let adjustments = rt.map(|r| r.adjustments).unwrap_or_default();
         if let Content::Scene(scene) = &mut self.content {
@@ -1459,6 +1488,7 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
     let mut desktop = platform::DesktopSurfaces::new();
     let mut geoms = monitor_geometries(&app);
     let mut geoms_at = Instant::now();
+    let mut surface_geoms = geoms.clone();
     let mut targets = desktop.create(&app, &instance, &geoms);
     let Some(first) = targets.first() else {
         tracing::warn!("no desktop surfaces were created; desktop renderer not attached");
@@ -1489,20 +1519,26 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
         let loop_start = Instant::now();
         desktop.pump();
         if desktop.take_changed() {
-            tracing::info!("display configuration changed; recreating desktop surfaces");
-            monitors.clear();
-            desktop.teardown(&app);
-            geoms = monitor_geometries(&app);
-            geoms_at = Instant::now();
-            monitors = desktop
-                .create(&app, &instance, &geoms)
-                .into_iter()
-                .filter_map(|t| MonitorRenderer::new(&gpu.adapter, &gpu.device, t))
-                .collect();
-            host.set_live_renderer_attached(!monitors.is_empty());
-            // New desktop windows are ordered in front of the webview wallpapers (macOS) and
-            // explorer.exe restarts invalidate their parent (Windows): attach them again.
-            crate::wallpaper_webview::reattach_all();
+            let next = monitor_geometries(&app);
+            // Windows must rebuild on Explorer restart even when geometry is unchanged.
+            // macOS screen-parameter notifications alone must not tear down live drawables.
+            if cfg!(target_os = "windows") || surface_geometry_changed(&surface_geoms, &next) {
+                tracing::info!("display geometry changed; recreating desktop surfaces");
+                monitors.clear();
+                desktop.teardown(&app);
+                geoms = next;
+                surface_geoms = geoms.clone();
+                geoms_at = Instant::now();
+                monitors = desktop
+                    .create(&app, &instance, &geoms)
+                    .into_iter()
+                    .filter_map(|t| MonitorRenderer::new(&gpu.adapter, &gpu.device, t))
+                    .collect();
+                host.set_live_renderer_attached(!monitors.is_empty());
+                crate::wallpaper_webview::reattach_all();
+            } else {
+                tracing::debug!("ignored display notification with unchanged geometry");
+            }
         }
         if geoms_at.elapsed() >= GEOMETRY_REFRESH {
             geoms = monitor_geometries(&app);
@@ -1585,6 +1621,35 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn display_notifications_only_rebuild_changed_surface_geometry() {
+        let display = MonitorGeometry {
+            id: "A".into(),
+            logical: ScreenRect::new(0.0, 0.0, 1728.0, 1117.0),
+            physical: (0, 0, 3456, 2234),
+        };
+        let displays = [display.clone()];
+        assert!(!surface_geometry_changed(&displays, &displays));
+        assert!(
+            !surface_geometry_changed(&displays, &[]),
+            "sleep must not discard the last frame"
+        );
+        let mut resized = display.clone();
+        resized.physical.2 = 3024;
+        assert!(surface_geometry_changed(&displays, &[resized]));
+        let mut moved = display.clone();
+        moved.logical.x = 1728.0;
+        assert!(surface_geometry_changed(&displays, &[moved]));
+        let mut external = display;
+        external.id = "B".into();
+        let pair = [displays[0].clone(), external.clone()];
+        assert!(surface_geometry_changed(&displays, &pair));
+        assert!(!surface_geometry_changed(
+            &pair,
+            &[external, displays[0].clone()]
+        ));
+    }
 
     #[test]
     fn one_monitor_plays_the_sounds_of_each_scene() {

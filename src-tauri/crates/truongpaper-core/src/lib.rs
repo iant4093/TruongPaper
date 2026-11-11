@@ -155,7 +155,7 @@ impl Default for AppSettings {
             transition_type: "liquid_glass".into(),
             transition_duration_seconds: 1.2,
             skip_mismatched_orientation: true,
-            default_fit_mode: "fit_blur".into(),
+            default_fit_mode: "fill".into(),
             exhaustion_auto_reset: true,
             max_photo_cache_bytes: 250 * 1024 * 1024,
             fps_cap: serde_json::json!(60),

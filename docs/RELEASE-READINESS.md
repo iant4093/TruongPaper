@@ -26,7 +26,7 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 |---|---|
 | Frontend tests | 149 passed |
 | TypeScript / Vite build | Passed |
-| Rust workspace tests (`--locked`) | 394 passed |
+| Rust workspace tests (`--locked`) | 396 passed |
 | Clippy (workspace, all targets, locked) | Passed without warnings |
 | Rust formatting | Passed |
 | GPU smoke example | Passed on Apple M3 Max; initializes adapter and compiles shaders |
@@ -36,6 +36,19 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 | Browser visual checks | Library, Photography, Workshop, inspector, Displays, Playlists, Settings, download dialog, tray; minimum 980×640 layout checked |
 
 Installer build results and current CI status are available in [GitHub Actions](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml). Use the latest successful run for the current `main` commit, not the first run or an older artifact.
+
+## Follow-up to the first desktop test
+
+The user observed Fit+Blur edge strips, repeated gray-screen flashing, and the inherited TruongFlix application icon.
+
+- Fill / Center Crop is now the default for fresh settings. Changing photo fit/transition settings updates active photo compositor uniforms immediately.
+- macOS desktop surfaces explicitly host a `CAMetalLayer` as the view's root layer, so AppKit does not repaint a default backing layer under the Metal surface.
+- Repeated screen-parameter notifications with unchanged display geometry no longer destroy and recreate desktop windows. Windows still rebuilds after Explorer restarts, regardless of geometry.
+- Static wallpapers repaint once when rendering resumes after sleep/occlusion/user pause.
+- A new charcoal/ivory layered-photo icon is used for macOS, Windows, documentation, sidebar branding, and browser favicon. The macOS tray has its own transparent template mark. The master and exact built-in ImageGen prompt are in `assets/`.
+- The user confirmed the corrected test build was stable and filled the screen after minimizing and observing the desktop. Longer sleep/wake and repeated-rotation checks remain in the priority checklist; shader smoke tests alone cannot establish WindowServer stability.
+
+Lock-screen support was also requested for feasibility review. Windows supports still images/snapshots through its personalization API, but not arbitrary live wallpaper on its secure lock screen. macOS needs separate native wallpaper/screensaver integration; the current desktop overlay is not lock-screen support. No lock-screen implementation is included in this build.
 
 ## Remaining code limitations
 

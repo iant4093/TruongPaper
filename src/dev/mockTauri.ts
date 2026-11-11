@@ -267,7 +267,7 @@ export function createMockBackend(
     transitionType: 'liquid_glass',
     transitionDurationSeconds: 1.2,
     skipMismatchedOrientation: true,
-    defaultFitMode: 'fit_blur',
+    defaultFitMode: 'fill',
     exhaustionAutoReset: true,
     maxPhotoCacheBytes: 250 * MB,
     fpsCap: 60,

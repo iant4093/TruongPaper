@@ -29,21 +29,21 @@ pub const EVENT_SYSTEM_POWER: &str = "system-power";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcFitMode {
-    Fill,
     #[default]
+    Fill,
     FitBlur,
     FitBlack,
     Stretch,
 }
 
 impl IpcFitMode {
-    /// Parses `AppSettings::default_fit_mode`; unknown strings fall back to `fit_blur`.
+    /// Parses `AppSettings::default_fit_mode`; unknown strings fall back to `fill`.
     pub fn from_setting(s: &str) -> Self {
         match FitMode::from_setting_str(s) {
-            Some(FitMode::Fill) => Self::Fill,
+            Some(FitMode::Fill) | None => Self::Fill,
             Some(FitMode::FitBlack) => Self::FitBlack,
             Some(FitMode::Stretch) => Self::Stretch,
-            Some(FitMode::FitBlur) | None => Self::FitBlur,
+            Some(FitMode::FitBlur) => Self::FitBlur,
         }
     }
 
@@ -123,7 +123,7 @@ impl Default for UniversalAdjustments {
             muted: false,
             audio_sensitivity: 1.0,
             playback_speed: 1.0,
-            fit_mode: IpcFitMode::FitBlur,
+            fit_mode: IpcFitMode::Fill,
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -479,7 +479,7 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing {key}");
         }
-        assert_eq!(json["fitMode"], "fit_blur");
+        assert_eq!(json["fitMode"], "fill");
     }
 
     #[test]
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn setting_string_parsing() {
         assert_eq!(IpcFitMode::from_setting("fit_black"), IpcFitMode::FitBlack);
-        assert_eq!(IpcFitMode::from_setting("bogus"), IpcFitMode::FitBlur);
+        assert_eq!(IpcFitMode::from_setting("bogus"), IpcFitMode::Fill);
         assert_eq!(
             IpcTransitionType::from_setting("crossfade").as_str(),
             "crossfade"

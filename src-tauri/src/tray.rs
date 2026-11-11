@@ -40,10 +40,14 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
         });
     }
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .unwrap_or_else(|| Image::new(&[], 0, 0));
+    let icon = if cfg!(target_os = "macos") {
+        // Template images need a transparent mark, not an opaque application-icon tile.
+        tauri::include_image!("icons/tray-icon.png").clone()
+    } else {
+        app.default_window_icon()
+            .cloned()
+            .unwrap_or_else(|| Image::new(&[], 0, 0))
+    };
 
     TrayIconBuilder::with_id("truongpaper-tray")
         .icon(icon)

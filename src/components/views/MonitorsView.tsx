@@ -153,9 +153,9 @@ export const MonitorsView: React.FC = () => {
           checked={settings?.skipMismatchedOrientation ?? true}
           onChange={(next) => void updateSettings({ skipMismatchedOrientation: next })}
         />
-        <div style={{ fontSize: 13, marginBottom: 8 }}>Fallback fit mode</div>
+        <div style={{ fontSize: 13, marginBottom: 8 }}>Photo fit mode</div>
         <SegmentedControl
-          value={settings?.defaultFitMode ?? 'fit_blur'}
+          value={settings?.defaultFitMode ?? 'fill'}
           options={(Object.keys(FIT_MODE_LABEL) as FitMode[]).map((k) => [k, FIT_MODE_LABEL[k]] as const)}
           onChange={(next) => void updateSettings({ defaultFitMode: next })}
         />

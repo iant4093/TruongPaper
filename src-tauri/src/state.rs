@@ -100,7 +100,7 @@ pub fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     s.transition_duration_seconds =
         truongpaper_renderer::clamp_transition_duration(s.transition_duration_seconds);
     if truongpaper_renderer::FitMode::from_setting_str(&s.default_fit_mode).is_none() {
-        s.default_fit_mode = "fit_blur".into();
+        s.default_fit_mode = "fill".into();
     }
     if truongpaper_renderer::TransitionMode::from_setting_str(&s.transition_type).is_none() {
         s.transition_type = "liquid_glass".into();
@@ -206,7 +206,7 @@ mod tests {
             assert_eq!(s.rotation_interval_seconds, expected, "{raw}");
         }
         assert_eq!(s.transition_duration_seconds, 3.0);
-        assert_eq!(s.default_fit_mode, "fit_blur");
+        assert_eq!(s.default_fit_mode, "fill");
         assert_eq!(s.transition_type, "liquid_glass");
         assert_eq!(s.fps_cap, json!(60));
         let native = sanitize_settings(AppSettings {

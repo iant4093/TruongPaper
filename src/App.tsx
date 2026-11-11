@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal, Wallpaper } from 'lucide-react';
+import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal } from 'lucide-react';
 import { PresetBar } from './components/PresetBar';
 import { PropertyInspector } from './components/PropertyInspector';
 import { SteamAuthModal } from './components/SteamAuthModal';
@@ -89,7 +89,7 @@ export const App: React.FC = () => {
       <WorkshopPreviewModal />
       <aside className="app-sidebar">
         <div className="sidebar-titlebar" data-tauri-drag-region><WindowControls /></div>
-        <div className="app-brand" data-tauri-drag-region><Wallpaper size={20} strokeWidth={1.5} /><span>TruongPaper</span></div>
+        <div className="app-brand" data-tauri-drag-region><img src="/app-icon.png" width={23} height={23} alt="" /><span>TruongPaper</span></div>
         <nav aria-label="Studio views" className="sidebar-nav">
           <div className="sidebar-label">Workspace</div>
           {STUDIO_TABS.filter(([key]) => key !== 'settings').map(([key, label, Icon]) => (

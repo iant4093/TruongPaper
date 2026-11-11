@@ -4,6 +4,16 @@ Use this checklist after the automated checks pass. Test the actual desktop app,
 
 Start with the macOS checks (about 20–30 minutes), then Steam and one wallpaper of each type (another 15–30 minutes). Multi-display and Windows checks can be done separately when those devices are available. Stop at the first failure in a section and send the report format at the end; you do not need to debug it yourself.
 
+## Priority retest: fill, gray flashes, and branding
+
+The follow-up test build is **1.0.1**. Confirm that version in Settings before judging the fix.
+
+1. In Displays, choose **Fill / Center Crop**. It should affect the photo already on the desktop immediately. New installations now default to Fill; existing explicit fit choices are preserved.
+2. Minimize Studio and watch the desktop for at least 60 seconds. The picture should reach every edge without blurred strips, and should not alternate with a blank gray screen.
+3. Bring Studio forward and hide it several times, rotate through three photos, and test Pause/Resume. Then lock/unlock once. A static photo should redraw after resume without repeated window destruction.
+4. Check the new layered-photo icon in the Dock, Finder, app sidebar, and browser tab. The menu bar should use a small transparent photo mark rather than a solid black tile.
+5. Report immediately if gray flashing remains; the automated GPU/shader checks do not establish WindowServer stability.
+
 ## 1. Open the current build
 
 1. Quit any already-running TruongPaper from its menu before opening a newer copy.

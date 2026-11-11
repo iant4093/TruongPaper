@@ -95,7 +95,12 @@ pub enum ActiveRuntime {
     /// Scene wallpaper rendered by the desktop render thread.
     Scene(SceneDescriptor),
     /// Web or Video wallpaper in the desktop webview window `label`.
-    Webview { kind: WebviewKind, label: String },
+    Webview {
+        kind: WebviewKind,
+        label: String,
+        /// Still drawn below the macOS webview if its surface is unavailable.
+        preview_path: Option<PathBuf>,
+    },
     /// Windows Application wallpaper process.
     Application { exe_path: PathBuf },
 }
@@ -765,6 +770,7 @@ mod tests {
             ActiveRuntime::Webview {
                 kind: WebviewKind::Video,
                 label: "wallpaper-V".into(),
+                preview_path: None,
             },
             adj,
             true,
@@ -819,6 +825,7 @@ mod tests {
         let web = |label: &str| ActiveRuntime::Webview {
             kind: WebviewKind::Web,
             label: label.into(),
+            preview_path: None,
         };
         assert!(host.vfs_for_webview("wallpaper-A").is_none());
 

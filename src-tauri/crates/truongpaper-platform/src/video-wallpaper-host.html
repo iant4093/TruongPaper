@@ -9,7 +9,7 @@
       width: 100vw;
       height: 100vh;
       overflow: hidden;
-      background: #000;
+      background: transparent;
     }
     #bg-blur {
       position: absolute;
@@ -23,7 +23,7 @@
       pointer-events: none;
       z-index: 1;
     }
-    #fg-video {
+    #fg-video, #held-frame {
       position: absolute;
       inset: 0;
       width: 100%;
@@ -33,198 +33,167 @@
       pointer-events: none;
       z-index: 2;
     }
+    #fg-video { visibility: hidden; }
+    #held-frame { z-index: 3; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <canvas id="bg-blur" aria-hidden="true"></canvas>
-  <video id="fg-video" autoplay loop muted playsinline></video>
+  <video id="fg-video" loop muted playsinline></video>
+  <canvas id="held-frame" hidden aria-hidden="true"></canvas>
 
   <script>
-    (function () {
+    (() => {
       'use strict';
       const params = new URLSearchParams(window.location.search);
-      const rawFile = params.get('file') || '';
-      const videoPath = rawFile.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/');
-      const videoUrl = new URL('./' + videoPath, window.location.href).href;
-
-      const bgBlur = document.getElementById('bg-blur');
-      let fgVideo = document.getElementById('fg-video');
-      const FAST_SCALE = 1.5;
-      let sourceScale = 1;
-      let fastUrl = null;
-      let pending = null;
-      let paused = false;
+      const videoPath = (params.get('file') || '').replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/');
+      const video = document.getElementById('fg-video');
+      const held = document.getElementById('held-frame');
+      const backdrop = document.getElementById('bg-blur');
+      const mac = /Mac/.test(navigator.platform);
+      let hostPaused = false;
+      let hiddenBySpace = false;
+      let hasFrame = false;
+      let awaitingFrame = false;
+      let frameRequest;
+      let resumedAt = 0;
+      let lastSnapshot = -Infinity;
+      let lastBackdrop = -Infinity;
       let adjustments = {};
-      let originalWidth = 0;
-      let originalHeight = 0;
 
-      let blurEnabled = false;
-      let lastBackdropAt = -Infinity;
-      function paintBackdrop() {
-        if (!blurEnabled || fgVideo.readyState < 2 || !fgVideo.videoWidth) return;
-        const scale = 192 / Math.max(fgVideo.videoWidth, fgVideo.videoHeight);
-        const width = Math.max(1, Math.round(fgVideo.videoWidth * scale));
-        const height = Math.max(1, Math.round(fgVideo.videoHeight * scale));
-        if (bgBlur.width !== width || bgBlur.height !== height) {
-          bgBlur.width = width;
-          bgBlur.height = height;
+      function snapshot(canvas, maxEdge) {
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return false;
+        const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
+        const width = Math.max(1, Math.round(video.videoWidth * scale));
+        const height = Math.max(1, Math.round(video.videoHeight * scale));
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return false;
+        ctx.drawImage(video, 0, 0, width, height);
+        return true;
+      }
+
+      function rememberFrame() {
+        if (snapshot(held, 960)) {
+          hasFrame = true;
+          lastSnapshot = performance.now();
         }
-        bgBlur.getContext('2d')?.drawImage(fgVideo, 0, 0, width, height);
-        lastBackdropAt = performance.now();
-      }
-      function watchVideo(video) {
-        video.addEventListener('loadeddata', paintBackdrop);
-        video.addEventListener('seeked', paintBackdrop);
-        // A blurred backdrop only needs occasional samples from the already decoded video.
-        video.addEventListener('timeupdate', () => {
-          if (performance.now() - lastBackdropAt >= 83) paintBackdrop();
-        });
       }
 
-      function requestedRate() {
-        return Math.min(3.0, Math.max(0.1, Number(adjustments.playbackSpeed ?? 1.0)));
+      function showHeldFrame() {
+        awaitingFrame = false;
+        if (frameRequest !== undefined) video.cancelVideoFrameCallback?.(frameRequest);
+        frameRequest = undefined;
+        held.hidden = !hasFrame;
+        video.style.visibility = 'hidden';
       }
+
+      function showFreshFrame() {
+        if (!awaitingFrame || video.paused || hostPaused || hiddenBySpace) return;
+        awaitingFrame = false;
+        if (frameRequest !== undefined) video.cancelVideoFrameCallback?.(frameRequest);
+        frameRequest = undefined;
+        held.hidden = true;
+        if (mac) rememberFrame();
+      }
+
+      function syncPlayback() {
+        if (hostPaused || hiddenBySpace) {
+          // Keep the last frame we observed while the decoder was advancing.
+          if (!mac || !hasFrame) rememberFrame();
+          showHeldFrame();
+          video.pause();
+          return;
+        }
+        if (!video.paused && video.style.visibility === 'visible') return;
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) video.style.visibility = 'visible';
+        awaitingFrame = true;
+        resumedAt = video.currentTime;
+        frameRequest = video.requestVideoFrameCallback?.(showFreshFrame);
+        video.play().catch(showHeldFrame);
+      }
+
+      video.addEventListener('loadeddata', () => {
+        if (!hasFrame) rememberFrame();
+        if (hostPaused || hiddenBySpace) {
+          showHeldFrame();
+        } else {
+          held.hidden = !hasFrame;
+          video.style.visibility = 'visible';
+        }
+      });
+      video.addEventListener('pause', () => {
+        if (video.paused) showHeldFrame();
+      });
+      video.addEventListener('waiting', () => {
+        if (hasFrame) held.hidden = false;
+        awaitingFrame = true;
+        resumedAt = video.currentTime;
+        if (frameRequest === undefined) frameRequest = video.requestVideoFrameCallback?.(showFreshFrame);
+      });
+      video.addEventListener('timeupdate', () => {
+        if (awaitingFrame && video.currentTime !== resumedAt) showFreshFrame();
+        if (video.paused || hiddenBySpace) return;
+        const now = performance.now();
+        if (mac && now - lastSnapshot >= 500) rememberFrame();
+        if (adjustments.fitMode === 'fit_blur' && now - lastBackdrop >= 83) {
+          if (snapshot(backdrop, 192)) lastBackdrop = now;
+        }
+      });
 
       function applyAdjustments() {
         const adj = adjustments;
         const fitMode = adj.fitMode || 'fill';
         const fit = { fit_blur: 'contain', fit_black: 'contain', stretch: 'fill', center: 'none' };
-        const centerAtOriginalSize = fitMode === 'center' && sourceScale !== 1 && originalWidth && originalHeight;
-        fgVideo.style.objectFit = centerAtOriginalSize ? 'fill' : (fit[fitMode] || 'cover');
-        fgVideo.style.width = centerAtOriginalSize ? `${originalWidth}px` : '';
-        fgVideo.style.height = centerAtOriginalSize ? `${originalHeight}px` : '';
-        fgVideo.style.left = centerAtOriginalSize ? `calc((100% - ${originalWidth}px) / 2)` : '';
-        fgVideo.style.top = centerAtOriginalSize ? `calc((100% - ${originalHeight}px) / 2)` : '';
-        const nextBlurEnabled = fitMode === 'fit_blur';
-        if (blurEnabled !== nextBlurEnabled) {
-          blurEnabled = nextBlurEnabled;
-          if (blurEnabled) paintBackdrop();
-          bgBlur.style.opacity = blurEnabled ? '1' : '0';
+        const originalSize = fitMode === 'center' && video.videoWidth && video.videoHeight;
+        const zoom = Number(adj.zoom ?? 1);
+        const x = Number(adj.offsetX ?? 0) * 50;
+        const y = Number(adj.offsetY ?? 0) * 50;
+        const brightness = 1 + Number(adj.brightness ?? 0);
+        const contrast = Number(adj.contrast ?? 1);
+        const saturation = Number(adj.saturation ?? 1);
+        const hue = Number(adj.hueShift ?? 0);
+        for (const layer of [video, held]) {
+          const centeredStill = layer === held && originalSize;
+          layer.style.objectFit = centeredStill ? 'fill' : (fit[fitMode] || 'cover');
+          layer.style.width = centeredStill ? `${video.videoWidth}px` : '';
+          layer.style.height = centeredStill ? `${video.videoHeight}px` : '';
+          layer.style.left = centeredStill ? `calc((100% - ${video.videoWidth}px) / 2)` : '';
+          layer.style.top = centeredStill ? `calc((100% - ${video.videoHeight}px) / 2)` : '';
+          layer.style.transform = zoom === 1 && x === 0 && y === 0 ? 'none' : `scale(${zoom}) translate(${x}vw, ${y}vh)`;
+          layer.style.filter = brightness === 1 && contrast === 1 && saturation === 1 && hue === 0
+            ? 'none' : `brightness(${brightness}) contrast(${contrast}) saturate(${saturation}) hue-rotate(${hue}rad)`;
         }
+        document.body.style.background = !mac || fitMode === 'fit_black' || fitMode === 'center' ? '#000' : '';
+        backdrop.style.opacity = fitMode === 'fit_blur' ? '1' : '0';
+        if (fitMode === 'fit_blur' && snapshot(backdrop, 192)) lastBackdrop = performance.now();
 
-        const muted = Boolean(adj.muted) || (adj.volume ?? 0) <= 0.001;
-        fgVideo.muted = muted;
-        fgVideo.volume = muted ? 0 : Math.min(1, Math.max(0, Number(adj.volume ?? 1)));
-
-        const rate = requestedRate() / sourceScale;
-        if (fgVideo.playbackRate !== rate) fgVideo.playbackRate = rate;
-
-        const zoom = Number(adj.zoom ?? 1.0);
-        const ox = Number(adj.offsetX ?? 0.0) * 50;
-        const oy = Number(adj.offsetY ?? 0.0) * 50;
-        fgVideo.style.transform = zoom === 1 && ox === 0 && oy === 0
-          ? 'none' : `scale(${zoom}) translate(${ox}vw, ${oy}vh)`;
-
-        const br = 1 + Number(adj.brightness ?? 0.0);
-        const ct = Number(adj.contrast ?? 1.0);
-        const sat = Number(adj.saturation ?? 1.0);
-        const hue = Number(adj.hueShift ?? 0.0);
-        fgVideo.style.filter = br === 1 && ct === 1 && sat === 1 && hue === 0
-          ? 'none' : `brightness(${br}) contrast(${ct}) saturate(${sat}) hue-rotate(${hue}rad)`;
+        const volume = Number(adj.volume ?? 0);
+        video.muted = Boolean(adj.muted) || volume <= 0.001;
+        video.volume = video.muted ? 0 : Math.min(1, Math.max(0, volume));
+        const rate = Math.min(2, Math.max(0.1, Number(adj.playbackSpeed ?? 1)));
+        if (video.playbackRate !== rate) video.playbackRate = rate;
       }
 
-      function release(video) {
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
-      }
-
-      function cancelPending() {
-        if (!pending) return;
-        const old = pending;
-        pending = null;
-        clearTimeout(old.timeout);
-        release(old.video);
-      }
-
-      function syncSource() {
-        const scale = fastUrl && requestedRate() > 2 ? FAST_SCALE : 1;
-        if (scale === sourceScale) {
-          cancelPending();
-          return;
-        }
-        if (pending?.scale === scale) return;
-        cancelPending();
-        const next = document.createElement('video');
-        next.muted = true;
-        next.loop = true;
-        next.playsInline = true;
-        next.preload = 'auto';
-        const job = { video: next, scale, positioned: false };
-        pending = job;
-
-        function finish() {
-          if (pending !== job || !job.positioned || next.seeking || next.readyState < 2) return;
-          const previous = fgVideo;
-          previous.pause();
-          pending = null;
-          clearTimeout(job.timeout);
-          next.id = 'fg-video';
-          fgVideo = next;
-          sourceScale = scale;
-          watchVideo(next);
-          applyAdjustments();
-          previous.replaceWith(next);
-          release(previous);
-          paintBackdrop();
-          if (!paused) next.play().catch(() => {});
-        }
-        function fail() {
-          if (pending !== job) return;
-          if (scale === FAST_SCALE) fastUrl = null;
-          cancelPending();
-        }
-        next.addEventListener('loadedmetadata', () => {
-          if (pending !== job) return;
-          const time = fgVideo.currentTime * sourceScale / scale;
-          if (Number.isFinite(next.duration) && next.duration > 0) {
-            next.currentTime = time % next.duration;
-          }
-          job.positioned = true;
-          finish();
-        }, { once: true });
-        next.addEventListener('loadeddata', finish);
-        next.addEventListener('seeked', finish);
-        next.addEventListener('error', fail, { once: true });
-        job.timeout = setTimeout(fail, 15000);
-        next.src = scale === FAST_SCALE ? fastUrl : videoUrl;
-        next.load();
-      }
-
-      window.__truongpaper_set_fast_video = function (path) {
-        fastUrl = new URL('./' + path, window.location.href).href;
-        syncSource();
-      };
-
-      window.__truongpaper_apply_video_adjustments = function (adj) {
-        if (!adj) return;
-        adjustments = adj;
+      window.__truongpaper_apply_video_adjustments = function (next) {
+        if (!next) return;
+        adjustments = next;
         applyAdjustments();
-        syncSource();
       };
-
-      window.__truongpaper_set_paused = function (nextPaused) {
-        paused = nextPaused;
-        if (paused) {
-          fgVideo.pause();
-        } else {
-          fgVideo.play().catch(() => {});
-        }
+      window.__truongpaper_set_paused = function (paused) {
+        hostPaused = paused;
+        syncPlayback();
       };
-
-      // WKWebView can suspend muted media while the desktop window is occluded.
-      // Recover on reveal, including when the fast copy was prepared in the background.
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && !paused && fgVideo.paused) fgVideo.play().catch(() => {});
+        hiddenBySpace = mac && document.hidden;
+        syncPlayback();
       });
-
-      watchVideo(fgVideo);
-      fgVideo.addEventListener('loadedmetadata', () => {
-        originalWidth = fgVideo.videoWidth;
-        originalHeight = fgVideo.videoHeight;
-      }, { once: true });
-      fgVideo.src = videoUrl;
-      fgVideo.play().catch(() => {});
+      video.addEventListener('loadedmetadata', applyAdjustments);
+      applyAdjustments();
+      video.src = new URL('./' + videoPath, window.location.href).href;
+      syncPlayback();
     })();
   </script>
 </body>

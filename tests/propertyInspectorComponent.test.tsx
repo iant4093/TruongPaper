@@ -64,7 +64,11 @@ describe('<PropertyInspector />', () => {
     renderInspector({ enable_rain: true, mode: 0 });
     expect(screen.getByText('Weather')).toBeTruthy(); // HTML stripped from group label
     expect(screen.getByText('Rain Speed')).toBeTruthy(); // localized slider label
+    const mode = screen.getByRole('combobox', { name: 'Mode' });
+    fireEvent.keyDown(mode, { key: 'ArrowDown' });
     expect(screen.getByRole('option', { name: 'Storm' })).toBeTruthy(); // localized combo option
+    fireEvent.keyDown(mode, { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
     expect(screen.queryByText('Caption')).toBeNull(); // mode != 2
     expect(screen.getByRole('button', { name: 'Scheme Color' })).toBeTruthy();
     expect(screen.getByText('#FF0000')).toBeTruthy();

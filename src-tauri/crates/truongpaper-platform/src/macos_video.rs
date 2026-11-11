@@ -15,9 +15,8 @@
 //! plain `(width, height, stride, bytes)` tuples; the app glue adapts them to the renderer's
 //! `VideoFrameSource`.
 
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::c_void;
 use std::marker::{PhantomData, PhantomPinned};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -30,23 +29,7 @@ use objc2_foundation::{NSNumber, NSString};
 
 /// Same range as the renderer's `MIN_PLAYBACK_SPEED..=MAX_PLAYBACK_SPEED` (docs/05 Phase 5).
 pub const MIN_VIDEO_RATE: f32 = 0.1;
-pub const MAX_VIDEO_RATE: f32 = 3.0;
-
-extern "C" {
-    fn truongpaper_export_fast_video(source: *const c_char, output: *const c_char) -> i32;
-}
-
-/// Encodes a 1.5x playback copy. Run off the main thread with a new output path.
-pub fn export_fast_video(source: &Path, output: &Path) -> Result<()> {
-    let source = CString::new(source.as_os_str().as_bytes())?;
-    let output = CString::new(output.as_os_str().as_bytes())?;
-    // SAFETY: both UTF-8 C strings live until the synchronous export returns.
-    let status = unsafe { truongpaper_export_fast_video(source.as_ptr(), output.as_ptr()) };
-    if status != 0 {
-        bail!("AVFoundation fast video export failed ({status})");
-    }
-    Ok(())
-}
+pub const MAX_VIDEO_RATE: f32 = 2.0;
 
 /// `kCVPixelFormatType_32BGRA` (`'BGRA'`).
 pub const K_CV_PIXEL_FORMAT_TYPE_32BGRA: u32 = 0x4247_5241;
@@ -130,7 +113,7 @@ extern "C" {
     fn mach_absolute_time() -> u64;
 }
 
-/// Clamps a playback rate to `0.1..=3.0`; non-finite values fall back to `1.0`.
+/// Clamps a playback rate to `0.1..=2.0`; non-finite values fall back to `1.0`.
 pub fn clamp_video_rate(rate: f32) -> f32 {
     if rate.is_finite() {
         rate.clamp(MIN_VIDEO_RATE, MAX_VIDEO_RATE)
@@ -297,7 +280,7 @@ impl MacVideoDecoder {
         }
     }
 
-    /// Sets the playback rate (clamped to `0.1..=3.0`). Applied immediately while playing.
+    /// Sets the playback rate (clamped to `0.1..=2.0`). Applied immediately while playing.
     pub fn set_rate(&mut self, rate: f32) {
         self.rate = clamp_video_rate(rate);
         if !self.paused {
@@ -434,7 +417,7 @@ mod tests {
     fn rate_and_volume_clamps() {
         assert_eq!(clamp_video_rate(0.01), 0.1);
         assert_eq!(clamp_video_rate(2.0), 2.0);
-        assert_eq!(clamp_video_rate(10.0), 3.0);
+        assert_eq!(clamp_video_rate(10.0), 2.0);
         assert_eq!(clamp_video_rate(f32::NAN), 1.0);
         assert_eq!(clamp_video_volume(-1.0), 0.0);
         assert_eq!(clamp_video_volume(0.3), 0.3);
@@ -468,7 +451,7 @@ mod tests {
             let mut decoder = MacVideoDecoder::open(&path).expect("AVPlayer created");
             assert!(decoder.is_paused());
             decoder.set_rate(5.0);
-            assert_eq!(decoder.rate(), 3.0);
+            assert_eq!(decoder.rate(), 2.0);
             decoder.set_volume(0.5);
             decoder.set_muted(true);
             decoder.play();

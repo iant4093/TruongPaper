@@ -1,3 +1,4 @@
+import { Dropdown } from './Dropdown';
 import React, { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronLeft, ChevronRight, Search, SlidersHorizontal, Star } from 'lucide-react';
@@ -65,11 +66,12 @@ export const WorkshopBrowser: React.FC = () => {
   };
   const selectFilter = (name: string, label: string) => {
     const group = data?.tagGroups.find((g) => g.name === name);
-    return <label className="workshop-filter" key={name}><span>{label}</span>
-      <select aria-label={`Workshop ${label.toLowerCase()}`} value={query.tags.find((t) => group?.tags.some((tag) => tag.tag === t)) ?? ''}
-        onChange={(e) => chooseTag(name, e.target.value)}>
-        <option value="">All</option>{group?.tags.map((t) => <option key={t.tag} value={t.tag}>{t.label}</option>)}
-      </select></label>;
+    return <div className="workshop-filter" key={name}><span>{label}</span>
+      <Dropdown label={`Workshop ${label.toLowerCase()}`}
+        value={query.tags.find((t) => group?.tags.some((tag) => tag.tag === t)) ?? ''}
+        options={[['', 'All'], ...(group?.tags ?? []).map((tag) => [tag.tag, tag.label] as const)]}
+        onChange={(tag) => chooseTag(name, tag)} />
+    </div>;
   };
 
   return <div ref={top} className="workshop-discover">
@@ -87,12 +89,16 @@ export const WorkshopBrowser: React.FC = () => {
       <button className="button" onClick={openAuth}>Steam account</button>
     </div>
     <div className="workshop-filters">
-      <label className="workshop-filter"><span>Sort</span><select aria-label="Workshop sort" value={query.sort} onChange={(e) => update({ sort: e.target.value as WorkshopSort })}>
-        <option value="trending">Trending</option><option value="most_subscribed">Most subscribed</option><option value="newest">Newest</option><option value="top_rated">Top rated</option>
-      </select></label>
-      {query.sort === 'trending' && <label className="workshop-filter"><span>Period</span><select aria-label="Trending period" value={query.days} onChange={(e) => update({ days: Number(e.target.value) })}>
-        <option value={7}>This week</option><option value={30}>This month</option><option value={90}>3 months</option><option value={365}>This year</option><option value={-1}>All time</option>
-      </select></label>}
+      <div className="workshop-filter"><span>Sort</span>
+        <Dropdown label="Workshop sort" value={query.sort}
+          options={[['trending', 'Trending'], ['most_subscribed', 'Most subscribed'], ['newest', 'Newest'], ['top_rated', 'Top rated']]}
+          onChange={(sort: WorkshopSort) => update({ sort })} />
+      </div>
+      {query.sort === 'trending' && <div className="workshop-filter"><span>Period</span>
+        <Dropdown label="Trending period" value={query.days}
+          options={[[7, 'This week'], [30, 'This month'], [90, '3 months'], [365, 'This year'], [-1, 'All time']]}
+          onChange={(days) => update({ days })} />
+      </div>}
       {selectFilter('Type', 'Type')}{selectFilter('Genre', 'Genre')}{selectFilter('Resolution', 'Resolution')}
       <button className="button" aria-expanded={more} onClick={() => setMore(!more)}><SlidersHorizontal size={14} />Filters{query.tags.length > 0 ? ` (${query.tags.length})` : ''}</button>
       {(query.tags.length > 0 || query.search) && <button className="button button-quiet" onClick={() => { setInput(''); update({ search: '', tags: [] }); }}>Clear</button>}

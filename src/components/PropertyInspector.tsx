@@ -1,3 +1,4 @@
+import { Dropdown } from './Dropdown';
 // src/components/PropertyInspector.tsx
 import React, { useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -198,15 +199,15 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
         <label className="property-field">
           <span className="property-row">
             <span>Playback Speed</span>
-            <span className="property-value" aria-hidden="true">{adjustments.playbackSpeed.toFixed(2)}x</span>
+            <span className="property-value" aria-hidden="true">{Math.min(2, adjustments.playbackSpeed).toFixed(2)}x</span>
           </span>
           <input
             type="range"
             className="slider"
             min={0.1}
-            max={3.0}
+            max={2.0}
             step={0.05}
-            value={adjustments.playbackSpeed}
+            value={Math.min(2, adjustments.playbackSpeed)}
             onChange={(e) => {
               const next = { ...adjustments, playbackSpeed: Number(e.target.value) };
               onAdjustmentChange(next);
@@ -286,20 +287,12 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
 
           if (prop.type === 'combo') {
             return (
-              <label key={prop.key} className="property-field">
+              <div key={prop.key} className="property-field">
                 <span>{label}</span>
-                <select
-                  className="button"
-                  value={String(currentVal)}
-                  onChange={(e) => void handleChange(prop.key, e.target.value)}
-                >
-                  {(prop.options ?? []).map((opt) => (
-                    <option key={String(opt.value)} value={String(opt.value)}>
-                      {resolveLocalizedText(opt.label, project)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <Dropdown label={label} value={String(currentVal)}
+                  options={(prop.options ?? []).map((option) => [String(option.value), resolveLocalizedText(option.label, project)])}
+                  onChange={(value) => void handleChange(prop.key, value)} />
+              </div>
             );
           }
 

@@ -16,8 +16,6 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-#[cfg(target_os = "macos")]
-use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 use truongpaper_platform::is_wallpaper_type_supported_on_this_os;
 use truongpaper_renderer::WallpaperRuntimeKind;
@@ -305,16 +303,11 @@ async fn start_wallpaper_runtime(
             let url = url.ok_or_else(|| {
                 format!("'{}' has no valid entry file in project.json", item.title)
             })?;
-            #[cfg(target_os = "macos")]
-            let mut vfs = vfs;
-            #[cfg(target_os = "macos")]
-            let fast_video = if webview_kind == WebviewKind::Video {
-                app.path().app_cache_dir().ok().and_then(|cache| {
-                    crate::fast_video::FastVideo::mount(&mut vfs, &project_file, &cache)
-                })
-            } else {
-                None
-            };
+            let preview_path = PathBuf::from(&item.preview_path);
+            let preview_path = (cfg!(target_os = "macos")
+                && preview_path.is_file()
+                && crate::commands::library::is_strictly_within(&preview_path, install_dir))
+            .then_some(preview_path);
             let vfs = Arc::new(vfs);
             host.set_active_vfs(wallpaper_id, Arc::clone(&vfs));
             let label = wallpaper_window_label(monitor_id);
@@ -323,6 +316,7 @@ async fn start_wallpaper_runtime(
                 ActiveRuntime::Webview {
                     kind: webview_kind,
                     label: label.clone(),
+                    preview_path,
                 },
                 adjustments,
                 audio_reactive,
@@ -338,8 +332,6 @@ async fn start_wallpaper_runtime(
                     url,
                     audio_reactive,
                     on_load_scripts: vec![on_load],
-                    #[cfg(target_os = "macos")]
-                    fast_video,
                 },
             )
             .await

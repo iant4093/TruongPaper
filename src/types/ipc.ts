@@ -96,7 +96,7 @@ export interface UniversalAdjustments {
   volume: number;         // 0.0 .. 1.0
   muted: boolean;
   audioSensitivity: number; // 0.0 .. 5.0
-  playbackSpeed: number;  // 0.1 .. 3.0
+  playbackSpeed: number;  // 0.1 .. 2.0
   fitMode: FitMode;
   zoom: number;           // 0.5 .. 2.0
   offsetX: number;        // -1.0 .. 1.0

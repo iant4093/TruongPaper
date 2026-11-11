@@ -87,7 +87,9 @@ async fn apply_still(app: AppHandle, output: PathBuf) -> Result<(), String> {
     app.run_on_main_thread(move || {
         let result = objc2::MainThreadMarker::new()
             .ok_or_else(|| "Could not access the macOS wallpaper settings".into())
-            .and_then(|mtm| truongpaper_platform::mac_desktop::set_system_wallpaper(mtm, &output));
+            .and_then(|mtm| {
+                truongpaper_platform::mac_desktop::prepare_system_wallpaper(mtm, &output)
+            });
         let _ = send.send(result);
     })
     .map_err(|err| err.to_string())?;

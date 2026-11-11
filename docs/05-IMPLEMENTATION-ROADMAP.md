@@ -101,7 +101,7 @@ flowchart LR
 
 ### Phase 5: Wallpaper Engine `Video`, `Web` & Windows `Application` Runtimes
 **Target Crates**: `truongpaper-renderer`, `truongpaper-platform`
-- [ ] **Video Runtime**: Implement hardware-accelerated video decoder (`VideoToolbox` / `D3D11VA`) rendering into `wgpu` compositor textures with gapless loop, playback speed (`0.1x`–`3.0x`), volume/mute, and embedded `.tex` MP4 support (`TEXB` with `free_image_format == 35`).
+- [ ] **Video Runtime**: Implement hardware-accelerated video decoder (`VideoToolbox` / `D3D11VA`) rendering into `wgpu` compositor textures with gapless loop, playback speed (`0.1x`–`2.0x`), volume/mute, and embedded `.tex` MP4 support (`TEXB` with `free_image_format == 35`).
 - [ ] **Web Runtime**: Implement `wry` desktop WebView host with `wpe://localhost/` VFS asset protocol, `web-wallpaper-preload.js` injection (`wallpaperPropertyListener` & `wallpaperRegisterAudioListener` 128-float stereo streaming), and desktop cursor event forwarding.
 - [ ] **Application Runtime**: Implement Windows application wallpaper launcher with desktop bounds and flag `"type": "application"` items with a `"Windows Only"` badge on macOS.
 - [ ] **Phase 5 Verification Command**:

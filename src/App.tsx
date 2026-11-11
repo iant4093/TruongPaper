@@ -1,3 +1,4 @@
+import { Dropdown } from './components/Dropdown';
 import React, { useEffect, useState } from 'react';
 import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal } from 'lucide-react';
 import { PresetBar } from './components/PresetBar';
@@ -111,10 +112,9 @@ export const App: React.FC = () => {
           <div className="breadcrumb" data-tauri-drag-region><span>Workspace</span><span className="breadcrumb-separator">/</span><span>{activeLabel}</span></div>
           <div className="workspace-controls">
             <Monitor size={14} aria-hidden="true" />
-            <select className="display-select" aria-label="Active display" value={activeMonitor?.monitorId ?? ''} onChange={(e) => selectMonitor(e.target.value)}>
-              {monitors.map((m) => <option key={m.monitorId} value={m.monitorId}>{m.name}</option>)}
-              {!monitors.length && <option value="">No displays connected</option>}
-            </select>
+            <Dropdown className="display-select" label="Active display" value={activeMonitor?.monitorId ?? ''}
+              options={monitors.map((monitor) => [monitor.monitorId, monitor.name])}
+              onChange={selectMonitor} placeholder="No displays connected" />
             {canInspect && <button type="button" className={`icon-button ${detailsOpen ? 'is-active' : ''}`} aria-label="Toggle wallpaper details" aria-pressed={detailsOpen} onClick={() => setDetailsOpen(!detailsOpen)}><SlidersHorizontal size={16} /></button>}
           </div>
         </header>
@@ -128,7 +128,7 @@ export const App: React.FC = () => {
             <aside className="inspector-drawer" aria-label="Wallpaper details">
               <div className="inspector-heading">Wallpaper details</div>
               <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
-              <PresetBar wallpaperId={selectedWallpaper.wallpaperId} />
+              <PresetBar key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId} />
               <PropertyInspector key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId}
                 project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} presets={[]}
                 onPropertyChange={(k, v) => setLocalWallpaperProperty(selectedWallpaper.wallpaperId, k, v)}

@@ -1,3 +1,4 @@
+import { Dropdown } from '../Dropdown';
 // src/components/views/PlaylistsView.tsx
 // §2.4 View 3: "Unified Playlists & Rotation" View
 import React, { useRef, useState } from 'react';
@@ -190,8 +191,8 @@ export const PlaylistsView: React.FC = () => {
       />
 
       {/* Mode Selector */}
-      <div className="card" style={{ padding: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+      <div className="card rotation-source">
+        <div className="rotation-source-heading">
           <div style={{ fontSize: 13, fontWeight: 600 }}>Rotation Source</div>
           <SegmentedControl
             value={scope}
@@ -211,39 +212,19 @@ export const PlaylistsView: React.FC = () => {
           ]}
           onChange={setMode}
         />
-        {mode === 'workshop' && (
-          <select
-            className="button"
-            aria-label="Wallpaper Engine item"
-            style={{ width: '100%', marginTop: 12 }}
-            value={singleId}
-            onChange={(e) => setSingleId(e.target.value)}
-          >
-            {workshopItems.length === 0 && <option value="">No Workshop items in library</option>}
-            {workshopItems.map((w) => (
-              <option key={w.wallpaperId} value={w.wallpaperId}>
-                {w.title}
-              </option>
-            ))}
-          </select>
-        )}
-        {mode === 'playlist' && (
-          <select
-            className="button"
-            aria-label="Playlist"
-            style={{ width: '100%', marginTop: 12 }}
-            value={playlistId}
-            onChange={(e) => setPlaylistId(e.target.value)}
-          >
-            {playlists.length === 0 && <option value="">No playlists yet</option>}
-            {playlists.map((p) => (
-              <option key={p.playlistId} value={p.playlistId}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        )}
-        <button type="button" className="button button-primary" style={{ marginTop: 12 }} onClick={() => void applyRotation()}>
+        <div className="rotation-source-choice">
+          {mode === 'workshop' && (
+            <Dropdown label="Wallpaper Engine item" value={singleId} placeholder="No Workshop items in library"
+              options={workshopItems.map((item) => [item.wallpaperId, item.title])} onChange={setSingleId} />
+          )}
+          {mode === 'playlist' && (
+            <Dropdown label="Playlist" value={playlistId} placeholder="No playlists yet"
+              options={playlists.map((playlist) => [playlist.playlistId, playlist.name])} onChange={setPlaylistId} />
+          )}
+        </div>
+        <button type="button" className="button button-primary rotation-source-apply"
+          disabled={(mode === 'workshop' && !singleId) || (mode === 'playlist' && !playlistId)}
+          onClick={() => void applyRotation()}>
           Apply Rotation Source
         </button>
       </div>
@@ -342,19 +323,9 @@ export const PlaylistsView: React.FC = () => {
               })
             }
           />
-          <select
-            className="button"
-            aria-label="Playlist interval"
-            style={{ width: '100%', marginTop: 12 }}
-            value={String(draft.intervalSeconds)}
-            onChange={(e) => setDraft({ ...draft, intervalSeconds: Number(e.target.value) })}
-          >
-            {ROTATION_INTERVALS.map((r) => (
-              <option key={r.seconds} value={r.seconds}>
-                {r.label}
-              </option>
-            ))}
-          </select>
+          <Dropdown className="playlist-interval" label="Playlist interval" value={draft.intervalSeconds}
+            options={ROTATION_INTERVALS.map((interval) => [interval.seconds, interval.label])}
+            onChange={(intervalSeconds) => setDraft({ ...draft, intervalSeconds })} />
 
           {draft.mode === 'mixed' && (
             <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginTop: 12 }}>

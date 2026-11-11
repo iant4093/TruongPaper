@@ -17,11 +17,11 @@ use truongpaper_we_formats::ParsedTex;
 /// Slowest playback rate exposed to the user (docs/05 Phase 5).
 pub const MIN_PLAYBACK_SPEED: f32 = 0.1;
 /// Fastest playback rate exposed to the user (docs/05 Phase 5).
-pub const MAX_PLAYBACK_SPEED: f32 = 3.0;
+pub const MAX_PLAYBACK_SPEED: f32 = 2.0;
 /// Volumes at or below this are treated as muted (same rule as `video-wallpaper-host.html`).
 pub const MUTE_VOLUME_THRESHOLD: f32 = 0.001;
 
-/// Clamps a playback rate to `0.1..=3.0`. NaN and infinities fall back to `1.0`.
+/// Clamps a playback rate to `0.1..=2.0`. NaN and infinities fall back to `1.0`.
 pub fn clamp_playback_speed(speed: f32) -> f32 {
     if speed.is_finite() {
         speed.clamp(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)

@@ -22,12 +22,12 @@ const WEB_PRELOAD_JS: &str =
 #[test]
 fn playback_speed_is_clamped_to_spec_range() {
     assert_eq!(MIN_PLAYBACK_SPEED, 0.1);
-    assert_eq!(MAX_PLAYBACK_SPEED, 3.0);
+    assert_eq!(MAX_PLAYBACK_SPEED, 2.0);
     assert_eq!(clamp_playback_speed(0.05), 0.1);
     assert_eq!(clamp_playback_speed(0.1), 0.1);
     assert_eq!(clamp_playback_speed(1.25), 1.25);
-    assert_eq!(clamp_playback_speed(3.0), 3.0);
-    assert_eq!(clamp_playback_speed(5.0), 3.0);
+    assert_eq!(clamp_playback_speed(3.0), 2.0);
+    assert_eq!(clamp_playback_speed(5.0), 2.0);
     assert_eq!(clamp_playback_speed(-2.0), 0.1);
     assert_eq!(clamp_playback_speed(f32::NAN), 1.0);
     assert_eq!(clamp_playback_speed(f32::INFINITY), 1.0);
@@ -67,7 +67,7 @@ fn volume_and_mute_rules_match_video_host() {
         muted: false,
     }
     .clamped();
-    assert_eq!((clamped.speed, clamped.volume), (3.0, 1.0));
+    assert_eq!((clamped.speed, clamped.volume), (2.0, 1.0));
 }
 
 #[test]
@@ -86,10 +86,10 @@ fn loop_clock_wraps_at_half_and_double_speed() {
     assert!((clock.position_secs - 2.5).abs() < 1e-12);
     assert_eq!(clock.frame_index(30.0), 75);
 
-    // Speeds outside the range are clamped (5x -> 3x).
+    // Speeds outside the range are clamped (5x -> 2x).
     let mut fast = VideoLoopClock::new(10.0);
-    assert_eq!(fast.advance(4.0, 5.0), 1);
-    assert!((fast.position_secs - 2.0).abs() < 1e-12);
+    assert_eq!(fast.advance(4.0, 5.0), 0);
+    assert!((fast.position_secs - 8.0).abs() < 1e-12);
 }
 
 #[test]

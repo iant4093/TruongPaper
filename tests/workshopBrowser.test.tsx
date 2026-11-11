@@ -22,11 +22,13 @@ it('browses, filters, and pages without a login or download', async () => {
   render(<WorkshopBrowser />);
   await screen.findByRole('button', {name:'Preview Test mountain'});
   expect(invokeMock.mock.calls.every(([cmd]) => cmd === 'steam_browse_workshop')).toBe(true);
-  await act(async () => { fireEvent.change(screen.getByLabelText('Workshop type'), { target:{value:'Scene'} }); });
+  fireEvent.click(screen.getByRole('combobox', { name: 'Workshop type' }));
+  await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Scene' })); });
   expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop', {query:expect.objectContaining({page:1,tags:['Scene']})});
   await act(async () => { fireEvent.click(screen.getByLabelText('Next Workshop page')); });
   expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop', {query:expect.objectContaining({page:2})});
-  await act(async () => { fireEvent.change(screen.getByLabelText('Workshop sort'), {target:{value:'newest'}}); });
+  fireEvent.click(screen.getByRole('combobox', { name: 'Workshop sort' }));
+  await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Newest' })); });
   expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop', {query:expect.objectContaining({page:1,sort:'newest'})});
 });
 it('previews a result and downloads only after the explicit button', async () => {
@@ -67,7 +69,9 @@ it('keeps newer catalog results when an older request resolves late', async () =
   let resolveOld!: (value: WorkshopBrowsePage) => void;
   invokeMock.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
   render(<WorkshopBrowser />);
-  await act(async () => { fireEvent.change(screen.getByLabelText('Workshop sort'),{target:{value:'newest'}}); });
+  const sort = screen.getByRole('combobox', { name: 'Workshop sort' });
+  fireEvent.keyDown(sort, { key: 'n' });
+  await act(async () => { fireEvent.keyDown(sort, { key: 'Enter' }); });
   await screen.findByRole('button',{name:'Preview Test mountain'});
   await act(async () => { resolveOld({...page,items:[{...item,title:'Stale item'}]}); });
   expect(screen.queryByRole('button',{name:'Preview Stale item'})).toBeNull();

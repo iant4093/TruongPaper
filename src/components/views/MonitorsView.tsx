@@ -71,7 +71,9 @@ export const MonitorsView: React.FC = () => {
     setLockScreenStatus(null);
     try {
       await invoke('wallpaper_set_lock_screen', { monitorId: active.monitorId });
-      setLockScreenStatus(mac ? 'System wallpaper set. Lock your Mac to check the image.' : 'Lock screen image set.');
+      setLockScreenStatus(mac
+        ? 'The still is selected in Finder. Add it in System Settings → Wallpaper and enable Show on all Spaces, then lock your Mac to check.'
+        : 'Lock screen image set.');
     } catch (err) {
       setLockScreenStatus(String(err));
     } finally {
@@ -169,11 +171,11 @@ export const MonitorsView: React.FC = () => {
       <div className="card lock-screen-card">
         <div className="view-subtitle">
           Use a still of the selected display’s wallpaper. Workshop items use their preview image.
-          {mac && ' This also sets the system wallpaper on the primary display.'}
+          {mac && ' macOS lets you choose the shared image in System Settings → Wallpaper.'}
         </div>
         <button type="button" className="button" disabled={lockScreenPending || !(photo || wallpaper?.previewPath)}
           onClick={() => void setLockScreen()}>
-          <Lock size={14} /> {lockScreenPending ? 'Preparing image…' : 'Set Lock Screen Still'}
+          <Lock size={14} /> {lockScreenPending ? 'Preparing image…' : mac ? 'Prepare Lock Screen Still' : 'Set Lock Screen Still'}
         </button>
         {lockScreenStatus && <div role="status">{lockScreenStatus}</div>}
       </div>

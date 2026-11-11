@@ -401,6 +401,11 @@ mod platform {
     }
     static OBSERVER_STARTED: AtomicBool = AtomicBool::new(false);
     static SCREENS_CHANGED: AtomicBool = AtomicBool::new(false);
+    static SPACE_CHANGED: AtomicBool = AtomicBool::new(false);
+
+    pub fn take_space_changed() -> bool {
+        SPACE_CHANGED.swap(false, Ordering::AcqRel)
+    }
 
     pub struct DesktopSurfaces;
 
@@ -469,9 +474,12 @@ mod platform {
                     return;
                 };
                 if !OBSERVER_STARTED.swap(true, Ordering::SeqCst) {
-                    mac_desktop::start_screen_and_space_observer(mtm, |event| {
-                        if event == MacScreenEvent::ScreenParametersChanged {
-                            SCREENS_CHANGED.store(true, Ordering::SeqCst);
+                    mac_desktop::start_screen_and_space_observer(mtm, |event| match event {
+                        MacScreenEvent::ScreenParametersChanged => {
+                            SCREENS_CHANGED.store(true, Ordering::SeqCst)
+                        }
+                        MacScreenEvent::ActiveSpaceChanged => {
+                            SPACE_CHANGED.store(true, Ordering::Release)
                         }
                     });
                 }
@@ -850,6 +858,7 @@ struct SceneState {
     rng: SoundRng,
     last_cursor: Option<CursorSample>,
     last_frame: Instant,
+    has_frame: bool,
     paused: bool,
 }
 
@@ -926,6 +935,7 @@ enum Content {
     /// Nothing loaded (no source yet, webview / application wallpaper, or load failure).
     None,
     Photo,
+    WebviewPreview,
     Scene(Box<SceneState>),
 }
 
@@ -1085,8 +1095,30 @@ impl MonitorRenderer {
                     }
                 };
             }
+            ActiveRuntime::Webview {
+                preview_path: Some(path),
+                ..
+            } => {
+                self.content = Content::None;
+                self.from = None;
+                self.to = None;
+                self.transition_started = None;
+                if let Ok(Some(image)) =
+                    crate::commands::photo::decode_photo_for_display(true, &path)
+                {
+                    let texture = upload_rgba_texture(device, queue, &image, "webview_preview");
+                    self.to = Some(LayerTexture {
+                        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                        _texture: texture,
+                        aspect: image.aspect(),
+                    });
+                    self.content = Content::WebviewPreview;
+                }
+            }
             ActiveRuntime::None
-            | ActiveRuntime::Webview { .. }
+            | ActiveRuntime::Webview {
+                preview_path: None, ..
+            }
             | ActiveRuntime::Application { .. } => {
                 self.content = Content::None;
                 self.from = None;
@@ -1139,18 +1171,18 @@ impl MonitorRenderer {
             scene.set_sound_owner(sound_owner);
             scene.apply_adjustments(&adjustments);
         }
-        let photo_needs_frame = self.dirty
-            && matches!(self.content, Content::Photo)
+        let needs_still = self.dirty
+            && !matches!(self.content, Content::None)
             && !crate::power::rendering_suspended();
-        if !should_render && !photo_needs_frame {
-            // A newly selected photo still needs one frame while playback is paused.
+        if !should_render && !needs_still {
+            // A new source or a revealed desktop still needs a frame while paused.
             return false;
         }
         let time = self.started.elapsed().as_secs_f32();
         let monitor_aspect = self.monitor_aspect();
         if matches!(self.content, Content::Scene(_)) {
             self.render_scene(device, queue, &base, monitor_aspect, geoms, cursor);
-            return true;
+            return should_render;
         }
         if matches!(self.content, Content::None) {
             if self.dirty && rt.is_none_or(|r| r.active == ActiveRuntime::None) {
@@ -1283,36 +1315,6 @@ impl MonitorRenderer {
         cursor: &mut CursorPoller,
     ) {
         let time = self.started.elapsed().as_secs_f32();
-        let Content::Scene(scene) = &mut self.content else {
-            return;
-        };
-        let now = Instant::now();
-        let dt = now.duration_since(scene.last_frame).as_secs_f32().min(0.1);
-        scene.last_frame = now;
-
-        let (left, right) = crate::audio_bridge::latest_frame()
-            .map(|f| (f.left_64, f.right_64))
-            .unwrap_or(([0.0; 64], [0.0; 64]));
-        let sample = cursor.poll(geoms, &self.monitor_id);
-        for (kind, pos) in cursor_transitions(scene.last_cursor, sample) {
-            if let Err(err) = scene.runtime.dispatch_cursor(scene_cursor_kind(kind), pos) {
-                tracing::debug!("scene cursor event: {err}");
-            }
-        }
-        if sample.is_some() {
-            scene.last_cursor = sample;
-        }
-        let c = scene.last_cursor.unwrap_or(CursorSample {
-            pos: [0.5, 0.5],
-            left_down: false,
-        });
-        scene.runtime.step(dt, c.pos, c.left_down, &left, &right);
-        for v in &mut scene.videos {
-            if let Some(frame) = v.source.latest_frame() {
-                scene.renderer.upload_video_frame(queue, &v.path, &frame);
-            }
-        }
-
         let Some(frame) = self.acquire(device) else {
             return;
         };
@@ -1325,19 +1327,50 @@ impl MonitorRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("desktop_scene"),
         });
-        scene.renderer.render(
-            device,
-            queue,
-            &mut encoder,
-            &scene.render_view,
-            scene.runtime.graph(),
-            scene.runtime.camera(),
-            &FrameUniformInputs {
-                time: scene.runtime.elapsed(),
-                pointer: c.pos.into(),
-                audio_64: [left, right],
-            },
-        );
+        let now = Instant::now();
+        let dt = now.duration_since(scene.last_frame).as_secs_f32().min(0.1);
+        scene.last_frame = now;
+
+        // Re-present the last scene texture when a paused desktop is revealed.
+        if !scene.paused || !scene.has_frame {
+            let (left, right) = crate::audio_bridge::latest_frame()
+                .map(|f| (f.left_64, f.right_64))
+                .unwrap_or(([0.0; 64], [0.0; 64]));
+            let sample = cursor.poll(geoms, &self.monitor_id);
+            for (kind, pos) in cursor_transitions(scene.last_cursor, sample) {
+                if let Err(err) = scene.runtime.dispatch_cursor(scene_cursor_kind(kind), pos) {
+                    tracing::debug!("scene cursor event: {err}");
+                }
+            }
+            if sample.is_some() {
+                scene.last_cursor = sample;
+            }
+            let c = scene.last_cursor.unwrap_or(CursorSample {
+                pos: [0.5, 0.5],
+                left_down: false,
+            });
+            scene.runtime.step(dt, c.pos, c.left_down, &left, &right);
+            for v in &mut scene.videos {
+                if let Some(frame) = v.source.latest_frame() {
+                    scene.renderer.upload_video_frame(queue, &v.path, &frame);
+                }
+            }
+
+            scene.renderer.render(
+                device,
+                queue,
+                &mut encoder,
+                &scene.render_view,
+                scene.runtime.graph(),
+                scene.runtime.camera(),
+                &FrameUniformInputs {
+                    time: scene.runtime.elapsed(),
+                    pointer: c.pos.into(),
+                    audio_64: [left, right],
+                },
+            );
+            scene.has_frame = true;
+        }
         let uniforms = frame_uniforms(base, 1.0, monitor_aspect, scene.aspect, scene.aspect, time);
         if uniforms.to_fit_mode == FitMode::FitBlur as u32 {
             self.compositor
@@ -1429,6 +1462,7 @@ fn load_scene(
         rng: SoundRng::from_time(),
         last_cursor: None,
         last_frame: Instant::now(),
+        has_frame: false,
         paused: false,
     };
     // Embedded videos start muted; the sound owner is chosen by the render loop each frame.
@@ -1540,6 +1574,12 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
                 crate::wallpaper_webview::reattach_all();
             } else {
                 tracing::debug!("ignored display notification with unchanged geometry");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if platform::take_space_changed() {
+            for monitor in &mut monitors {
+                monitor.dirty = true;
             }
         }
         if geoms_at.elapsed() >= GEOMETRY_REFRESH {

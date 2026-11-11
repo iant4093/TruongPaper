@@ -151,7 +151,7 @@ impl UniversalAdjustments {
             volume: clamp_or(self.volume, 0.0, 1.0, d.volume),
             muted: self.muted,
             audio_sensitivity: clamp_or(self.audio_sensitivity, 0.0, 5.0, d.audio_sensitivity),
-            playback_speed: clamp_or(self.playback_speed, 0.1, 3.0, d.playback_speed),
+            playback_speed: truongpaper_renderer::clamp_playback_speed(self.playback_speed),
             fit_mode: self.fit_mode,
             zoom: clamp_or(self.zoom, 0.5, 2.0, d.zoom),
             offset_x: clamp_or(self.offset_x, -1.0, 1.0, d.offset_x),
@@ -456,11 +456,12 @@ mod tests {
         let a = UniversalAdjustments::from_stored_json("{}", IpcFitMode::Fill);
         assert_eq!(a.fit_mode, IpcFitMode::Fill);
         let b = UniversalAdjustments::from_stored_json(
-            r#"{"fitMode":"stretch","contrast":1.5}"#,
+            r#"{"fitMode":"stretch","contrast":1.5,"playbackSpeed":3.0}"#,
             IpcFitMode::Fill,
         );
         assert_eq!(b.fit_mode, IpcFitMode::Stretch);
         assert_eq!(b.contrast, 1.5);
+        assert_eq!(b.playback_speed, 2.0);
         let c = UniversalAdjustments::from_stored_json("not json", IpcFitMode::FitBlack);
         assert_eq!(c.fit_mode, IpcFitMode::FitBlack);
 

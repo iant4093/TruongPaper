@@ -39,8 +39,8 @@ describe('Main studio window', () => {
     await act(async () => {
       render(<App />);
     });
-    // Mock data loaded (two monitors in the header).
-    expect(await screen.findByText(/Monitor 2: 24" Vertical/)).toBeTruthy();
+    // Mock data loaded in the display selector.
+    expect(await screen.findByRole('combobox', { name: 'Active display' })).toBeTruthy();
 
     const nav = screen.getByRole('navigation', { name: 'Studio views' });
     for (const [key, label] of STUDIO_TABS) {
@@ -85,7 +85,7 @@ describe('Main studio window', () => {
     await act(async () => {
       render(<App />);
     });
-    await screen.findByText(/Monitor 2: 24" Vertical/);
+    await screen.findByRole('combobox', { name: 'Active display' });
     const before = useAppStore.getState().photoStatus!.historyCount;
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /^Next/ }));

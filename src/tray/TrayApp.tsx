@@ -1,3 +1,4 @@
+import { Dropdown } from '../components/Dropdown';
 // src/tray/TrayApp.tsx
 import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -209,16 +210,14 @@ export const TrayApp: React.FC = () => {
 
       <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
         <span style={{ color: 'var(--text-secondary)' }}>GPU Transition</span>
-        <select
-          className="button"
-          style={{ fontSize: 12, padding: '4px 10px' }}
+        <Dropdown label="GPU Transition" className="tray-transition"
           value={settings?.transitionType ?? 'liquid_glass'}
-          onChange={(e) => void updateSettings({ transitionType: e.target.value as TransitionType })}
-        >
-          <option value="liquid_glass">Liquid Glass Morph</option>
-          <option value="blur_dissolve">Blur-Dissolve</option>
-          <option value="crossfade">Smooth Crossfade</option>
-        </select>
+          options={[
+            ['liquid_glass', 'Liquid Glass Morph'],
+            ['blur_dissolve', 'Blur-Dissolve'],
+            ['crossfade', 'Smooth Crossfade'],
+          ]}
+          onChange={(transitionType: TransitionType) => void updateSettings({ transitionType })} />
       </div>
 
       <div style={{ position: 'relative', zIndex: 1, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>

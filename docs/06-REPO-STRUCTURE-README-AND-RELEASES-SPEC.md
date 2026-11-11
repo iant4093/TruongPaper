@@ -142,7 +142,7 @@ TruongPaper renders live, audio-reactive and high-resolution photographic wallpa
 **Scene, Video, Web & Application Runtimes**
 
 - **Scene wallpapers**: native Rust `.pkg` (`PKGV0001`–`PKGV0022+`) memory-mapped archive reader, `.tex` (`TEXV0005` / `TEXB0001`–`TEXB0004` / `TEXS0001`–`TEXS0003`) LZ4/DXT1/DXT3/DXT5/RG88/R8/MP4 texture decoder, 4-layer Virtual File System, HLSL/GLSL-to-WGSL shader preprocessor, multi-pass FBO effects, GPU/SIMD particle systems, `.mdl` skeletal puppet warp, and an embedded `rquickjs` SceneScript runtime (`init`, `update`, `cursorMove`, `applyUserProperties`, `engine.registerAudioBuffers`)
-- **Video wallpapers**: hardware-accelerated looping playback (`VideoToolbox` on macOS, `D3D11VA` on Windows) for MP4, WebM, MKV and MOV with gapless loop, playback speed (`0.1x`–`3.0x`) and volume control
+- **Video wallpapers**: hardware-accelerated looping playback (`VideoToolbox` on macOS, `D3D11VA` on Windows) for MP4, WebM, MKV and MOV with gapless loop, playback speed (`0.1x`–`2.0x`) and volume control
 - **Web wallpapers**: embedded `wry` desktop WebView with `window.wallpaperPropertyListener` and 60 Hz 128-band stereo `window.wallpaperRegisterAudioListener` injection
 - **Application wallpapers** (Windows): launches Windows application wallpapers with desktop bounds; flagged as `Windows Only` on macOS
 

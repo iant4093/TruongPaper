@@ -14,25 +14,35 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{class, define_class, msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSResponder, NSScreen, NSWindow, NSWindowCollectionBehavior,
+    NSBackingStoreType, NSColor, NSResponder, NSScreen, NSWindow, NSWindowCollectionBehavior,
     NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
-use objc2_foundation::{NSDictionary, NSNumber, NSRect, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSRect, NSString, NSURL};
 
-/// Publishes a still to the macOS system wallpaper on the primary display.
-pub fn set_system_wallpaper(mtm: MainThreadMarker, path: &std::path::Path) -> Result<(), String> {
+/// Sets the wallpaper for the current Space and reveals the still for use in Wallpaper settings.
+pub fn prepare_system_wallpaper(
+    mtm: MainThreadMarker,
+    path: &std::path::Path,
+) -> Result<(), String> {
     let screen = NSScreen::screens(mtm)
         .firstObject()
         .ok_or("No primary display is available")?;
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
     // SAFETY: the primary NSScreen is accessed on the main thread. Empty options use
     // the system's default scaling.
-    unsafe {
-        NSWorkspace::sharedWorkspace()
+    let workspace = NSWorkspace::sharedWorkspace();
+    let result = unsafe {
+        workspace
             .setDesktopImageURL_forScreen_options_error(&url, &screen, &NSDictionary::new())
             .map_err(|error| error.localizedDescription().to_string())
+    };
+    // A desktop wallpaper error does not prevent choosing the prepared image manually.
+    if let Err(error) = result {
+        tracing::warn!("could not set desktop wallpaper for current Space: {error}");
     }
+    workspace.activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
+    Ok(())
 }
 
 define_class!(
@@ -100,16 +110,17 @@ pub fn create_desktop_window_for_screen(
         ns_window.setReleasedWhenClosed(false);
     }
 
-    configure_desktop_window(&ns_window);
+    configure_desktop_window(&ns_window, false);
     ns_window
 }
 
 /// Desktop-level settings shared by [`create_desktop_window_for_screen`] and
 /// [`attach_window_to_desktop`].
-fn configure_desktop_window(ns_window: &NSWindow) {
+fn configure_desktop_window(ns_window: &NSWindow, webview: bool) {
     // Sit directly above root wallpaper and below Finder desktop icons
     let desktop_level = CGWindowLevelForKey(CGWindowLevelKey::DesktopWindowLevelKey) as isize;
-    ns_window.setLevel(desktop_level);
+    // Webviews sit above the desktop renderer's still image and below the Finder icons.
+    ns_window.setLevel(desktop_level + isize::from(webview));
 
     // Persist across all Spaces, Stage Manager, and Mission Control
     ns_window.setCollectionBehavior(
@@ -119,7 +130,10 @@ fn configure_desktop_window(ns_window: &NSWindow) {
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
 
-    ns_window.setOpaque(true);
+    ns_window.setOpaque(!webview);
+    if webview {
+        ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
+    }
     ns_window.setHasShadow(false);
     // Let Finder desktop icons receive direct clicks; forward cursor via global monitor
     ns_window.setIgnoresMouseEvents(true);
@@ -134,7 +148,7 @@ fn configure_desktop_window(ns_window: &NSWindow) {
 /// The `occlusionState` override of [`TruongDesktopWindow`] cannot be applied to windows created
 /// by another class; Smart Pause never reads `occlusionState` either way (pitfall #2).
 pub fn attach_window_to_desktop(_mtm: MainThreadMarker, ns_window: &NSWindow) {
-    configure_desktop_window(ns_window);
+    configure_desktop_window(ns_window, true);
 }
 
 /// Creates one desktop window per connected `NSScreen`, keyed by `CGDirectDisplayID`.

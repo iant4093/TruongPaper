@@ -1,3 +1,4 @@
+import { Dropdown } from './Dropdown';
 // src/components/PresetBar.tsx
 // "[Preset: Default v]" selector above the Live Inspector (§2 layout) backed by
 // `wallpaper_save_preset` / `wallpaper_apply_preset`.
@@ -27,26 +28,15 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
   };
 
   return (
-    <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
-      <select
-        className="button"
-        aria-label="Preset"
-        style={{ width: '100%', fontSize: 12 }}
-        value={selected}
-        onChange={(e) => {
-          const presetId = e.target.value;
+    <div className="preset-bar">
+      <Dropdown label="Preset" value={selected}
+        options={[['', 'Preset: Default'], ...presets.map((preset) => [preset.presetId, `Preset: ${preset.name}`] as const)]}
+        onChange={(presetId) => {
           setSelected(presetId);
           if (presetId) void applyPreset(wallpaperId, presetId);
         }}
-      >
-        <option value="">Preset: Default</option>
-        {presets.map((p) => (
-          <option key={p.presetId} value={p.presetId}>
-            Preset: {p.name}
-          </option>
-        ))}
-      </select>
-      <form onSubmit={onSave} style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+      />
+      <form onSubmit={onSave} className="preset-save">
         <input
           type="text"
           value={name}
@@ -54,9 +44,8 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
           placeholder="Save current as preset…"
           aria-label="Preset name"
           className="button"
-          style={{ flex: 1, textAlign: 'left', cursor: 'text', fontSize: 12, padding: '6px 10px' }}
         />
-        <button type="submit" className="button" aria-label="Save preset" style={{ padding: '6px 10px' }}>
+        <button type="submit" className="button" aria-label="Save preset" disabled={!name.trim()}>
           <Save size={12} />
         </button>
       </form>

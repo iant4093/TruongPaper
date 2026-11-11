@@ -3,8 +3,6 @@ pub mod audio_bridge;
 pub mod commands;
 pub mod db;
 pub mod desktop_host;
-#[cfg(target_os = "macos")]
-mod fast_video;
 pub mod host;
 pub mod models;
 pub mod power;

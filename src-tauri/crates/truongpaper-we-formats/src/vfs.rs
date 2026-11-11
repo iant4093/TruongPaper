@@ -42,7 +42,6 @@ pub struct WeVirtualFileSystem {
     pub gifscene_pkg: Option<MappedPkg>,
     pub core_assets_dir: PathBuf,
     pub builtin_virtual_files: HashMap<&'static str, &'static [u8]>,
-    generated_video: Option<(String, PathBuf)>,
 }
 
 /// Alias used by the spec text.
@@ -112,7 +111,6 @@ impl WeVirtualFileSystem {
             gifscene_pkg,
             core_assets_dir,
             builtin_virtual_files,
-            generated_video: None,
         }
     }
 
@@ -146,12 +144,6 @@ impl WeVirtualFileSystem {
     /// Resolves the asset without loading a loose file into memory.
     pub fn open_asset(&self, virtual_path: &str) -> IoResult<VfsAsset<'_>> {
         let rel = Self::sanitize_virtual_path(virtual_path)?;
-
-        if let Some((name, path)) = &self.generated_video {
-            if *name == rel {
-                return open_file_asset(path);
-            }
-        }
 
         // Layer 1: loose file in the wallpaper directory.
         let loose_path = self.wallpaper_dir.join(&rel);
@@ -188,11 +180,6 @@ impl WeVirtualFileSystem {
             ErrorKind::NotFound,
             format!("VFS file not found across all 4 layers: {rel}"),
         ))
-    }
-
-    /// Adds the one generated playback file associated with this wallpaper's mount.
-    pub fn mount_generated_video(&mut self, name: String, path: PathBuf) {
-        self.generated_video = Some((name, path));
     }
 
     pub fn read_string(&self, virtual_path: &str) -> IoResult<String> {

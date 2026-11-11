@@ -10,8 +10,8 @@ The local Mac build is **1.0.4** and is already running. These are the first che
 
 1. Open Workshop → Discover without signing in. Search a subject, change Type/Genre/Resolution, and try Next/Previous. Open a preview and check the download choices.
 2. Check that the sidebar has separate RAM and Disk cache rows and no status dot. RAM refreshes about every three seconds and reports the main process; helper processes and GPU memory are separate.
-3. Paste `3836199874` into Import and choose **Download via GGNetwork**. When it appears in Installed, apply it and watch a few loops. GGNetwork availability can change. Test **Download with Steam** separately using an account with Wallpaper Engine access.
-4. Paste another direct Workshop URL or ID into the top Import field. Also check an existing photo-album link.
+3. Apply the already installed test video, `3836199874`, from its preview or the Installed tab.
+4. Paste another direct Workshop URL or ID into Import and choose **Download via GGNetwork**. If GGNetwork requires its own account or has no archive ready, the preview should explain that. Test **Download with Steam** separately using an account with Wallpaper Engine access.
 5. Watch the wallpaper for three loops, try Pause/Resume, then lock/unlock and sleep/wake. Repeat the guest browsing and download/apply checks on Windows when available.
 
 The native guest gallery and GGNetwork download of `3836199874` passed. The packaged Steam downloader started and displayed a live QR. The 159 frontend tests and 405 Rust tests passed. Playback, downloading through a Steam account with Wallpaper Engine access, and Windows desktop behavior still need desktop testing. Detailed checks follow below.
@@ -88,7 +88,7 @@ Use an animated wallpaper after step 5 for the strongest pause check; a still ph
 5. Disconnect Wi-Fi and change the search; expect an error and Retry. Reconnect and retry. Installed wallpapers should remain available under Installed.
 6. Check the sidebar's separate Disk cache and RAM rows. RAM updates about every three seconds and means the main app process's resident memory; WebKit helpers and GPU allocations are separate. It should not equal the photo-cache size or show a colored status dot.
 
-**Pass:** Browsing is available without sign-in. Previewing never auto-downloads. The top Import field still accepts direct Workshop links/IDs and photo album links and opens a preview for Workshop items. Discover always uses Steam’s public guest catalog.
+**Pass:** Discover uses Steam’s public guest catalog. The Import field accepts Workshop links, Workshop IDs, and photo album links. A Workshop preview shows the download choices and starts the transfer when you choose a source.
 
 ## 5. Steam sign-in and real downloads — your account is needed
 

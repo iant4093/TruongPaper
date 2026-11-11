@@ -71,7 +71,7 @@ Lock-screen support was also requested for feasibility review. Windows supports 
 - Valve’s SteamCMD connected anonymously and failed to fetch item `3836199874`. [WorkshopFetch](https://workshopfetch.com/download/3836199874) and [Steam Workshop Downloader IO](https://steamworkshopdownloader.io/) offered SteamCMD instructions. The .app site redirected to a browser-update ad.
 - GGNetwork served the exact item's ZIP anonymously. The archive contained a Wallpaper Engine project, a preview, and a 4K MP4. The packaged app installed the same item through its guest route and the installed video matched the browser archive byte for byte. GGNetwork required its own account for the older item `2013752983`.
 - **Download via GGNetwork** sends the public Workshop URL to the provider. The app accepts its ZIP for Scene, Video, and Web projects, checks extraction paths and size limits, then installs the project into the library. An existing copy is preserved until the replacement is ready. A Workshop link or ID opens a preview so the user can choose the source.
-- The GGNetwork delivery flow depends on the provider’s current website and file servers. Availability varies by item. The guest transfer limit is 2 GiB compressed and 4 GiB unpacked.
+- The GGNetwork delivery flow depends on the provider’s current website and file servers. Availability varies by item. The guest transfer limit is 2 GiB compressed and 4 GiB unpacked. Some scenes require Wallpaper Engine core assets in addition to the Workshop project.
 
 ## Remaining code limitations
 

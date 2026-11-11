@@ -3,6 +3,8 @@ pub mod audio_bridge;
 pub mod commands;
 pub mod db;
 pub mod desktop_host;
+#[cfg(target_os = "macos")]
+mod fast_video;
 pub mod host;
 pub mod models;
 pub mod power;
@@ -108,6 +110,7 @@ pub fn run() {
             // --- Monitor, Playback & Property Customization ---
             commands::monitor::monitors_list,
             commands::monitor::monitor_apply_wallpaper,
+            commands::lock_screen::wallpaper_set_lock_screen,
             commands::monitor::monitor_update_property,
             commands::monitor::monitor_update_adjustments,
             commands::library::wallpaper_save_preset,
@@ -181,7 +184,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 37, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 38, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

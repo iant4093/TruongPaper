@@ -16,6 +16,8 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 use truongpaper_platform::is_wallpaper_type_supported_on_this_os;
 use truongpaper_renderer::WallpaperRuntimeKind;
@@ -239,7 +241,7 @@ async fn start_wallpaper_runtime(
     item: &WallpaperItem,
     install_dir: &Path,
     core_assets_dir: PathBuf,
-    vfs: Arc<WeVirtualFileSystem>,
+    vfs: WeVirtualFileSystem,
 ) -> Result<(), String> {
     let project_file = item
         .project_json
@@ -303,6 +305,18 @@ async fn start_wallpaper_runtime(
             let url = url.ok_or_else(|| {
                 format!("'{}' has no valid entry file in project.json", item.title)
             })?;
+            #[cfg(target_os = "macos")]
+            let mut vfs = vfs;
+            #[cfg(target_os = "macos")]
+            let fast_video = if webview_kind == WebviewKind::Video {
+                app.path().app_cache_dir().ok().and_then(|cache| {
+                    crate::fast_video::FastVideo::mount(&mut vfs, &project_file, &cache)
+                })
+            } else {
+                None
+            };
+            let vfs = Arc::new(vfs);
+            host.set_active_vfs(wallpaper_id, Arc::clone(&vfs));
             let label = wallpaper_window_label(monitor_id);
             host.set_runtime(
                 monitor_id,
@@ -324,6 +338,8 @@ async fn start_wallpaper_runtime(
                     url,
                     audio_reactive,
                     on_load_scripts: vec![on_load],
+                    #[cfg(target_os = "macos")]
+                    fast_video,
                 },
             )
             .await
@@ -412,15 +428,6 @@ pub(crate) async fn show_library_wallpaper(
     {
         let conn = state.db.lock();
         db::set_monitor_source(&conn, monitor_id, &source)?;
-    }
-    // Scenes mount their own VFS on the render thread and Application wallpapers read no files
-    // over `wpe://`, so only Web / Video wallpapers touch the shared fallback mount.
-    let vfs = Arc::new(vfs);
-    if matches!(
-        kind,
-        Ok(WallpaperRuntimeKind::Web | WallpaperRuntimeKind::Video)
-    ) {
-        state.host.set_active_vfs(wallpaper_id, Arc::clone(&vfs));
     }
     state.host.set_source(
         monitor_id,
@@ -551,6 +558,10 @@ pub(crate) async fn show_photo(
             .remove(monitor_id)
             .flatten()
     };
+    let match_orientation = state.settings.lock().skip_mismatched_orientation;
+    let current = current.filter(|item| {
+        !match_orientation || crate::commands::photo::photo_matches_display(app, monitor_id, item)
+    });
     match current {
         Some(item) => {
             let path = PathBuf::from(&item.file_path);
@@ -583,6 +594,12 @@ pub(crate) async fn show_photo(
             // The source is already persisted; an empty queue / offline API is not fatal here.
             if let Err(err) = rotate_photo_for_locked_monitor(app, photo, monitor_id).await {
                 tracing::warn!("no photo available for {monitor_id} yet: {err}");
+                if let Some(previous) = state.host.monitor(monitor_id).filter(|rt| {
+                    !matches!(rt.active, ActiveRuntime::None | ActiveRuntime::Photo { .. })
+                }) {
+                    db::set_monitor_source(&state.db.lock(), monitor_id, &previous.source)?;
+                    return Err(err);
+                }
                 let source = set_photo_host_source(state, monitor_id)?;
                 state.host.ensure_photo_runtime(monitor_id);
                 if state

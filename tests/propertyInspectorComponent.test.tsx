@@ -66,7 +66,7 @@ describe('<PropertyInspector />', () => {
     expect(screen.getByText('Rain Speed')).toBeTruthy(); // localized slider label
     expect(screen.getByRole('option', { name: 'Storm' })).toBeTruthy(); // localized combo option
     expect(screen.queryByText('Caption')).toBeNull(); // mode != 2
-    expect((screen.getByLabelText('Scheme Color') as HTMLInputElement).value).toBe('#ff0000');
+    expect(screen.getByRole('button', { name: 'Scheme Color' })).toBeTruthy();
     expect(screen.getByText('#FF0000')).toBeTruthy();
   });
 
@@ -76,9 +76,13 @@ describe('<PropertyInspector />', () => {
     expect(screen.getByText('Caption')).toBeTruthy();
   });
 
-  it('invokes monitor_update_property once per change with WE-encoded colors', () => {
+  it('applies a color from the in-app picker as one WE-encoded update', () => {
     const { onPropertyChange } = renderInspector({ enable_rain: true, mode: 0 });
-    fireEvent.input(document.querySelector('input[type="color"]')!, { target: { value: '#2673d9' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Scheme Color' }));
+    expect(screen.getByRole('slider', { name: 'Hue' })).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Hex' }), { target: { value: '#2673d9' } });
+    expect(onPropertyChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     expect(onPropertyChange).toHaveBeenCalledWith('color', '0.14902 0.45098 0.85098');
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith('monitor_update_property', {

@@ -2087,6 +2087,7 @@ invoke<void>('library_delete_wallpaper', { wallpaperId: string });
 // --- Monitor, Playback & Property Customization Commands ---
 invoke<MonitorInfo[]>('monitors_list');
 invoke<void>('monitor_apply_wallpaper', { monitorId: string, source: WallpaperSource });
+invoke<void>('wallpaper_set_lock_screen', { monitorId: string });
 invoke<void>('monitor_update_property', { wallpaperId: string, propKey: string, propValue: string | number | boolean });
 invoke<void>('monitor_update_adjustments', { wallpaperId: string, adjustments: UniversalAdjustments });
 invoke<WallpaperPreset>('wallpaper_save_preset', { wallpaperId: string, presetName: string });

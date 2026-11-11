@@ -15,10 +15,25 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{class, define_class, msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSResponder, NSScreen, NSWindow, NSWindowCollectionBehavior,
-    NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
-use objc2_foundation::{NSNumber, NSRect, NSString};
+use objc2_foundation::{NSDictionary, NSNumber, NSRect, NSString, NSURL};
+
+/// Publishes a still to the macOS system wallpaper on the primary display.
+pub fn set_system_wallpaper(mtm: MainThreadMarker, path: &std::path::Path) -> Result<(), String> {
+    let screen = NSScreen::screens(mtm)
+        .firstObject()
+        .ok_or("No primary display is available")?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    // SAFETY: the primary NSScreen is accessed on the main thread. Empty options use
+    // the system's default scaling.
+    unsafe {
+        NSWorkspace::sharedWorkspace()
+            .setDesktopImageURL_forScreen_options_error(&url, &screen, &NSDictionary::new())
+            .map_err(|error| error.localizedDescription().to_string())
+    }
+}
 
 define_class!(
     // SAFETY:

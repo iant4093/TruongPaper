@@ -6340,6 +6340,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "block2",
+ "image",
  "keyring",
  "objc2",
  "objc2-app-kit",
@@ -6429,6 +6430,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "block2",
+ "cc",
  "core-foundation 0.10.1",
  "core-graphics",
  "http",

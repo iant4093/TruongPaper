@@ -239,6 +239,7 @@ export const IPC_COMMANDS = [
   // Monitor, Playback & Property Customization
   'monitors_list',
   'monitor_apply_wallpaper',
+  'wallpaper_set_lock_screen',
   'monitor_update_property',
   'monitor_update_adjustments',
   'wallpaper_save_preset',

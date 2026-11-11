@@ -31,6 +31,7 @@ const APP_COMMANDS: &[&str] = &[
     "library_delete_wallpaper",
     "monitors_list",
     "monitor_apply_wallpaper",
+    "wallpaper_set_lock_screen",
     "monitor_update_property",
     "monitor_update_adjustments",
     "wallpaper_save_preset",

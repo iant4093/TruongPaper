@@ -15,8 +15,9 @@
 //! plain `(width, height, stride, bytes)` tuples; the app glue adapts them to the renderer's
 //! `VideoFrameSource`.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CString};
 use std::marker::{PhantomData, PhantomPinned};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -30,6 +31,22 @@ use objc2_foundation::{NSNumber, NSString};
 /// Same range as the renderer's `MIN_PLAYBACK_SPEED..=MAX_PLAYBACK_SPEED` (docs/05 Phase 5).
 pub const MIN_VIDEO_RATE: f32 = 0.1;
 pub const MAX_VIDEO_RATE: f32 = 3.0;
+
+extern "C" {
+    fn truongpaper_export_fast_video(source: *const c_char, output: *const c_char) -> i32;
+}
+
+/// Encodes a 1.5x playback copy. Run off the main thread with a new output path.
+pub fn export_fast_video(source: &Path, output: &Path) -> Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let output = CString::new(output.as_os_str().as_bytes())?;
+    // SAFETY: both UTF-8 C strings live until the synchronous export returns.
+    let status = unsafe { truongpaper_export_fast_video(source.as_ptr(), output.as_ptr()) };
+    if status != 0 {
+        bail!("AVFoundation fast video export failed ({status})");
+    }
+    Ok(())
+}
 
 /// `kCVPixelFormatType_32BGRA` (`'BGRA'`).
 pub const K_CV_PIXEL_FORMAT_TYPE_32BGRA: u32 = 0x4247_5241;

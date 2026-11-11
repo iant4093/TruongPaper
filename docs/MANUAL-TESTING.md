@@ -4,13 +4,15 @@ Use this checklist after the automated checks pass. Test the actual desktop app,
 
 Start with the macOS checks (about 20–30 minutes), then Steam and one wallpaper of each type (another 15–30 minutes). Multi-display and Windows checks can be done separately when those devices are available. Stop at the first failure in a section and send the report format at the end; you do not need to debug it yourself.
 
-## Start here with the macOS 1.0.5 build
+## Start here with the macOS 1.0.6 build
 
 1. Open **Library** and apply the installed Workshop video `3836199874`.
-2. Select the video in Library. In the inspector, set **Playback Speed** to **2.20x**, minimize Studio, and watch the desktop for two loops. Repeat at **3.00x**. Report any stalls or uneven motion and the speed where it starts.
+2. Set **Playback Speed** to **2.20x** and give the first playback copy a few seconds to prepare. Minimize Studio and watch two loops. Repeat at **3.00x**, then drop to **1.00x**. macOS uses a cached copy capped at 1920 pixels on the longest edge above 2x.
 3. Open the TruongPaper menu bar popover while the video is playing. Check the title, video label, and preview against the desktop.
-4. Select **Switch to Photos** in the popover. With photos already in the offline queue, the desktop should switch promptly. Check that the popover now shows the current album and **Next Wallpaper**. Repeat with the video paused.
-5. In Studio, narrow the window with the video's details open. Check that **Scheme Color** has a full swatch and a hex value below the label. If you have another wallpaper with longer property names, check that the labels wrap and the controls remain usable.
+4. Select **Switch to Photos**. With matching photos already in the offline queue, the desktop should switch promptly. Confirm the popover shows a miniature of the current photo above the controls.
+5. In **Photography**, enable **Match photo orientation to display**, then advance through several photos. Landscape and portrait displays should use photos of the corresponding orientation. When none fit the active pool, rotation keeps the current wallpaper and can refill the matching queue.
+6. Open **Scheme Color** in the inspector. Change a slider or enter a hex value, then try **Apply** and **Cancel**. The picker should appear inside Studio.
+7. With a photo active, go to **Displays → Set Lock Screen Still**, then lock the Mac with **Control–Command–Q**. Check that macOS shows the selected photo. For a Workshop wallpaper the button uses its preview image. Repeat on Windows with **Win–L**.
 
 ## Workshop browser and RAM meter
 

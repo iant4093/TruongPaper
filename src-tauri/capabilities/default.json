@@ -61,6 +61,7 @@
     "allow-library-delete-wallpaper",
     "allow-monitors-list",
     "allow-monitor-apply-wallpaper",
+    "allow-wallpaper-set-lock-screen",
     "allow-monitor-update-property",
     "allow-monitor-update-adjustments",
     "allow-wallpaper-save-preset",

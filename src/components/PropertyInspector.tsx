@@ -2,6 +2,7 @@
 import React, { useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import { ColorPicker, normalizeHex } from './ColorPicker';
 import type {
   ProjectJsonSchema,
   UniversalAdjustments,
@@ -15,7 +16,7 @@ import type {
 export function weColorToHex(weColor: string | undefined): string {
   if (!weColor) return '#ffffff';
   const trimmed = weColor.trim();
-  if (trimmed.startsWith('#')) return trimmed;
+  if (trimmed.startsWith('#')) return normalizeHex(trimmed)?.toLowerCase() ?? '#ffffff';
   const parts = trimmed.split(/\s+/).map(Number);
   if (parts.length < 3 || parts.some(isNaN)) return '#ffffff';
   const toByte = (n: number) => {
@@ -273,20 +274,13 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
           }
 
           if (prop.type === 'color') {
-            const hexVal = weColorToHex(String(currentVal));
             return (
-              <label key={prop.key} className="property-field">
-                <span>{label}</span>
-                <span className="property-color button">
-                  <input
-                    type="color"
-                    aria-label={label}
-                    value={hexVal}
-                    onChange={(e) => void handleChange(prop.key, hexToWeColor(e.target.value))}
-                  />
-                  <span className="property-value" aria-hidden="true">{hexVal.toUpperCase()}</span>
-                </span>
-              </label>
+              <ColorPicker
+                key={prop.key}
+                label={label}
+                value={weColorToHex(String(currentVal))}
+                onChange={(hex) => void handleChange(prop.key, hexToWeColor(hex))}
+              />
             );
           }
 

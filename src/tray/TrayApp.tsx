@@ -137,8 +137,8 @@ export const TrayApp: React.FC = () => {
         ))}
       </div>
 
-      <div className="card" style={{ position: 'relative', zIndex: 1, padding: 14, flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-        <div>
+      <div className="card tray-wallpaper-card">
+        <div className="tray-wallpaper-content">
           <div style={{ fontSize: 11, color: 'var(--accent-cyan)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Current Wallpaper
           </div>
@@ -146,9 +146,9 @@ export const TrayApp: React.FC = () => {
             {currentTitle}
           </div>
           {currentDetails && <div className="tray-wallpaper-meta">{currentDetails}</div>}
-          {currentWallpaper?.previewPath && (
+          {(currentWallpaper?.previewPath || currentPhoto?.filePath) && (
             <div className="tray-wallpaper-preview">
-              <Thumb src={currentWallpaper.previewPath} alt="" height={84} />
+              <Thumb src={currentWallpaper?.previewPath || currentPhoto?.filePath} alt="" height={84} />
             </div>
           )}
         </div>

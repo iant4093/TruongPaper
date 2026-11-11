@@ -141,6 +141,14 @@ export const PhotosApiView: React.FC = () => {
             />
           </div>
         )}
+        <div style={{ marginTop: 12 }}>
+          <ToggleRow
+            label="Match photo orientation to display"
+            description="Landscape displays use landscape photos. Portrait displays use portrait photos."
+            checked={settings?.skipMismatchedOrientation ?? true}
+            onChange={(next) => void updateSettings({ skipMismatchedOrientation: next })}
+          />
+        </div>
       </div>
 
       {/* Browse Official Album Catalog Drawer */}

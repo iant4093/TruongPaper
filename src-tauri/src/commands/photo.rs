@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use truongpaper_core::AppSettings;
 use truongpaper_photo_api::*;
-use truongpaper_renderer::{load_rgba_image, RgbaImageData, MAX_PHOTO_TEXTURE_DIMENSION};
+use truongpaper_renderer::{RgbaImageData, MAX_PHOTO_TEXTURE_DIMENSION};
 
 /// How many queued photos `photo_rotate_next` tries per monitor when decoding fails.
 const MAX_DECODE_ATTEMPTS: usize = 3;
@@ -138,9 +138,42 @@ impl PhotoServiceState {
     }
 
     fn pop(&self, filter: &PhotoFilter, displayed: &[String]) -> Result<Option<PhotoItem>, String> {
-        let conn = self.db.lock();
-        pop_next_queued_photo_with_exclusions(&conn, &self.app_data_dir, filter, displayed)
-            .map_err(e)
+        loop {
+            let item = pop_next_queued_photo_with_exclusions(
+                &self.db.lock(),
+                &self.app_data_dir,
+                filter,
+                displayed,
+            )
+            .map_err(e)?;
+            let Some(mut item) = item else {
+                return Ok(None);
+            };
+            let Some((width, height)) = inspect_display_dimensions(Path::new(&item.file_path))
+            else {
+                return Ok(Some(item)); // The decoder will handle unreadable files.
+            };
+            let orientation = Orientation::from_dimensions(width, height);
+            if item.width != Some(width)
+                || item.height != Some(height)
+                || filter
+                    .orientation()
+                    .is_some_and(|required| required != orientation)
+            {
+                self.db.lock().execute(
+                    "UPDATE photos_cache SET width = ?1, height = ?2, orientation = ?3 WHERE id = ?4",
+                    rusqlite::params![width, height, orientation.as_str(), item.id],
+                ).map_err(e)?;
+                item.width = Some(width);
+                item.height = Some(height);
+            }
+            if filter
+                .orientation()
+                .is_none_or(|required| required == orientation)
+            {
+                return Ok(Some(item));
+            }
+        }
     }
 
     async fn refill(
@@ -210,8 +243,14 @@ pub(crate) fn decode_photo_for_display(
     if !renderer_attached {
         return Ok(None);
     }
-    load_rgba_image(path, MAX_PHOTO_TEXTURE_DIMENSION)
-        .map(|img| Some(Arc::new(img)))
+    decode_photo_for_wgpu(path, MAX_PHOTO_TEXTURE_DIMENSION)
+        .map(|image| {
+            Some(Arc::new(RgbaImageData {
+                width: image.width,
+                height: image.height,
+                pixels: image.rgba.into_raw(),
+            }))
+        })
         .map_err(|err| format!("photo {} could not be decoded: {err}", path.display()))
 }
 
@@ -296,7 +335,25 @@ pub async fn photo_fetch_public_catalog(
         .map_err(e)
 }
 
-/// 3. `photo_rotate_next` (Cloned vs. Independent multi-monitor + orientation fallback)
+fn display_orientation(is_portrait: bool) -> Orientation {
+    if is_portrait {
+        Orientation::Portrait
+    } else {
+        Orientation::Landscape
+    }
+}
+
+pub(crate) fn photo_matches_display(app: &AppHandle, monitor_id: &str, photo: &PhotoItem) -> bool {
+    let is_portrait = live_monitor_orientations(app)
+        .into_iter()
+        .find(|(id, _)| id == monitor_id)
+        .is_some_and(|(_, portrait)| portrait);
+    inspect_display_dimensions(Path::new(&photo.file_path)).is_some_and(|(width, height)| {
+        Orientation::from_dimensions(width, height) == display_orientation(is_portrait)
+    })
+}
+
+/// 3. `photo_rotate_next` (cloned or independent multi-monitor rotation).
 #[tauri::command]
 pub async fn photo_rotate_next(
     app: AppHandle,
@@ -377,12 +434,21 @@ async fn rotate_photo_targets(
         (skip, mode)
     };
 
+    let orientations = target_monitors
+        .iter()
+        .map(|(_, portrait)| display_orientation(*portrait));
+    let can_clone = !skip_mismatched
+        || orientations
+            .clone()
+            .all(|orientation| orientation == display_orientation(target_monitors[0].1));
     let mut last_applied_item: Option<PhotoItem> = None;
+    let mut refill_needed = false;
 
-    if multi_monitor_mode == "clone" && monitor_id.is_none() {
-        base_filter.required_orientation = None;
+    if multi_monitor_mode == "clone" && monitor_id.is_none() && can_clone {
+        base_filter.required_orientation =
+            skip_mismatched.then(|| display_orientation(target_monitors[0].1).as_str().into());
         let mut item =
-            photo_for_rotation(state, &mut base_filter, max_cache_bytes, &displayed_ids).await?;
+            photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids).await?;
         let mut attempts = 0;
         let (chosen, decoded) = loop {
             let chosen = item.ok_or_else(|| "No eligible photos available in queue".to_string())?;
@@ -413,19 +479,15 @@ async fn rotate_photo_targets(
             state.show_prepared(app, mid, &chosen, decoded.clone())?;
         }
         last_applied_item = Some(chosen);
+        refill_needed =
+            needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
     } else {
         for (mid, is_portrait) in &target_monitors {
-            base_filter.required_orientation = skip_mismatched.then(|| {
-                if *is_portrait {
-                    "portrait".to_string()
-                } else {
-                    "landscape".to_string()
-                }
-            });
+            base_filter.required_orientation =
+                skip_mismatched.then(|| display_orientation(*is_portrait).as_str().into());
 
             let mut item =
-                photo_for_rotation(state, &mut base_filter, max_cache_bytes, &displayed_ids)
-                    .await?;
+                photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids).await?;
 
             let mut attempts = 0;
             while let Some(chosen) = item.take() {
@@ -453,16 +515,13 @@ async fn rotate_photo_targets(
                 state.show_prepared(app, mid, &chosen, decoded)?;
                 last_applied_item = Some(chosen);
             }
+            refill_needed |=
+                needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
         }
     }
 
-    let unused_remaining = {
-        let conn = state.db.lock();
-        base_filter.required_orientation = None;
-        count_unused_in_queue(&conn, &base_filter).unwrap_or(0)
-    };
     state.emit_status(app);
-    if needs_refill(unused_remaining) && last_applied_item.is_some() {
+    if refill_needed && last_applied_item.is_some() {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Some(state) = app.try_state::<PhotoServiceState>() {
@@ -471,42 +530,30 @@ async fn rotate_photo_targets(
         });
     }
 
-    last_applied_item.ok_or_else(|| "No eligible photo found".to_string())
-}
-
-fn cached_photo_for_rotation(
-    state: &PhotoServiceState,
-    filter: &mut PhotoFilter,
-    displayed_ids: &[String],
-) -> Result<Option<PhotoItem>, String> {
-    let mut item = state.pop(filter, displayed_ids)?;
-    if item.is_none() && filter.required_orientation.is_some() {
-        // Fill modes handle the aspect difference when no matching cached photo is ready.
-        let mut fallback = filter.clone();
-        fallback.required_orientation = None;
-        item = state.pop(&fallback, displayed_ids)?;
-        if item.is_some() {
-            *filter = fallback;
+    last_applied_item.ok_or_else(|| {
+        if skip_mismatched {
+            "No eligible photo matches the selected display orientation yet".into()
+        } else {
+            "No eligible photo found".into()
         }
-    }
-    Ok(item)
+    })
 }
 
 async fn photo_for_rotation(
     state: &PhotoServiceState,
-    filter: &mut PhotoFilter,
+    filter: &PhotoFilter,
     max_cache_bytes: u64,
     displayed_ids: &[String],
 ) -> Result<Option<PhotoItem>, String> {
-    if let Some(item) = cached_photo_for_rotation(state, filter, displayed_ids)? {
+    if let Some(item) = state.pop(filter, displayed_ids)? {
         return Ok(Some(item));
     }
     let _refill = state.refill_mutex.lock().await;
-    if let Some(item) = cached_photo_for_rotation(state, filter, displayed_ids)? {
+    if let Some(item) = state.pop(filter, displayed_ids)? {
         return Ok(Some(item));
     }
     let _ = state.refill(filter, max_cache_bytes, displayed_ids).await;
-    cached_photo_for_rotation(state, filter, displayed_ids)
+    state.pop(filter, displayed_ids)
 }
 
 /// 4. `photo_trigger_refill`
@@ -529,14 +576,30 @@ pub(crate) async fn trigger_refill(
     state.is_refilling.store(true, Ordering::Relaxed);
     state.emit_status(app);
 
-    let res = match state.load_active_filter(None) {
-        Ok((_, filter, max_cache_bytes, displayed_ids)) => state
-            .refill(&filter, max_cache_bytes, &displayed_ids)
-            .await
-            .map(|_| ())
-            .map_err(e),
-        Err(err) => Err(err),
-    };
+    let res = async {
+        let (_, mut filter, max_cache_bytes, displayed_ids) = state.load_active_filter(None)?;
+        let orientations = if state.settings.lock().skip_mismatched_orientation {
+            let live = live_monitor_orientations(app);
+            [false, true]
+                .into_iter()
+                .filter(|portrait| {
+                    live.is_empty() && !portrait || live.iter().any(|(_, p)| p == portrait)
+                })
+                .map(|portrait| Some(display_orientation(portrait).as_str().to_string()))
+                .collect::<Vec<_>>()
+        } else {
+            vec![None]
+        };
+        for orientation in orientations {
+            filter.required_orientation = orientation;
+            state
+                .refill(&filter, max_cache_bytes, &displayed_ids)
+                .await
+                .map_err(e)?;
+        }
+        Ok(())
+    }
+    .await;
 
     state.is_refilling.store(false, Ordering::Relaxed);
     state.emit_status(app);
@@ -897,6 +960,43 @@ mod tests {
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 100, 96, 248, 95, 15,
         0, 2, 135, 1, 128, 235, 71, 186, 146, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
+
+    #[test]
+    fn photo_rotation_repairs_cached_orientation_and_skips_a_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "truongpaper-photo-orientation-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("square.png"), TINY_PNG).unwrap();
+        let mut state = service();
+        state.app_data_dir = dir.clone();
+        upsert_cached_photo(
+            &state.db.lock(),
+            &NewCachedPhoto {
+                id: "square".into(),
+                rel_path: "square.png".into(),
+                album_slug: "album".into(),
+                album_url: "https://example.com/album".into(),
+                featured: true,
+                fallback_used: false,
+                width: 1,
+                height: 2,
+                bytes: TINY_PNG.len() as u64,
+                downloaded_at: 1,
+            },
+        )
+        .unwrap();
+        let mut filter = PhotoFilter {
+            required_orientation: Some("portrait".into()),
+            ..Default::default()
+        };
+        assert!(state.pop(&filter, &[]).unwrap().is_none());
+        filter.required_orientation = Some("landscape".into());
+        let photo = state.pop(&filter, &[]).unwrap().unwrap();
+        assert_eq!((photo.width, photo.height), (Some(1), Some(1)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn photos_are_decoded_before_history_only_when_the_renderer_is_attached() {

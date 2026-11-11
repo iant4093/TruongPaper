@@ -2,6 +2,7 @@
 //! (camelCase on the JS side maps to the snake_case Rust parameters).
 
 pub mod library;
+pub mod lock_screen;
 pub mod monitor;
 pub mod photo;
 pub mod playlist;

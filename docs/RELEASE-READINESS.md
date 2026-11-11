@@ -56,7 +56,7 @@ The user observed Fit+Blur edge strips, repeated gray-screen flashing, and the i
 - A new charcoal/ivory layered-photo icon is used for macOS, Windows, documentation, sidebar branding, and browser favicon. The macOS tray has its own transparent template mark. The master and exact built-in ImageGen prompt are in `assets/`.
 - The user confirmed the corrected test build was stable and filled the screen after minimizing and observing the desktop. Longer sleep/wake and repeated-rotation checks remain in the priority checklist; shader smoke tests alone cannot establish WindowServer stability.
 
-Lock-screen support was also requested for feasibility review. Windows supports still images/snapshots through its personalization API, but not arbitrary live wallpaper on its secure lock screen. macOS needs separate native wallpaper/screensaver integration; the current desktop overlay is not lock-screen support. No lock-screen implementation is included in this build.
+The 1.0.6 build adds **Displays → Set Lock Screen Still**. It sets the system wallpaper on the primary display on macOS, which the lock screen can use, and calls the Windows lock-screen image API on Windows. A photo uses the active image. Workshop items use their preview. The result needs a lock/unlock check on each OS.
 
 ## Follow-up in local Mac build 1.0.3
 

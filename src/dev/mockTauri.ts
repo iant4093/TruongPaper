@@ -595,6 +595,7 @@ export function createMockBackend(
       emitEvent('wallpaper://changed', { monitorId, source, currentItem: item, transitionUsed: settings.transitionType });
       return null;
     },
+    wallpaper_set_lock_screen: () => null,
     monitor_update_property: (args) => {
       const w = findWallpaper(args.wallpaperId);
       wallpapers = wallpapers.map((x) =>

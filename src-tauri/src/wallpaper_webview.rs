@@ -184,6 +184,7 @@ pub fn plan_geometry_updates(
 
 struct WebWindow {
     label: String,
+    url: String,
     kind: WebviewKind,
     wallpaper_id: String,
     audio_reactive: bool,
@@ -194,6 +195,10 @@ struct WebWindow {
     /// CSS pixel size of the page (logical monitor size) for cursor coordinates.
     css_size: (f64, f64),
     last_cursor: Option<CursorSample>,
+    #[cfg(target_os = "macos")]
+    fast_video: Option<Arc<crate::fast_video::FastVideo>>,
+    #[cfg(target_os = "macos")]
+    fast_video_sent: bool,
 }
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
@@ -228,6 +233,8 @@ pub struct WebviewSpec {
     pub audio_reactive: bool,
     /// Sent after every page load: full property set (Web) / adjustments (Video).
     pub on_load_scripts: Vec<String>,
+    #[cfg(target_os = "macos")]
+    pub(crate) fast_video: Option<Arc<crate::fast_video::FastVideo>>,
 }
 
 /// Creates (or reuses) the desktop webview window of `spec.monitor_id`. Fails when the monitor is
@@ -244,7 +251,16 @@ pub async fn show(app: &AppHandle, spec: WebviewSpec) -> Result<(), String> {
 
     // Same wallpaper already open: just resend the scripts.
     let reuse = WINDOWS.lock().get(&spec.monitor_id).is_some_and(|w| {
-        w.label == label && w.kind == spec.kind && w.wallpaper_id == spec.wallpaper_id
+        #[cfg(target_os = "macos")]
+        if w.fast_video.as_ref().map(|video| video.virtual_path())
+            != spec.fast_video.as_ref().map(|video| video.virtual_path())
+        {
+            return false;
+        }
+        w.label == label
+            && w.kind == spec.kind
+            && w.wallpaper_id == spec.wallpaper_id
+            && w.url == spec.url
     }) && app.get_webview_window(&label).is_some();
     if reuse {
         for js in &spec.on_load_scripts {
@@ -287,6 +303,10 @@ pub async fn show(app: &AppHandle, spec: WebviewSpec) -> Result<(), String> {
                 w.loaded = true;
                 // The bridge re-sends the pause state for the fresh page.
                 w.paused_sent = None;
+                #[cfg(target_os = "macos")]
+                {
+                    w.fast_video_sent = false;
+                }
             }
             for js in &load_scripts {
                 if let Err(err) = window.eval(js) {
@@ -314,6 +334,7 @@ pub async fn show(app: &AppHandle, spec: WebviewSpec) -> Result<(), String> {
         spec.monitor_id.clone(),
         WebWindow {
             label: label.clone(),
+            url: spec.url,
             kind: spec.kind,
             wallpaper_id: spec.wallpaper_id.clone(),
             audio_reactive: spec.audio_reactive,
@@ -322,6 +343,10 @@ pub async fn show(app: &AppHandle, spec: WebviewSpec) -> Result<(), String> {
             logical: (lx, ly, lw, lh),
             css_size: (lw, lh),
             last_cursor: None,
+            #[cfg(target_os = "macos")]
+            fast_video: spec.fast_video,
+            #[cfg(target_os = "macos")]
+            fast_video_sent: false,
         },
     );
     attach_to_desktop(
@@ -600,6 +625,34 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            let ready: Vec<_> = WINDOWS
+                .lock()
+                .iter_mut()
+                .filter_map(|(id, window)| {
+                    if !window.loaded
+                        || window.fast_video_sent
+                        || !rt_of(id).is_some_and(|rt| rt.adjustments.playback_speed > 2.0)
+                    {
+                        return None;
+                    }
+                    let video = window.fast_video.as_ref().filter(|video| video.ready())?;
+                    window.fast_video_sent = true;
+                    Some((window.label.clone(), video.virtual_path().to_string()))
+                })
+                .collect();
+            for (label, path) in ready {
+                if let Ok(path) = serde_json::to_string(&path) {
+                    eval(
+                        &app,
+                        &label,
+                        &format!("window.__truongpaper_set_fast_video?.({path});"),
+                    );
+                }
+            }
+        }
+
         // 4. Audio frames + cursor events for playing Web pages.
         let live: Vec<LiveWebPage> = WINDOWS
             .lock()
@@ -795,6 +848,7 @@ mod tests {
     fn windows_are_kept_only_while_the_host_shows_them() {
         let window = WebWindow {
             label: "wallpaper-A".into(),
+            url: "wpe://localhost/index.html".into(),
             kind: WebviewKind::Web,
             wallpaper_id: "w1".into(),
             audio_reactive: false,
@@ -803,6 +857,10 @@ mod tests {
             logical: (0.0, 0.0, 100.0, 100.0),
             css_size: (100.0, 100.0),
             last_cursor: None,
+            #[cfg(target_os = "macos")]
+            fast_video: None,
+            #[cfg(target_os = "macos")]
+            fast_video_sent: false,
         };
         let host = WallpaperHost::new();
         host.set_source(

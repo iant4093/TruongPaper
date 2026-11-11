@@ -30,10 +30,9 @@ use tauri::AppHandle;
 use truongpaper_core::AppSettings;
 use truongpaper_platform::ScreenRect;
 use truongpaper_renderer::{
-    clamp_transition_duration, load_rgba_image, transition_progress, upload_rgba_texture,
-    CompositorPipeline, CompositorUniforms, FitMode, FrameUniformInputs, RgbaImageData,
-    SceneRenderer, VideoFrameSource, VideoPlaybackSettings, WebCursorEventKind,
-    MAX_PHOTO_TEXTURE_DIMENSION,
+    clamp_transition_duration, transition_progress, upload_rgba_texture, CompositorPipeline,
+    CompositorUniforms, FitMode, FrameUniformInputs, RgbaImageData, SceneRenderer,
+    VideoFrameSource, VideoPlaybackSettings, WebCursorEventKind,
 };
 use truongpaper_scenescript::CursorEventKind;
 use truongpaper_we_formats::WeVirtualFileSystem;
@@ -1030,8 +1029,8 @@ impl MonitorRenderer {
                     .take_pending_photo(&self.monitor_id, generation)
                     .or_else(|| {
                         let path = path.as_ref()?;
-                        match load_rgba_image(path, MAX_PHOTO_TEXTURE_DIMENSION) {
-                            Ok(img) => Some(Arc::new(img)),
+                        match crate::commands::photo::decode_photo_for_display(true, path) {
+                            Ok(img) => img,
                             Err(err) => {
                                 tracing::warn!("photo {}: {err}", path.display());
                                 None

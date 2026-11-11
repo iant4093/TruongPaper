@@ -96,11 +96,10 @@ describe('Main studio window', () => {
 
 describe('Tray popover', () => {
   it('renders current wallpaper, controls and queue footer', async () => {
-    await act(async () => {
-      render(<TrayApp />);
-    });
+    const view = render(<TrayApp />);
     expect(await screen.findByText('Current Wallpaper')).toBeTruthy();
     expect(screen.getByText('Next Wallpaper')).toBeTruthy();
+    expect(view.container.querySelector('.tray-wallpaper-preview img')).toBeTruthy();
     expect(await screen.findByText(/Offline Ready/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Favorite/ })).toBeTruthy();
   });

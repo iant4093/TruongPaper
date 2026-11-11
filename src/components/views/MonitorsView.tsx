@@ -1,8 +1,9 @@
 // src/components/views/MonitorsView.tsx
 // §2.5 View 4: "Monitors & Fit" View
 import React, { useState } from 'react';
-import { Copy, Image as ImageIcon } from 'lucide-react';
-import { useAppStore } from '../../store/useAppStore';
+import { invoke } from '@tauri-apps/api/core';
+import { Copy, Image as ImageIcon, Lock } from 'lucide-react';
+import { currentWallpaperForMonitor, useAppStore } from '../../store/useAppStore';
 import { FIT_MODE_LABEL } from '../../lib/format';
 import type { FitMode, MonitorInfo, WallpaperSource } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, ToggleRow, ViewHeader } from '../ui';
@@ -28,14 +29,19 @@ export const MonitorsView: React.FC = () => {
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const settings = useAppStore((s) => s.settings);
   const wallpapers = useAppStore((s) => s.wallpapers);
+  const photoStatus = useAppStore((s) => s.photoStatus);
   const playlists = useAppStore((s) => s.playlists);
   const policyStateByMonitor = useAppStore((s) => s.policyStateByMonitor);
   const selectMonitor = useAppStore((s) => s.selectMonitor);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const [msg, setMsg] = useState<string | null>(null);
+  const [lockScreenPending, setLockScreenPending] = useState(false);
+  const [lockScreenStatus, setLockScreenStatus] = useState<string | null>(null);
 
   const active = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0] ?? null;
+  const { wallpaper, photo } = currentWallpaperForMonitor(active ?? undefined, wallpapers, photoStatus);
+  const mac = /Mac/.test(navigator.platform);
   const lookup = {
     wallpaperTitle: (id: string) => wallpapers.find((w) => w.wallpaperId === id)?.title,
     playlistName: (id: string) => playlists.find((p) => p.playlistId === id)?.name,
@@ -57,6 +63,19 @@ export const MonitorsView: React.FC = () => {
       setMsg(`Applied "${describeSource(active.activeSource, lookup)}" to ${monitors.length - 1} other monitor(s)`);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+  const setLockScreen = async () => {
+    if (!active) return;
+    setLockScreenPending(true);
+    setLockScreenStatus(null);
+    try {
+      await invoke('wallpaper_set_lock_screen', { monitorId: active.monitorId });
+      setLockScreenStatus(mac ? 'System wallpaper set. Lock your Mac to check the image.' : 'Lock screen image set.');
+    } catch (err) {
+      setLockScreenStatus(String(err));
+    } finally {
+      setLockScreenPending(false);
     }
   };
 
@@ -145,6 +164,19 @@ export const MonitorsView: React.FC = () => {
           )}
         </>
       )}
+
+      <SectionTitle>Lock Screen</SectionTitle>
+      <div className="card lock-screen-card">
+        <div className="view-subtitle">
+          Use a still of the selected display’s wallpaper. Workshop items use their preview image.
+          {mac && ' This also sets the system wallpaper on the primary display.'}
+        </div>
+        <button type="button" className="button" disabled={lockScreenPending || !(photo || wallpaper?.previewPath)}
+          onClick={() => void setLockScreen()}>
+          <Lock size={14} /> {lockScreenPending ? 'Preparing image…' : 'Set Lock Screen Still'}
+        </button>
+        {lockScreenStatus && <div role="status">{lockScreenStatus}</div>}
+      </div>
 
       <SectionTitle>Orientation Matching for Photo API</SectionTitle>
       <div className="card" style={{ padding: 16 }}>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallpaper-set-lock-screen"
+description = "Enables the wallpaper_set_lock_screen command without any pre-configured scope."
+commands.allow = ["wallpaper_set_lock_screen"]
+
+[[permission]]
+identifier = "deny-wallpaper-set-lock-screen"
+description = "Denies the wallpaper_set_lock_screen command without any pre-configured scope."
+commands.deny = ["wallpaper_set_lock_screen"]

@@ -3,6 +3,7 @@
 import React, { useMemo, useState } from 'react';
 import { LogIn, LogOut, RefreshCw, Search } from 'lucide-react';
 import { WorkshopBrowser } from '../WorkshopBrowser';
+import { WorkshopImport } from '../WorkshopImport';
 import { WallpaperCard } from '../WallpaperCard';
 import { useAppStore } from '../../store/useAppStore';
 import { WALLPAPER_TYPE_LABEL } from '../../lib/format';
@@ -185,7 +186,7 @@ const InstalledWorkshopView: React.FC = () => {
         ))}
         {items.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            No Workshop wallpapers match. Paste a Workshop URL into the omnibar to download one.
+            No installed Workshop wallpapers match.
           </div>
         )}
       </div>
@@ -197,6 +198,7 @@ export const SteamWorkshopView: React.FC = () => {
   const [tab, setTab] = useState<'discover' | 'installed'>('discover');
   return <div>
     <ViewHeader title="Workshop" subtitle="Find your next wallpaper." />
+    <WorkshopImport />
     <div className="workshop-tabs"><SegmentedControl value={tab} options={[["discover", "Discover"], ["installed", "Installed"]]} onChange={setTab} /></div>
     {tab === 'discover' ? <WorkshopBrowser /> : <InstalledWorkshopView />}
   </div>;

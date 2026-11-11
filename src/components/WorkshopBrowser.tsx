@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ChevronLeft, ChevronRight, Search, SlidersHorizontal, Star } from 'lucide-react';
 import type { WorkshopBrowsePage, WorkshopBrowseQuery, WorkshopSort } from '../types/ipc';
 import { useAppStore } from '../store/useAppStore';
-import { parseOmnibarInput } from './UniversalOmnibar';
+import { parseImportLink } from '../lib/importLinks';
 import { Thumb } from './ui';
 import { workshopTypeFromTags } from '../lib/format';
 
@@ -30,7 +30,7 @@ export const WorkshopBrowser: React.FC = () => {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (parseOmnibarInput(input)?.kind === 'steam_workshop') return;
+      if (parseImportLink(input)?.kind === 'steam_workshop') return;
       setQuery((q) => q.search === input.trim() ? q : { ...q, search: input.trim(), page: 1 });
     }, 450);
     return () => clearTimeout(timer);
@@ -78,7 +78,7 @@ export const WorkshopBrowser: React.FC = () => {
     <div className="workshop-search-row">
       <form className="workshop-search" onSubmit={(e) => {
         e.preventDefault();
-        const target = parseOmnibarInput(input);
+        const target = parseImportLink(input);
         if (target?.kind === 'steam_workshop') void preview(target.workshopId);
         else update({ search: input.trim() });
       }}>

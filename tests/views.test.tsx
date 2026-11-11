@@ -11,7 +11,7 @@ import { useAppStore } from '../src/store/useAppStore';
 
 const HEADINGS: Record<string, RegExp> = {
   all: /^Library$/,
-  photos: /^Photography$/,
+  photos: /^Ian Truong Photography$/,
   workshop: /^Workshop$/,
   playlists: /^Playlists$/,
   monitors: /^Displays$/,
@@ -49,6 +49,8 @@ describe('Main studio window', () => {
       });
       const heading = await screen.findByRole('heading', { level: 2, name: HEADINGS[key] }, { timeout: 2000 });
       expect(heading).toBeTruthy();
+      const workshopImport = screen.queryByRole('textbox', { name: 'Steam Workshop link or item ID' });
+      expect(!!workshopImport).toBe(key === 'workshop');
       expect(document.body.textContent ?? '').not.toMatch(/TODO|FIXME|Not implemented/i);
     }
   });
@@ -81,6 +83,26 @@ describe('Main studio window', () => {
     expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
   });
 
+  it('shows the actual offline queue size and only filters for installed wallpaper types', async () => {
+    await act(async () => { render(<App />); });
+    await screen.findByRole('button', { name: 'Select Lo-fi Train Window' });
+    const { photoStatus, wallpapers } = useAppStore.getState();
+    const queuedPhoto = photoStatus!.unusedQueue[0];
+    await act(async () => {
+      useAppStore.setState({
+        wallpapers: wallpapers.filter((wallpaper) => wallpaper.type === 'video'),
+        photoStatus: {
+          ...photoStatus!,
+          unusedQueue: Array.from({ length: 8 }, (_, i) => ({ ...queuedPhoto, id: `offline-${i}` })),
+        },
+      });
+    });
+    expect(screen.getByText('8 photos ready offline')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Videos' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Scenes' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Web' })).toBeNull();
+  });
+
   it('rotates to the next photo through the mock backend', async () => {
     await act(async () => {
       render(<App />);
@@ -100,7 +122,8 @@ describe('Tray popover', () => {
     expect(await screen.findByText('Current Wallpaper')).toBeTruthy();
     expect(screen.getByText('Next Wallpaper')).toBeTruthy();
     expect(view.container.querySelector('.tray-wallpaper-preview img')).toBeTruthy();
-    expect(await screen.findByText(/Offline Ready/)).toBeTruthy();
+    expect(await screen.findByText(/^\d+ photos? ready offline ·/)).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
     expect(screen.getByRole('button', { name: /Favorite/ })).toBeTruthy();
   });
 

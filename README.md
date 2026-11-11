@@ -68,8 +68,8 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 **Ian Truong Photography API & Offline Queue**
 
 - Direct integration with `https://photos-api.iantruongphotography.com/v1/photos/random`: pull from all public photos, featured photos only (`?featured=true`), or any combination of saved albums (`?album=<slug>`)
-- Browse the official public album catalog with cover thumbnails and photo counts, or paste any `https://iantruongphotography.com/album/...` URL or slug into the top omnibar
-- Offline-first local queue: keeps 5 unused full-resolution JPEGs (`wallpapers/photos/<id>.jpg`) ready on disk and refills in the background when the queue drops to 2, so scheduled wallpaper changes happen instantly with zero API calls
+- Browse the public album catalog in **Photography**, or paste an `https://iantruongphotography.com/album/...` URL or slug under **Saved albums**
+- The offline queue targets five unused full-resolution photos and refills in the background at two or fewer. The displayed count shows how many photos are currently queued on disk.
 - Persistent SQLite history (`photos_history`): checks every random pick against both the unused queue and shown history *before* downloading `imageUrl`, guaranteeing no photo repeats even after older image files are evicted to free disk space
 - Smart exhaustion handling: when every photo in an album or filter has been shown, TruongPaper automatically resets the history for that filter and re-queues any photos still cached on disk (or holds on the last photo if preferred)
 - Per-photo actions: Favorite / Pin on disk (exempts from cache cleanup), Hide / Never show again (blacklists ID and advances), and View Album on `iantruongphotography.com`

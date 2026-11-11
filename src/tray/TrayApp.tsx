@@ -3,9 +3,8 @@ import { Dropdown } from '../components/Dropdown';
 import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
-import { parseOmnibarInput } from '../components/UniversalOmnibar';
 import { Thumb } from '../components/ui';
-import { formatBytes, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { formatBytes, formatOfflinePhotoCount, WALLPAPER_TYPE_LABEL } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { TransitionType } from '../types/ipc';
 
@@ -23,10 +22,6 @@ export const TrayApp: React.FC = () => {
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
   const updateSettings = useAppStore((s) => s.updateSettings);
-  const addAlbum = useAppStore((s) => s.addAlbum);
-  const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
-
-  const [quickLink, setQuickLink] = useState('');
   const [switching, setSwitching] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -71,22 +66,6 @@ export const TrayApp: React.FC = () => {
     }
   };
 
-  const handleQuickPaste = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const parsed = parseOmnibarInput(quickLink);
-    if (!parsed) return;
-    try {
-      if (parsed.kind === 'steam_workshop') {
-        await downloadWorkshopItem(parsed.workshopId);
-      } else {
-        await addAlbum(parsed.albumSlug);
-      }
-      setQuickLink('');
-    } catch {
-      // Errors (e.g. Steam not signed in) are surfaced in the studio window; keep the link for retry.
-    }
-  };
-
   return (
     <div className="app-window-frame tray-shell" style={{ width: 360, height: 480, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
 
@@ -112,17 +91,6 @@ export const TrayApp: React.FC = () => {
           </button>
         </div>
       </div>
-
-      <form onSubmit={handleQuickPaste} style={{ position: 'relative', zIndex: 1 }}>
-        <input
-          type="text"
-          value={quickLink}
-          onChange={(e) => setQuickLink(e.target.value)}
-          placeholder="Paste Workshop or Photo Album Link..."
-          className="button"
-          style={{ width: '100%', textAlign: 'left', fontSize: 12, padding: '7px 12px', cursor: 'text' }}
-        />
-      </form>
 
       <div style={{ position: 'relative', zIndex: 1, display: 'flex', gap: 6, overflowX: 'auto' }}>
         {monitors.map((m) => (
@@ -220,11 +188,11 @@ export const TrayApp: React.FC = () => {
           onChange={(transitionType: TransitionType) => void updateSettings({ transitionType })} />
       </div>
 
-      <div style={{ position: 'relative', zIndex: 1, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
-        Queue: {photoStatus?.unusedQueue.length ?? 0}/5 Offline Ready •{' '}
-        {Math.round((photoStatus?.cachedBytes ?? 0) / (1024 * 1024))} /{' '}
-        {Math.round((photoStatus?.maxCacheBytes ?? 250 * 1024 * 1024) / (1024 * 1024))} MB
-      </div>
+      {photoStatus && (
+        <div className="tray-cache-status">
+          {formatOfflinePhotoCount(photoStatus.unusedQueue.length)} · {formatBytes(photoStatus.cachedBytes)} cached
+        </div>
+      )}
     </div>
   );
 };

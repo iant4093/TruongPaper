@@ -6,7 +6,7 @@ import {
   resolveLocalizedText,
   weColorToHex,
 } from '../src/components/PropertyInspector';
-import { parseOmnibarInput } from '../src/components/UniversalOmnibar';
+import { parseImportLink } from '../src/lib/importLinks';
 import type { ProjectJsonSchema } from '../src/types/ipc';
 
 describe('Wallpaper Engine Color Conversion (weColorToHex & hexToWeColor)', () => {
@@ -94,15 +94,15 @@ describe('project.json Localization Lookup (resolveLocalizedText)', () => {
   });
 });
 
-describe('Universal Omnibar URL & Slug Parser (parseOmnibarInput)', () => {
+describe('Import URL and slug parser', () => {
   it('detects Steam Workshop HTTP URLs, steam:// protocol links, and numeric IDs', () => {
     expect(
-      parseOmnibarInput('https://steamcommunity.com/sharedfiles/filedetails/?id=2841928371&searchtext=')
+      parseImportLink('https://steamcommunity.com/sharedfiles/filedetails/?id=2841928371&searchtext=')
     ).toEqual({ kind: 'steam_workshop', workshopId: '2841928371' });
     expect(
-      parseOmnibarInput('steam://url/CommunityFilePage/2841928371')
+      parseImportLink('steam://url/CommunityFilePage/2841928371')
     ).toEqual({ kind: 'steam_workshop', workshopId: '2841928371' });
-    expect(parseOmnibarInput('2841928371')).toEqual({
+    expect(parseImportLink('2841928371')).toEqual({
       kind: 'steam_workshop',
       workshopId: '2841928371',
     });
@@ -110,9 +110,9 @@ describe('Universal Omnibar URL & Slug Parser (parseOmnibarInput)', () => {
 
   it('detects Ian Truong Photography Album URLs and slugs', () => {
     expect(
-      parseOmnibarInput('https://iantruongphotography.com/album/bald-mountain-11-1')
+      parseImportLink('https://iantruongphotography.com/album/bald-mountain-11-1')
     ).toEqual({ kind: 'photo_album', albumSlug: 'bald-mountain-11-1' });
-    expect(parseOmnibarInput('cape-horn-11-7')).toEqual({
+    expect(parseImportLink('cape-horn-11-7')).toEqual({
       kind: 'photo_album',
       albumSlug: 'cape-horn-11-7',
     });

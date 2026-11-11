@@ -4,7 +4,6 @@ import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings
 import { PresetBar } from './components/PresetBar';
 import { PropertyInspector } from './components/PropertyInspector';
 import { SteamAuthModal } from './components/SteamAuthModal';
-import { UniversalOmnibar } from './components/UniversalOmnibar';
 import { WindowControls } from './components/WindowControls';
 import { WorkshopPreviewModal } from './components/WorkshopPreviewModal';
 import { AllWallpapersView } from './components/views/AllWallpapersView';
@@ -118,7 +117,6 @@ export const App: React.FC = () => {
             {canInspect && <button type="button" className={`icon-button ${detailsOpen ? 'is-active' : ''}`} aria-label="Toggle wallpaper details" aria-pressed={detailsOpen} onClick={() => setDetailsOpen(!detailsOpen)}><SlidersHorizontal size={16} /></button>}
           </div>
         </header>
-        <div className="import-toolbar"><UniversalOmnibar /></div>
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
           <main className="content-viewport">
             {(loadError || actionError) && <div role="alert" className="error-banner">{loadError ?? actionError}</div>}

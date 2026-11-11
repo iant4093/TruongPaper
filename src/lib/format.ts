@@ -11,6 +11,10 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / MB).toFixed(1)} MB`;
 }
 
+export function formatOfflinePhotoCount(count: number): string {
+  return `${count} ${count === 1 ? 'photo' : 'photos'} ready offline`;
+}
+
 /**
  * Converts an on-disk path returned by the Rust backend into a URL the webview
  * can load through Tauri's `asset:` protocol. Remote, data and blob URLs pass through.

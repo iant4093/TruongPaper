@@ -15,8 +15,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { parseOmnibarInput } from '../UniversalOmnibar';
-import { GB, MB, formatBytes } from '../../lib/format';
+import { parseImportLink } from '../../lib/importLinks';
+import { GB, MB, formatBytes, formatOfflinePhotoCount } from '../../lib/format';
 import type { FilterMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 
@@ -92,7 +92,7 @@ export const PhotosApiView: React.FC = () => {
 
   const submitAlbum = async (e: React.FormEvent) => {
     e.preventDefault();
-    const parsed = parseOmnibarInput(albumInput);
+    const parsed = parseImportLink(albumInput);
     if (!parsed || parsed.kind !== 'photo_album') {
       setAlbumMsg('Enter an iantruongphotography.com album URL or slug');
       return;
@@ -112,10 +112,8 @@ export const PhotosApiView: React.FC = () => {
   return (
     <div>
       <ViewHeader
-        title="Photography"
-        subtitle={`API requests available: ${photoStatus?.rateLimitRemaining ?? '—'} • ${
-          photoStatus?.isRefilling ? 'Refilling queue…' : 'Queue idle'
-        }`}
+        title="Ian Truong Photography"
+        subtitle="Photo wallpapers from the Ian Truong Photography API."
         actions={
           <button type="button" className="button" onClick={() => void openCatalog()}>
             <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Browse albums'}
@@ -196,9 +194,10 @@ export const PhotosApiView: React.FC = () => {
       <form onSubmit={submitAlbum} style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <input
           type="text"
+          aria-label="Ian Truong Photography album link or slug"
           value={albumInput}
           onChange={(e) => setAlbumInput(e.target.value)}
-          placeholder="Paste an album link or slug"
+          placeholder="Paste an Ian Truong Photography album link or slug"
           className="button"
           style={{ flex: 1, textAlign: 'left', cursor: 'text', justifyContent: 'flex-start' }}
         />
@@ -287,9 +286,7 @@ export const PhotosApiView: React.FC = () => {
       )}
 
       {/* Up Next Queue */}
-      <SectionTitle>
-        Up next ({queue.length} Photo{queue.length === 1 ? '' : 's'} ready)
-      </SectionTitle>
+      <SectionTitle>{formatOfflinePhotoCount(queue.length)}</SectionTitle>
       <div style={cardGrid}>
         {queue.map((photo, idx) => (
           <div key={photo.id} className="card" style={{ padding: 12 }}>
@@ -381,11 +378,12 @@ export const PhotosApiView: React.FC = () => {
 
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
           Shown history: {photoStatus?.historyCount ?? 0} IDs • Blacklisted: {photoStatus?.blacklistCount ?? 0}
+          {photoStatus && <div>API requests available: {photoStatus.rateLimitRemaining}</div>}
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="button button-primary" onClick={() => void triggerPhotoRefill()}>
-            <RefreshCw size={14} /> Refill queue
+          <button type="button" className="button button-primary" disabled={photoStatus?.isRefilling} onClick={() => void triggerPhotoRefill()}>
+            <RefreshCw size={14} /> {photoStatus?.isRefilling ? 'Refilling queue…' : 'Refill queue'}
           </button>
           <button type="button" className="button" onClick={() => void clearPhotoCache()}>
             <Trash2 size={14} /> Clear cache

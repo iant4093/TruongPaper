@@ -8,6 +8,8 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // Rust build output is large and never needs frontend hot reload.
+    watch: { ignored: ['**/src-tauri/**'] },
   },
   build: {
     target: ['es2022', 'chrome110', 'safari16'],

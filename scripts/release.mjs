@@ -43,6 +43,9 @@ if (!env.TAURI_SIGNING_PRIVATE_KEY) {
 const build = spawnSync('npx', ['tauri', 'build', ...args], { cwd: root, env, stdio: 'inherit' });
 if (build.status !== 0) process.exit(build.status ?? 1);
 
+// Catch signing/runtime failures in the actual bundled downloader before delivery.
+execFileSync(process.execPath, [join(root, 'scripts', 'verify-depotdownloader.mjs')], { cwd: root, stdio: 'inherit' });
+
 // 3. latest.json — upload it plus the .tar.gz/.exe next to it to the GitHub release v<version>.
 const bundleDir = join(root, 'src-tauri', 'target', 'release', 'bundle');
 const platformKey = `${process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux'}-${

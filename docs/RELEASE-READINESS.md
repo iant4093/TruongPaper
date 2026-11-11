@@ -20,6 +20,8 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 - Generated an updater key, restricted the local private key file to mode 0600, configured the public key, and installed the GitHub `TAURI_SIGNING_PRIVATE_KEY` secret. The private key is outside the repository at `~/.tauri/truongpaper.key`; keep a secure backup.
 - Pushed the repository and started real macOS/Windows CI. The first Windows build compiled and reached tests; a CRLF-sensitive shader/doc test stopped it. Added LF checkout rules and normalized the test comparison. CI retains caches on failure for follow-up builds.
 - CI builds test installers by default. Publishing requires a manual run on `main` with `publish` enabled. No public release is published by an ordinary push.
+- Fixed macOS packaged DepotDownloader startup: hardened runtime signing now includes the .NET JIT entitlement required by [Microsoft’s deployment guidance](https://learn.microsoft.com/en-us/dotnet/core/deploying/macos). Added a network-free launch probe of the actual bundled downloader to local release builds and CI.
+- Excluded Rust build output from Vite watching after observing excessive development-server CPU usage.
 - Added browser-preview screenshots and a real native macOS photo-library screenshot. README claims were narrowed to match current limitations.
 
 ## Verification performed locally

@@ -105,6 +105,9 @@ jobs:
           npx tauri build --bundles "$BUNDLES" \
             --config "{\"version\":\"$VERSION\",\"bundle\":{\"createUpdaterArtifacts\":$updater}}"
 
+      - name: Verify bundled Steam downloader starts
+        run: node scripts/verify-depotdownloader.mjs
+
       - name: Collect installers
         shell: bash
         run: |

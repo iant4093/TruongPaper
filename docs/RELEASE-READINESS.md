@@ -29,9 +29,9 @@ TruongPaper is a preview implementation. Unit tests and packaged builds do not e
 
 | Check | Result |
 |---|---|
-| Frontend tests | 158 passed |
+| Frontend tests | 159 passed |
 | TypeScript / Vite build | Passed |
-| Rust workspace tests (`--locked`) | 403 passed |
+| Rust workspace tests (`--locked`) | 405 passed |
 | Clippy (workspace, all targets, locked) | Passed without warnings |
 | Rust formatting | Passed |
 | GPU smoke example | Passed on Apple M3 Max; initializes adapter and compiles shaders |
@@ -64,6 +64,14 @@ Lock-screen support was also requested for feasibility review. Windows supports 
 - Retried Workshop item `3836199874` with the user's saved session. Steam reported that the account lacked access to Wallpaper Engine. The preview displayed the specific response once. A download and playback test still needs a Steam account with access to Wallpaper Engine.
 - Dock reopen now shows and focuses Studio through the same function as the tray. The user confirmed that clicking the Dock icon restored the window after closing it.
 - The test Mac used macOS's transparent menu bar. The user confirmed that enabling **Show menu bar background** removed the top fade. This is a macOS appearance preference.
+
+## Guest downloads in local Mac build 1.0.4
+
+- Discover uses Steam’s public guest catalog. Signing in for Steam downloads leaves catalog queries in that same guest session. Steam’s visibility rules apply to the listed items and to opening individual links.
+- Valve’s SteamCMD connected anonymously and failed to fetch item `3836199874`. [WorkshopFetch](https://workshopfetch.com/download/3836199874) and [Steam Workshop Downloader IO](https://steamworkshopdownloader.io/) offered SteamCMD instructions. The .app site redirected to a browser-update ad.
+- GGNetwork served the exact item's ZIP anonymously. The archive contained a Wallpaper Engine project, a preview, and a 4K MP4. The packaged app installed the same item through its guest route and the installed video matched the browser archive byte for byte. GGNetwork required its own account for the older item `2013752983`.
+- **Download via GGNetwork** sends the public Workshop URL to the provider. The app accepts its ZIP for Scene, Video, and Web projects, checks extraction paths and size limits, then installs the project into the library. An existing copy is preserved until the replacement is ready. A Workshop link or ID opens a preview so the user can choose the source.
+- The GGNetwork delivery flow depends on the provider’s current website and file servers. Availability varies by item. The guest transfer limit is 2 GiB compressed and 4 GiB unpacked.
 
 ## Remaining code limitations
 

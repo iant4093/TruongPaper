@@ -105,7 +105,7 @@ export const WorkshopBrowser: React.FC = () => {
     </div>}
     <div className="workshop-results-info" role="status">
       {loading ? 'Loading Steam Workshop…' : data ? `${data.totalItems.toLocaleString()} wallpapers · Page ${data.page.toLocaleString()} of ${data.totalPages.toLocaleString()}` : ''}
-      <span>Public catalog · Sign in to download</span>
+      <span>Public catalog</span>
     </div>
     {error && <div className="workshop-error" role="alert"><span>{error}</span><button className="button" onClick={() => setRetry((n) => n + 1)}>Retry</button></div>}
     {previewError && <div className="workshop-error" role="alert">{previewError}</div>}

@@ -7,6 +7,7 @@ import { MonitorSmartphone, X } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { formatBytes, workshopTypeFromTags } from '../lib/format';
 import { Badge, Thumb } from './ui';
+import type { WorkshopDownloadSource } from '../types/ipc';
 
 export const WorkshopPreviewModal: React.FC = () => {
   const preview = useAppStore((s) => s.inspectedWorkshop);
@@ -21,23 +22,23 @@ export const WorkshopPreviewModal: React.FC = () => {
 
   const download = useAppStore((s) => s.downloadWorkshopItem);
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState<WorkshopDownloadSource | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  React.useEffect(() => { setDownloadError(null); setStarting(false); }, [preview?.workshopId]);
-  const startDownload = async () => {
+  React.useEffect(() => { setDownloadError(null); setStarting(null); }, [preview?.workshopId]);
+  const startDownload = async (source: WorkshopDownloadSource) => {
     if (!preview) return;
-    setStarting(true); setDownloadError(null);
-    try { await download(preview.workshopId); }
+    setStarting(source); setDownloadError(null);
+    try { await download(preview.workshopId, source === 'ggnetwork' ? source : undefined); }
     catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setDownloadError(message);
-      if (/^(sign in to steam|steam login required)/i.test(message)) openAuth();
-    } finally { setStarting(false); }
+      if (source === 'steam' && /^(sign in to steam|steam login required)/i.test(message)) openAuth();
+    } finally { setStarting(null); }
   };
 
   const open = !!preview && !authModalOpen;
   const progress = preview ? downloadsById[preview.workshopId] : undefined;
-  const error = downloadError ?? (progress?.state === 'error' ? progress.error : null);
+  const error = downloadError ?? (!starting && progress?.state === 'error' ? progress.error : null);
   const installed = preview ? wallpapers.find((w) => w.workshopId === preview.workshopId) : undefined;
   const monitorId = selectedMonitorId ?? monitors[0]?.monitorId;
 
@@ -92,7 +93,18 @@ export const WorkshopPreviewModal: React.FC = () => {
             )}
 
             <div style={{ marginTop: 16 }}>
-              {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && <button className="button button-primary" disabled={starting} onClick={() => void startDownload()}>{starting ? 'Starting download…' : progress?.state === 'error' ? 'Retry download' : 'Download wallpaper'}</button>}
+              {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && (
+                <div className="workshop-download-actions">
+                  {workshopTypeFromTags(preview.tags) !== 'Application' && (
+                    <button className="button button-primary" disabled={!!starting} onClick={() => void startDownload('ggnetwork')}>
+                      {starting === 'ggnetwork' ? 'Checking GGNetwork…' : 'Download via GGNetwork'}
+                    </button>
+                  )}
+                  <button className="button" disabled={!!starting} onClick={() => void startDownload('steam')}>
+                    {starting === 'steam' ? 'Starting download…' : progress?.state === 'error' ? 'Retry with Steam' : 'Download with Steam'}
+                  </button>
+                </div>
+              )}
               {error && <p role="alert" className="workshop-error">{error}</p>}
               {progress?.state === 'downloading' && (
                 <>

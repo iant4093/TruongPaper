@@ -6,19 +6,19 @@ Start with the macOS checks (about 20–30 minutes), then Steam and one wallpape
 
 ## Start here: the new Workshop browser and RAM meter
 
-The local Mac build is **1.0.3** and is already running. These are the first checks that need your account or your observation:
+The local Mac build is **1.0.4** and is already running. These are the first checks that need your account or your observation:
 
-1. Open Workshop → Discover without signing in. Search a subject, change Type/Genre/Resolution, and try Next/Previous. Open a preview; it must wait for Download wallpaper.
+1. Open Workshop → Discover without signing in. Search a subject, change Type/Genre/Resolution, and try Next/Previous. Open a preview and check the download choices.
 2. Check that the sidebar has separate RAM and Disk cache rows and no status dot. RAM refreshes about every three seconds and reports the main process; helper processes and GPU memory are separate.
-3. Open Steam account, scan the QR yourself, preview a small wallpaper, and choose Download wallpaper. Apply it after completion. Record its Workshop ID if anything fails. Never send login secrets in your report.
+3. Paste `3836199874` into Import and choose **Download via GGNetwork**. When it appears in Installed, apply it and watch a few loops. GGNetwork availability can change. Test **Download with Steam** separately using an account with Wallpaper Engine access.
 4. Paste another direct Workshop URL or ID into the top Import field. Also check an existing photo-album link.
 5. Watch the wallpaper for three loops, try Pause/Resume, then lock/unlock and sleep/wake. Repeat the guest browsing and download/apply checks on Windows when available.
 
-The native guest gallery, a real Steam QR appearing before login, the packaged downloader starting, 158 frontend tests, and 403 Rust tests have already passed. Completing Steam authentication, a real account download, wallpaper compatibility, and Windows desktop behavior still need your testing. Detailed checks follow below.
+The native guest gallery and GGNetwork download of `3836199874` passed. The packaged Steam downloader started and displayed a live QR. The 159 frontend tests and 405 Rust tests passed. Playback, downloading through a Steam account with Wallpaper Engine access, and Windows desktop behavior still need desktop testing. Detailed checks follow below.
 
 ## Priority retest: fill, gray flashes, and branding
 
-The current local Mac test build is **1.0.3**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current app changes.
+The current local Mac test build is **1.0.4**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current app changes.
 
 1. In Displays, choose **Fill / Center Crop**. It should affect the photo already on the desktop immediately. New installations now default to Fill; existing explicit fit choices are preserved.
 2. Minimize Studio and watch the desktop for at least 60 seconds. The picture should reach every edge without blurred strips, and should not alternate with a blank gray screen.
@@ -88,12 +88,12 @@ Use an animated wallpaper after step 5 for the strongest pause check; a still ph
 5. Disconnect Wi-Fi and change the search; expect an error and Retry. Reconnect and retry. Installed wallpapers should remain available under Installed.
 6. Check the sidebar's separate Disk cache and RAM rows. RAM updates about every three seconds and means the main app process's resident memory; WebKit helpers and GPU allocations are separate. It should not equal the photo-cache size or show a colored status dot.
 
-**Pass:** Browsing is available without sign-in. Previewing never auto-downloads. The top Import field still accepts direct Workshop links/IDs and photo album links as before. Steam's guest visibility/content restrictions apply; the downloader's login does not become a browsing session.
+**Pass:** Browsing is available without sign-in. Previewing never auto-downloads. The top Import field still accepts direct Workshop links/IDs and photo album links and opens a preview for Workshop items. Discover always uses Steam’s public guest catalog.
 
 ## 5. Steam sign-in and real downloads — your account is needed
 
 1. Go to Workshop → Steam account (or Installed → Manage Steam Account). Complete the Steam Mobile QR flow yourself. Use an account with access to Wallpaper Engine for the download test. Do not paste passwords, QR screenshots, Steam Guard codes, or tokens into this chat.
-2. In Discover, preview a small Wallpaper Engine Workshop item you have access to, then choose Download wallpaper. Also test a direct link/ID using the top Import field. If core assets need to download, let that finish too.
+2. In Discover, preview a small Wallpaper Engine Workshop item you have access to, then choose Download with Steam. Also test a direct link/ID using the top Import field. If core assets need to download, let that finish too.
 3. Confirm download progress reaches completion, a thumbnail appears, and Apply works.
 4. Test a password/Steam Guard login separately if you use that method. Sign out first; enter credentials only in the app.
 5. If Steam is installed locally, use Sync Local Steam Library. Confirm a subscribed wallpaper appears with its preview and can be applied.

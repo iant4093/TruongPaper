@@ -44,7 +44,6 @@ export const UniversalOmnibar: React.FC = () => {
   const [input, setInput] = useState('');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const inspectWorkshopUrl = useAppStore((s) => s.inspectWorkshopUrl);
-  const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
   const addAlbum = useAppStore((s) => s.addAlbum);
   const openSteamAuthModal = useAppStore((s) => s.openSteamAuthModal);
 
@@ -58,9 +57,8 @@ export const UniversalOmnibar: React.FC = () => {
     try {
       if (parsed.kind === 'steam_workshop') {
         setStatusMsg(`Inspecting Steam Workshop #${parsed.workshopId}...`);
-        const preview = await inspectWorkshopUrl(parsed.workshopId);
-        setStatusMsg(`Downloading "${preview.title}"...`);
-        await downloadWorkshopItem(parsed.workshopId);
+        await inspectWorkshopUrl(parsed.workshopId);
+        setStatusMsg(null);
         setInput('');
       } else {
         setStatusMsg(`Adding album "${parsed.albumSlug}"...`);

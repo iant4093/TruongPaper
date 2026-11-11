@@ -202,3 +202,5 @@ input.button { cursor: text; }
 .workshop-skeleton { height: 264px; overflow: hidden; }
 .workshop-skeleton > div { height: 150px; background: rgba(255,255,255,.025); }
 .workshop-skeleton > span { display: block; height: 12px; margin: 22px 14px; width: 55%; background: rgba(255,255,255,.04); border-radius: 4px; }
+
+.workshop-download-actions { display: flex; flex-wrap: wrap; gap: 8px; }

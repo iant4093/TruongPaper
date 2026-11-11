@@ -130,6 +130,8 @@ export interface WallpaperPreset {
   adjustments: UniversalAdjustments;
 }
 
+export type WorkshopDownloadSource = 'steam' | 'ggnetwork';
+
 export type WorkshopSort = 'trending' | 'most_subscribed' | 'newest' | 'top_rated';
 export interface WorkshopBrowseQuery {
   search: string;

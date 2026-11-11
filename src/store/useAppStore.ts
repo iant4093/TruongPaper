@@ -17,6 +17,7 @@ import type {
   WallpaperPreset,
   WallpaperSource,
   WorkshopPreview,
+  WorkshopDownloadSource,
 } from '../types/ipc';
 
 export interface SteamDownloadProgress {
@@ -80,7 +81,7 @@ export interface AppState {
 
   inspectWorkshopUrl: (urlOrId: string) => Promise<WorkshopPreview>;
   closeWorkshopPreview: () => void;
-  downloadWorkshopItem: (urlOrId: string) => Promise<void>;
+  downloadWorkshopItem: (urlOrId: string, source?: WorkshopDownloadSource) => Promise<void>;
   syncLocalSteamFolders: () => Promise<void>;
   deleteWallpaper: (wallpaperId: string) => Promise<void>;
   openSteamAuthModal: () => void;
@@ -357,8 +358,8 @@ export const useAppStore = create<AppState>((set, get) => {
 
     closeWorkshopPreview: () => { previewRequest++; set({ inspectedWorkshop: null }); },
 
-    downloadWorkshopItem: async (urlOrId) => {
-      await invoke<string>('steam_download_workshop_item', { urlOrId });
+    downloadWorkshopItem: async (urlOrId, source) => {
+      await invoke<string>('steam_download_workshop_item', source ? { urlOrId, source } : { urlOrId });
     },
 
     syncLocalSteamFolders: async () => {

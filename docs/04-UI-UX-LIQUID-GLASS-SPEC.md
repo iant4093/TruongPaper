@@ -2074,7 +2074,7 @@ invoke<void>('photo_reset_history', { albumSlug?: string });
 // --- Steam Workshop & Wallpaper Engine Commands ---
 invoke<WorkshopBrowsePage>('steam_browse_workshop', { query: WorkshopBrowseQuery }); // Guest public catalog: search, sort, page, days, tags
 invoke<WorkshopPreview>('steam_inspect_url', { urlOrId: string });
-invoke<string>('steam_download_workshop_item', { urlOrId: string });
+invoke<string>('steam_download_workshop_item', { urlOrId: string, source?: 'steam' | 'ggnetwork' });
 invoke<void>('steam_login_qr');
 invoke<void>('steam_login_credentials', { username: string, password: string });
 invoke<void>('steam_submit_2fa_code', { code: string });

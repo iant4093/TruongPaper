@@ -15,7 +15,7 @@ use crate::models::{
 use crate::secrets::VAULT;
 use crate::state::AppState;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,12 +37,34 @@ const SIDECAR_NAME: &str = "DepotDownloader";
 #[derive(Default)]
 pub struct SteamSession {
     working_dir: PathBuf,
+    downloads: Mutex<HashSet<String>>,
     two_fa_tx: Mutex<Option<(u64, mpsc::Sender<String>)>>,
     tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     next_id: AtomicU64,
 }
 
+struct DownloadGuard<'a> {
+    downloads: &'a Mutex<HashSet<String>>,
+    id: String,
+}
+
+impl Drop for DownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.downloads.lock().remove(&self.id);
+    }
+}
+
 impl SteamSession {
+    fn track_download(&self, id: &str) -> Result<DownloadGuard<'_>, String> {
+        if !self.downloads.lock().insert(id.to_owned()) {
+            return Err("This wallpaper is already downloading.".into());
+        }
+        Ok(DownloadGuard {
+            downloads: &self.downloads,
+            id: id.to_owned(),
+        })
+    }
+
     pub fn new(working_dir: PathBuf) -> Self {
         Self {
             working_dir,
@@ -288,6 +310,14 @@ pub async fn steam_inspect_url(
         .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkshopDownloadSource {
+    Steam,
+    #[serde(rename = "ggnetwork")]
+    GgNetwork,
+}
+
 /// Downloads a Workshop item into `<app_data>/wallpapers/workshop/<id>` and adds it to the
 /// library. Returns the new `wallpaperId` (`workshop:<id>`).
 #[tauri::command]
@@ -295,59 +325,75 @@ pub async fn steam_download_workshop_item(
     app: AppHandle,
     state: State<'_, AppState>,
     url_or_id: String,
+    source: Option<WorkshopDownloadSource>,
 ) -> Result<String, String> {
     let workshop_id = parse_workshop_url_or_id(&url_or_id).map_err(|e| e.to_string())?;
-    let username = saved_username()?;
-    let title = fetch_workshop_preview(&state.http, &workshop_id)
-        .await
-        .map(|p| p.title)
-        .unwrap_or_else(|_| workshop_id.clone());
-
+    let _download = state.steam.track_download(&workshop_id)?;
+    let username = match source.unwrap_or(WorkshopDownloadSource::Steam) {
+        WorkshopDownloadSource::Steam => Some(saved_username()?),
+        WorkshopDownloadSource::GgNetwork => None,
+    };
+    let title = match fetch_workshop_preview(&state.http, &workshop_id).await {
+        Ok(preview) => preview.title,
+        Err(err) if username.is_none() => return Err(err.to_string()),
+        Err(_) => workshop_id.clone(),
+    };
     let out_dir = state.workshop_dir().join(&workshop_id);
-    tokio::fs::create_dir_all(&out_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    let args = pubfile_download_args(&workshop_id, &username, &out_dir, DEFAULT_MAX_DOWNLOADS)
-        .map_err(|e| e.to_string())?;
-
     emit_progress(&app, &workshop_id, &title, 0.0, "downloading", None);
-    let progress_app = app.clone();
-    let (pid, ptitle) = (workshop_id.clone(), title.clone());
-    let result = run_sidecar(&state.steam, args, false, move |ev| match &ev {
-        SidecarEvent::ProgressPercent(pct) => {
-            emit_progress(&progress_app, &pid, &ptitle, *pct, "downloading", None)
+
+    let download = async {
+        if let Some(username) = username.as_deref() {
+            tokio::fs::create_dir_all(&out_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            let args =
+                pubfile_download_args(&workshop_id, username, &out_dir, DEFAULT_MAX_DOWNLOADS)
+                    .map_err(|e| e.to_string())?;
+            run_sidecar(&state.steam, args, false, |ev| match &ev {
+                SidecarEvent::ProgressPercent(pct) => {
+                    emit_progress(&app, &workshop_id, &title, *pct, "downloading", None);
+                }
+                other => emit_auth(&app, other),
+            })
+            .await?;
+        } else {
+            truongpaper_steam::guest_download::download_guest_workshop(
+                &workshop_id,
+                &out_dir,
+                |pct| {
+                    emit_progress(&app, &workshop_id, &title, pct, "downloading", None);
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
-        other => emit_auth(&progress_app, other),
-    })
+
+        let wallpaper_id = format!("workshop:{workshop_id}");
+        let items = sync_library(&state).await?;
+        if !items.iter().any(|w| w.wallpaper_id == wallpaper_id) {
+            return Err("Download finished but the item has no readable project.json".to_string());
+        }
+        Ok(wallpaper_id)
+    }
     .await;
 
-    if let Err(err) = result {
-        emit_progress(&app, &workshop_id, &title, 0.0, "error", Some(err.clone()));
-        return Err(err);
+    match download {
+        Ok(wallpaper_id) => {
+            emit_progress(&app, &workshop_id, &title, 100.0, "completed", None);
+            if let Some(username) = username {
+                tauri::async_runtime::spawn(bootstrap_core_assets_if_needed(
+                    Arc::clone(&state.steam),
+                    state.core_assets_root(),
+                    username,
+                ));
+            }
+            Ok(wallpaper_id)
+        }
+        Err(err) => {
+            emit_progress(&app, &workshop_id, &title, 0.0, "error", Some(err.clone()));
+            Err(err)
+        }
     }
-
-    let wallpaper_id = format!("workshop:{workshop_id}");
-    let items = sync_library(&state).await?;
-    if !items.iter().any(|w| w.wallpaper_id == wallpaper_id) {
-        let err = "Download finished but the item has no readable project.json".to_string();
-        emit_progress(
-            &app,
-            &workshop_id,
-            &title,
-            100.0,
-            "error",
-            Some(err.clone()),
-        );
-        return Err(err);
-    }
-    emit_progress(&app, &workshop_id, &title, 100.0, "completed", None);
-
-    tauri::async_runtime::spawn(bootstrap_core_assets_if_needed(
-        Arc::clone(&state.steam),
-        state.core_assets_root(),
-        username,
-    ));
-    Ok(wallpaper_id)
 }
 
 /// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves the account name on success.

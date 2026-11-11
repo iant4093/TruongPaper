@@ -36,8 +36,21 @@ it('previews a result and downloads only after the explicit button', async () =>
   expect(screen.getByRole('dialog', {name:'Workshop Preview'})).toBeTruthy();
   expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'steam_download_workshop_item')).toBe(false);
   invokeMock.mockImplementation(async (cmd) => { if (cmd === 'steam_download_workshop_item') throw new Error('Steam login required'); return item; });
-  await act(async () => { fireEvent.click(screen.getByRole('button', {name:'Download wallpaper'})); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', {name:'Download with Steam'})); });
   expect(useAppStore.getState().authModalOpen).toBe(true);
+});
+it('keeps a GGNetwork availability error in the preview', async () => {
+  useAppStore.setState({ inspectedWorkshop: item });
+  invokeMock.mockRejectedValueOnce(new Error('GGNetwork requires its own account for this wallpaper.'));
+  render(<WorkshopPreviewModal />);
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Download via GGNetwork' }));
+  });
+  expect(invokeMock).toHaveBeenCalledWith('steam_download_workshop_item', {
+    urlOrId: item.workshopId, source: 'ggnetwork',
+  });
+  expect(useAppStore.getState().authModalOpen).toBe(false);
+  expect(screen.getByRole('alert').textContent).toContain('GGNetwork requires its own account');
 });
 it('supports a direct Workshop link inside Discover and keyword search', async () => {
   render(<WorkshopBrowser />);

@@ -70,11 +70,10 @@ describe('<UniversalOmnibar /> dispatch', () => {
     });
   };
 
-  it('inspects then downloads a Steam Workshop URL', async () => {
+  it('opens a preview from a direct Workshop URL so the user can choose the source', async () => {
     await submit('https://steamcommunity.com/sharedfiles/filedetails/?id=2841928371');
     expect(invokeMock.mock.calls).toEqual([
       ['steam_inspect_url', { urlOrId: '2841928371' }],
-      ['steam_download_workshop_item', { urlOrId: '2841928371' }],
     ]);
     expect(useAppStore.getState().inspectedWorkshop?.title).toBe('Neon Rain');
   });

@@ -100,7 +100,7 @@ export const App: React.FC = () => {
             </button>
           ))}
           <div className="sidebar-spacer" />
-          <div className="sidebar-status"><span className={`status-dot ${isPaused || autoPaused ? 'is-paused' : ''}`} />{playingLabel}<span className="sidebar-cache">{formatBytes(photoStatus?.cachedBytes ?? 0)}</span></div>
+          <div className="sidebar-status" title="Space used by cached photos on disk"><span>Disk cache</span><span className="sidebar-cache">{formatBytes(photoStatus?.cachedBytes ?? 0)}</span></div>
           <button type="button" className={`nav-item ${activeTab === 'settings' ? 'is-active' : ''}`}
             aria-current={activeTab === 'settings' ? 'page' : undefined} onClick={() => setActiveTab('settings')}>
             <SettingsIcon size={16} strokeWidth={1.6} /><span>Settings</span>

@@ -49,8 +49,6 @@ button svg { flex-shrink: 0; }
 .nav-count { margin-left: auto; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .sidebar-spacer { flex: 1; min-height: 30px; }
 .sidebar-status { display: flex; align-items: center; gap: 7px; padding: 12px 10px; margin-bottom: 6px; border-bottom: 1px solid #2d2d2d; font-size: 11px; color: var(--text-secondary); }
-.status-dot { width: 5px; height: 5px; border-radius: 50%; background: #a3baad; flex-shrink: 0; }
-.status-dot.is-paused { background: #a99979; }
 .sidebar-cache { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .workspace-titlebar { min-height: 51px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #303030; flex-shrink: 0; }

@@ -158,7 +158,17 @@ describe('store → listen() event wiring', () => {
     expect(useAppStore.getState().systemPowerReasons).toEqual(['lock']);
 
     const photo = { id: 'x', albumSlug: 'a' };
-    listeners.get('wallpaper://changed')!({ payload: { monitorId: 'M1', currentItem: photo, transitionUsed: 'crossfade' } });
+    const playlist = { kind: 'playlist', playlistId: 'mixed' };
+    const video = { wallpaperId: 'workshop:3836199874', title: 'Video test', type: 'video' };
+    const wallpaperChanged = listeners.get('wallpaper://changed')!;
+    wallpaperChanged({ payload: { monitorId: 'M1', source: playlist, currentItem: video, transitionUsed: 'crossfade' } });
+    expect(useAppStore.getState().monitors[0]).toMatchObject({ activeSource: playlist, activeWallpaperId: video.wallpaperId });
+    expect(useAppStore.getState().photoStatus?.currentPhotoByMonitor.M1).toBeNull();
+    expect(useAppStore.getState().wallpapers).toContainEqual(video);
+
+    const photos = { kind: 'photo_api' };
+    wallpaperChanged({ payload: { monitorId: 'M1', source: photos, currentItem: photo, transitionUsed: 'crossfade' } });
+    expect(useAppStore.getState().monitors[0]).toMatchObject({ activeSource: photos, activeWallpaperId: null });
     expect(useAppStore.getState().photoStatus?.currentPhotoByMonitor.M1).toEqual(photo);
 
     invokeMock.mockClear();

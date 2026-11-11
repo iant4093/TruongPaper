@@ -32,7 +32,7 @@ const project: ProjectJsonSchema = {
       enable_rain: { type: 'bool', text: 'Enable Rain', order: 1, value: true },
       rain_speed: { type: 'slider', text: 'ui_rain', order: 2, min: 0, max: 2, fraction: true, value: 1, condition: 'enable_rain.value == true' },
       mode: { type: 'combo', text: 'Mode', order: 3, value: 0, options: [{ label: 'ui_clear', value: 0 }, { label: 'ui_storm', value: 2 }] },
-      color: { type: 'color', text: 'Scheme Color', order: 4, value: '1 0 0' },
+      color: { type: 'color', text: 'ui_browse_properties_scheme_color', order: 4, value: '1 0 0' },
       logo: { type: 'file', text: 'Logo', order: 5 },
       caption: { type: 'text', text: 'Caption', order: 6, value: 'hi', condition: 'mode.value == 2' },
     },
@@ -66,7 +66,8 @@ describe('<PropertyInspector />', () => {
     expect(screen.getByText('Rain Speed')).toBeTruthy(); // localized slider label
     expect(screen.getByRole('option', { name: 'Storm' })).toBeTruthy(); // localized combo option
     expect(screen.queryByText('Caption')).toBeNull(); // mode != 2
-    expect((document.querySelector('input[type="color"]') as HTMLInputElement).value).toBe('#ff0000');
+    expect((screen.getByLabelText('Scheme Color') as HTMLInputElement).value).toBe('#ff0000');
+    expect(screen.getByText('#FF0000')).toBeTruthy();
   });
 
   it('hides dependent controls when the controlling bool is off', () => {

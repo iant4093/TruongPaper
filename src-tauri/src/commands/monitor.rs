@@ -424,7 +424,7 @@ pub(crate) async fn show_library_wallpaper(
     }
     state.host.set_source(
         monitor_id,
-        source,
+        source.clone(),
         Some(wallpaper_id.to_string()),
         item.adjustments.compositor_uniforms(transition),
     );
@@ -444,7 +444,8 @@ pub(crate) async fn show_library_wallpaper(
         EVENT_WALLPAPER_CHANGED,
         WallpaperChangedPayload {
             monitor_id,
-            current_item: &item,
+            source: &source,
+            current_item: Some(&item),
             transition_used: transition.as_str(),
         },
     );
@@ -508,9 +509,11 @@ pub(crate) fn forward_adjustments(
     }
 }
 
-/// Points the host runtime of a photo-showing monitor at its persisted source (photo / playlist)
-/// with the default fit mode.
-pub(crate) fn set_photo_host_source(state: &AppState, monitor_id: &str) -> Result<(), String> {
+/// Updates the source assignment and fit mode for the photo about to be shown.
+pub(crate) fn set_photo_host_source(
+    state: &AppState,
+    monitor_id: &str,
+) -> Result<WallpaperSource, String> {
     let (default_fit, transition) = settings_modes(state);
     let source = {
         let conn = state.db.lock();
@@ -523,10 +526,10 @@ pub(crate) fn set_photo_host_source(state: &AppState, monitor_id: &str) -> Resul
         ..Default::default()
     }
     .compositor_uniforms(transition);
-    state.host.set_source(monitor_id, source, None, uniforms);
-    // Drops a scene / webview / application runtime; keeps the photo already on screen.
-    state.host.ensure_photo_runtime(monitor_id);
-    Ok(())
+    state
+        .host
+        .set_source(monitor_id, source.clone(), None, uniforms);
+    Ok(source)
 }
 
 /// Shows the monitor's current photo, or draws one from the queue. `draw_new` always draws the
@@ -548,7 +551,6 @@ pub(crate) async fn show_photo(
             .remove(monitor_id)
             .flatten()
     };
-    set_photo_host_source(state, monitor_id)?;
     match current {
         Some(item) => {
             let path = PathBuf::from(&item.file_path);
@@ -558,16 +560,21 @@ pub(crate) async fn show_photo(
                         path: Some(path.clone()),
                     }
             });
+            let decoded = if on_screen {
+                None
+            } else {
+                crate::commands::photo::decode_for_desktop(&state.host, &path).await
+            };
+            let source = set_photo_host_source(state, monitor_id)?;
             if !on_screen {
-                // Decoded on a blocking worker, not on the render thread.
-                let decoded = crate::commands::photo::decode_for_desktop(&state.host, &path).await;
                 state.host.set_photo(monitor_id, path, decoded);
             }
             let _ = app.emit(
                 EVENT_WALLPAPER_CHANGED,
                 WallpaperChangedPayload {
                     monitor_id,
-                    current_item: &item,
+                    source: &source,
+                    current_item: Some(&item),
                     transition_used: transition.as_str(),
                 },
             );
@@ -576,6 +583,23 @@ pub(crate) async fn show_photo(
             // The source is already persisted; an empty queue / offline API is not fatal here.
             if let Err(err) = rotate_photo_for_locked_monitor(app, photo, monitor_id).await {
                 tracing::warn!("no photo available for {monitor_id} yet: {err}");
+                let source = set_photo_host_source(state, monitor_id)?;
+                state.host.ensure_photo_runtime(monitor_id);
+                if state
+                    .host
+                    .monitor(monitor_id)
+                    .is_some_and(|rt| rt.active == (ActiveRuntime::Photo { path: None }))
+                {
+                    let _ = app.emit(
+                        EVENT_WALLPAPER_CHANGED,
+                        WallpaperChangedPayload::<truongpaper_photo_api::PhotoItem> {
+                            monitor_id,
+                            source: &source,
+                            current_item: None,
+                            transition_used: transition.as_str(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -678,16 +702,24 @@ pub async fn monitors_list(
     };
     Ok(live_monitors(&app)
         .into_iter()
-        .map(|m| MonitorInfo {
-            active_source: sources.get(&m.id).cloned().unwrap_or_default(),
-            is_portrait: m.is_portrait(),
-            monitor_id: m.id,
-            name: m.name,
-            width: m.width,
-            height: m.height,
-            scale_factor: m.scale_factor,
-            refresh_rate_hz: DEFAULT_REFRESH_RATE_HZ,
-            is_primary: m.is_primary,
+        .map(|m| {
+            let runtime = state.host.monitor(&m.id).filter(|rt| rt.generation != 0);
+            MonitorInfo {
+                active_source: runtime
+                    .as_ref()
+                    .map(|rt| rt.source.clone())
+                    .or_else(|| sources.get(&m.id).cloned())
+                    .unwrap_or_default(),
+                active_wallpaper_id: runtime.and_then(|rt| rt.wallpaper_id),
+                is_portrait: m.is_portrait(),
+                monitor_id: m.id,
+                name: m.name,
+                width: m.width,
+                height: m.height,
+                scale_factor: m.scale_factor,
+                refresh_rate_hz: DEFAULT_REFRESH_RATE_HZ,
+                is_primary: m.is_primary,
+            }
         })
         .collect())
 }

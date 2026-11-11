@@ -173,6 +173,7 @@ export interface MonitorInfo {
   isPrimary: boolean;
   isPortrait: boolean;
   activeSource: WallpaperSource;
+  activeWallpaperId: string | null;
 }
 
 export type WallpaperSource =
@@ -279,7 +280,8 @@ export type PolicyState =
 
 export interface WallpaperChangedPayload {
   monitorId: string;
-  currentItem: WallpaperItem | PhotoItem;
+  source: WallpaperSource;
+  currentItem: WallpaperItem | PhotoItem | null;
   transitionUsed: TransitionType;
 }
 

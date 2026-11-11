@@ -1140,8 +1140,11 @@ impl MonitorRenderer {
             scene.set_sound_owner(sound_owner);
             scene.apply_adjustments(&adjustments);
         }
-        if !should_render {
-            // Paused monitors draw nothing (docs/01 §6.1 item 1).
+        let photo_needs_frame = self.dirty
+            && matches!(self.content, Content::Photo)
+            && !crate::power::rendering_suspended();
+        if !should_render && !photo_needs_frame {
+            // A newly selected photo still needs one frame while playback is paused.
             return false;
         }
         let time = self.started.elapsed().as_secs_f32();
@@ -1157,12 +1160,12 @@ impl MonitorRenderer {
             return false;
         }
         // Photo.
-        let progress = match self.transition_started {
-            Some(t) => transition_progress(
+        let progress = match (should_render, self.transition_started) {
+            (true, Some(t)) => transition_progress(
                 t.elapsed().as_secs_f32(),
                 clamp_transition_duration(transition_secs),
             ),
-            None => 1.0,
+            _ => 1.0,
         };
         let Some(to) = &self.to else {
             if self.dirty {

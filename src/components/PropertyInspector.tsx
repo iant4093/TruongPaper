@@ -122,13 +122,14 @@ export function resolveLocalizedText(
   locale = 'en-us'
 ): string {
   if (!rawText) return '';
-  const locTable =
-    project.general?.localization?.[locale] ??
-    project.general?.localization?.['en-us'];
-  if (locTable && locTable[rawText]) {
-    return locTable[rawText];
+  const localization = project.general?.localization;
+  const translated = localization?.[locale]?.[rawText] ?? localization?.['en-us']?.[rawText];
+  const text = (translated ?? rawText).replace(/<[^>]+>/g, '').trim();
+  if (!translated && /^ui_browse_properties_[a-z0-9_]+$/i.test(text)) {
+    return text.replace(/^ui_browse_properties_/i, '').split('_').filter(Boolean)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
   }
-  return rawText.replace(/<[^>]+>/g, ''); // Strip basic HTML tags often used in WE labels
+  return text;
 }
 
 interface PropertyInspectorProps {
@@ -166,21 +167,19 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   };
 
   return (
-    <aside className="panel" style={{ padding: 20, overflowY: 'auto' }}>
-      <h3 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 600 }}>
+    <div className="property-inspector">
+      <h3>
         {project.title}
       </h3>
 
       {/* Universal Color & Audio Adjustments */}
-      <section style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-          Playback & audio
-        </div>
-        <label style={{ display: 'block', fontSize: 13, marginBottom: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+      <section>
+        <h4>Playback &amp; audio</h4>
+        <label className="property-field">
+          <span className="property-row">
             <span>Master Volume</span>
-            <span>{Math.round(adjustments.volume * 100)}%</span>
-          </div>
+            <span className="property-value" aria-hidden="true">{Math.round(adjustments.volume * 100)}%</span>
+          </span>
           <input
             type="range"
             className="slider"
@@ -195,11 +194,11 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             }}
           />
         </label>
-        <label style={{ display: 'block', fontSize: 13, marginBottom: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <label className="property-field">
+          <span className="property-row">
             <span>Playback Speed</span>
-            <span>{adjustments.playbackSpeed.toFixed(2)}x</span>
-          </div>
+            <span className="property-value" aria-hidden="true">{adjustments.playbackSpeed.toFixed(2)}x</span>
+          </span>
           <input
             type="range"
             className="slider"
@@ -217,10 +216,8 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
       </section>
 
       {/* Auto-Generated project.json Properties */}
-      <section>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-          Wallpaper properties
-        </div>
+      {sortedProperties.length > 0 && <section>
+        <h4>Wallpaper properties</h4>
         {sortedProperties.map((prop) => {
           const isVisible = evaluatePropertyCondition(prop.condition, values);
           if (!isVisible) return null;
@@ -230,18 +227,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
 
           if (prop.type === 'group') {
             return (
-              <div
-                key={prop.key}
-                style={{
-                  marginTop: 16,
-                  marginBottom: 8,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.04em',
-                  color: 'var(--accent-cyan)',
-                }}
-              >
+              <div key={prop.key} className="property-group">
                 {label}
               </div>
             );
@@ -252,13 +238,13 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             const max = prop.max ?? 100;
             const step = prop.step ?? (prop.fraction ? (max - min) / 100 : 1);
             return (
-              <div key={prop.key} style={{ marginBottom: 14 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+              <label key={prop.key} className="property-field">
+                <span className="property-row">
                   <span>{label}</span>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                  <span className="property-value" aria-hidden="true">
                     {Number(currentVal).toFixed(prop.fraction ? 2 : 0)}
                   </span>
-                </div>
+                </span>
                 <input
                   type="range"
                   className="slider"
@@ -268,63 +254,48 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                   value={Number(currentVal)}
                   onChange={(e) => void handleChange(prop.key, Number(e.target.value))}
                 />
-              </div>
+              </label>
             );
           }
 
           if (prop.type === 'bool') {
             const checked = Boolean(currentVal) && currentVal !== 'false';
             return (
-              <div
-                key={prop.key}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: 12,
-                  fontSize: 13,
-                }}
-              >
+              <label key={prop.key} className="property-field property-row">
                 <span>{label}</span>
                 <input
                   type="checkbox"
                   checked={checked}
                   onChange={(e) => void handleChange(prop.key, e.target.checked)}
                 />
-              </div>
+              </label>
             );
           }
 
           if (prop.type === 'color') {
             const hexVal = weColorToHex(String(currentVal));
             return (
-              <div
-                key={prop.key}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: 12,
-                  fontSize: 13,
-                }}
-              >
+              <label key={prop.key} className="property-field">
                 <span>{label}</span>
-                <input
-                  type="color"
-                  value={hexVal}
-                  onChange={(e) => void handleChange(prop.key, hexToWeColor(e.target.value))}
-                />
-              </div>
+                <span className="property-color button">
+                  <input
+                    type="color"
+                    aria-label={label}
+                    value={hexVal}
+                    onChange={(e) => void handleChange(prop.key, hexToWeColor(e.target.value))}
+                  />
+                  <span className="property-value" aria-hidden="true">{hexVal.toUpperCase()}</span>
+                </span>
+              </label>
             );
           }
 
           if (prop.type === 'combo') {
             return (
-              <div key={prop.key} style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
+              <label key={prop.key} className="property-field">
+                <span>{label}</span>
                 <select
                   className="button"
-                  style={{ width: '100%' }}
                   value={String(currentVal)}
                   onChange={(e) => void handleChange(prop.key, e.target.value)}
                 >
@@ -334,17 +305,18 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                     </option>
                   ))}
                 </select>
-              </div>
+              </label>
             );
           }
 
           if (prop.type === 'file' || prop.type === 'scenetexture' || prop.type === 'directory') {
             return (
-              <div key={prop.key} style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
+              <div key={prop.key} className="property-field">
+                <span>{label}</span>
                 <button
                   type="button"
                   className="button"
+                  aria-label={`Choose file for ${label}`}
                   onClick={async () => {
                     const selected = await open({
                       directory: prop.type === 'directory',
@@ -362,19 +334,18 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
           }
 
           return (
-            <div key={prop.key} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
+            <label key={prop.key} className="property-field">
+              <span>{label}</span>
               <input
                 type="text"
                 className="button"
-                style={{ width: '100%', textAlign: 'left' }}
                 value={String(currentVal ?? '')}
                 onChange={(e) => void handleChange(prop.key, e.target.value)}
               />
-            </div>
+            </label>
           );
         })}
-      </section>
-    </aside>
+      </section>}
+    </div>
   );
 };

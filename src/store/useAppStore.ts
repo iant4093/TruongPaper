@@ -11,9 +11,9 @@ import type {
   Playlist,
   PublicCatalogAlbum,
   SavedAlbum,
-  TransitionType,
   UniversalAdjustments,
   WallpaperItem,
+  WallpaperChangedPayload,
   WallpaperPreset,
   WallpaperSource,
   WorkshopPreview,
@@ -40,6 +40,20 @@ export interface InitListenerOptions {
    * should pass `true`, otherwise each action would run once per window.
    */
   handleTrayMenuEvents?: boolean;
+}
+
+export function currentWallpaperForMonitor(
+  monitor: MonitorInfo | undefined,
+  wallpapers: WallpaperItem[],
+  photoStatus: PhotoStatus | null,
+) {
+  const wallpaper = monitor?.activeWallpaperId
+    ? wallpapers.find((item) => item.wallpaperId === monitor.activeWallpaperId)
+    : undefined;
+  const photo = monitor && !monitor.activeWallpaperId && monitor.activeSource?.kind !== 'workshop'
+    ? photoStatus?.currentPhotoByMonitor?.[monitor.monitorId]
+    : undefined;
+  return { wallpaper, photo };
 }
 
 export interface AppState {
@@ -186,43 +200,40 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     initAppListeners: async (options = {}) => {
-      await get().refreshAll();
+      let pendingDisplayUpdates: Array<() => void> | null = [];
+      const updateDisplay = (update: () => void) => {
+        if (pendingDisplayUpdates) pendingDisplayUpdates.push(update);
+        else update();
+      };
 
       const subscriptions: Array<Promise<UnlistenFn>> = [
-        listen<{
-          monitorId: string;
-          currentItem: WallpaperItem | PhotoItem;
-          transitionUsed: TransitionType;
-        }>('wallpaper://changed', (event) => {
-          const { monitorId, currentItem } = event.payload;
-          if ('albumSlug' in currentItem) {
-            set((state) =>
-              state.photoStatus
-                ? {
-                    photoStatus: {
-                      ...state.photoStatus,
-                      currentPhotoByMonitor: {
-                        ...state.photoStatus.currentPhotoByMonitor,
-                        [monitorId]: currentItem,
-                      },
-                    },
-                  }
-                : state
-            );
-          } else {
+        listen<WallpaperChangedPayload>('wallpaper://changed', ({ payload }) => {
+          const { monitorId, source, currentItem } = payload;
+          const wallpaper = currentItem && 'wallpaperId' in currentItem ? currentItem : null;
+          const photo = currentItem && 'albumSlug' in currentItem ? currentItem : null;
+          updateDisplay(() =>
             set((state) => ({
               monitors: state.monitors.map((m) =>
-                m.monitorId === monitorId &&
-                m.activeSource.kind !== 'playlist'
-                  ? { ...m, activeSource: { kind: 'workshop', wallpaperId: currentItem.wallpaperId } }
+                m.monitorId === monitorId
+                  ? { ...m, activeSource: source, activeWallpaperId: wallpaper?.wallpaperId ?? null }
                   : m
               ),
-            }));
-          }
+              wallpapers: wallpaper && !state.wallpapers.some((w) => w.wallpaperId === wallpaper.wallpaperId)
+                ? [...state.wallpapers, wallpaper]
+                : state.wallpapers,
+              photoStatus: state.photoStatus && {
+                ...state.photoStatus,
+                currentPhotoByMonitor: {
+                  ...state.photoStatus.currentPhotoByMonitor,
+                  [monitorId]: photo,
+                },
+              },
+            })),
+          );
         }),
 
         listen<PhotoStatus>('photo-queue://updated', (event) => {
-          set({ photoStatus: event.payload });
+          updateDisplay(() => set({ photoStatus: event.payload }));
         }),
 
         listen<SteamDownloadProgress>('steam-download://progress', (event) => {
@@ -275,6 +286,14 @@ export const useAppStore = create<AppState>((set, get) => {
       }
 
       const unlisteners = await Promise.all(subscriptions);
+      try {
+        await get().refreshAll();
+        for (const update of pendingDisplayUpdates) update();
+        pendingDisplayUpdates = null;
+      } catch (error) {
+        unlisteners.forEach((unlisten) => unlisten());
+        throw error;
+      }
 
       return () => {
         for (const unlisten of unlisteners) {

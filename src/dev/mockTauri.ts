@@ -334,6 +334,7 @@ export function createMockBackend(
       isPrimary: true,
       isPortrait: false,
       activeSource: { kind: 'photo_api' },
+      activeWallpaperId: null,
     },
     {
       monitorId: 'DISPLAY-2',
@@ -345,6 +346,7 @@ export function createMockBackend(
       isPrimary: false,
       isPortrait: true,
       activeSource: { kind: 'workshop', wallpaperId: 'workshop:2841928371' },
+      activeWallpaperId: 'workshop:2841928371',
     },
   ];
   let playlists: Playlist[] = [
@@ -394,7 +396,8 @@ export function createMockBackend(
     const shown = { ...next, lastShownAt: Date.now() };
     currentByMonitor = { ...currentByMonitor, [monitorId]: shown };
     historyCount += 1;
-    emitEvent('wallpaper://changed', { monitorId, currentItem: shown, transitionUsed: settings.transitionType });
+    const source = monitors.find((m) => m.monitorId === monitorId)?.activeSource ?? { kind: 'photo_api' };
+    emitEvent('wallpaper://changed', { monitorId, source, currentItem: shown, transitionUsed: settings.transitionType });
     // Background refill once the queue drops to <= 2 (docs/05 §4).
     if (queue.length <= 2) {
       isRefilling = true;
@@ -584,11 +587,12 @@ export function createMockBackend(
     monitors_list: () => monitors,
     monitor_apply_wallpaper: (args) => {
       const source = args.source as WallpaperSource;
-      monitors = monitors.map((m) => (m.monitorId === args.monitorId ? { ...m, activeSource: source } : m));
-      if (source.kind === 'workshop') {
-        const item = findWallpaper(source.wallpaperId);
-        emitEvent('wallpaper://changed', { monitorId: args.monitorId, currentItem: item, transitionUsed: settings.transitionType });
-      }
+      const monitorId = String(args.monitorId);
+      const wallpaperId = source.kind === 'workshop' ? source.wallpaperId : null;
+      monitors = monitors.map((m) => m.monitorId === monitorId
+        ? { ...m, activeSource: source, activeWallpaperId: wallpaperId } : m);
+      const item = wallpaperId ? findWallpaper(wallpaperId) : currentByMonitor[monitorId] ?? null;
+      emitEvent('wallpaper://changed', { monitorId, source, currentItem: item, transitionUsed: settings.transitionType });
       return null;
     },
     monitor_update_property: (args) => {

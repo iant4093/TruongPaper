@@ -14,7 +14,7 @@ import { SettingsView } from './components/views/SettingsView';
 import { SteamWorkshopView } from './components/views/SteamWorkshopView';
 import { Thumb } from './components/ui';
 import { ResourceUsage } from './components/ResourceUsage';
-import { useAppStore } from './store/useAppStore';
+import { currentWallpaperForMonitor, useAppStore } from './store/useAppStore';
 
 export type StudioTab = 'all' | 'photos' | 'workshop' | 'playlists' | 'monitors' | 'settings';
 export const STUDIO_TABS = [
@@ -63,10 +63,8 @@ export const App: React.FC = () => {
   }, [selectedWallpaperId]);
 
   const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0];
-  const currentPhoto = activeMonitor ? photoStatus?.currentPhotoByMonitor?.[activeMonitor.monitorId] : null;
-  const activeWallpaper = activeMonitor?.activeSource.kind === 'workshop'
-    ? wallpapers.find((w) => activeMonitor.activeSource.kind === 'workshop' && w.wallpaperId === activeMonitor.activeSource.wallpaperId)
-    : null;
+  const { wallpaper: activeWallpaper, photo: currentPhoto } =
+    currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const selectedWallpaper = wallpapers.find((w) => w.wallpaperId === selectedWallpaperId);
   const canInspect = !!selectedWallpaper && (activeTab === 'all' || activeTab === 'workshop');
   const showInspector = detailsOpen && canInspect;
@@ -76,7 +74,7 @@ export const App: React.FC = () => {
   const playingLabel = isPaused ? 'Paused' : autoPaused ? 'Auto-paused' : 'Playing';
   const currentTitle = activeWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
   const currentPreview = activeWallpaper?.previewPath ?? currentPhoto?.filePath;
-  const canRotate = activeMonitor?.activeSource.kind === 'photo_api';
+  const canRotate = activeMonitor?.activeSource.kind === 'photo_api' || !!currentPhoto;
   const [actionError, setActionError] = useState<string | null>(null);
   const runAction = async (action: () => Promise<void>) => {
     setActionError(null);

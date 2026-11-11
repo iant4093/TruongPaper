@@ -36,7 +36,7 @@
   </style>
 </head>
 <body>
-  <video id="bg-blur" autoplay loop muted playsinline></video>
+  <canvas id="bg-blur" aria-hidden="true"></canvas>
   <video id="fg-video" autoplay loop muted playsinline></video>
 
   <script>
@@ -44,76 +44,72 @@
       'use strict';
       const params = new URLSearchParams(window.location.search);
       const rawFile = params.get('file') || '';
-      const videoUrl = new URL('./' + encodeURI(rawFile.replace(/^\/+/, '')), window.location.href).href;
+      const videoPath = rawFile.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/');
+      const videoUrl = new URL('./' + videoPath, window.location.href).href;
 
       const bgBlur = document.getElementById('bg-blur');
       const fgVideo = document.getElementById('fg-video');
 
-      fgVideo.src = videoUrl;
-      bgBlur.src = videoUrl;
-
-      fgVideo.addEventListener('play', () => {
-        if (bgBlur.style.opacity === '1') bgBlur.play().catch(() => {});
-      });
-      fgVideo.addEventListener('pause', () => bgBlur.pause());
-      fgVideo.addEventListener('seeked', () => {
-        if (Math.abs(bgBlur.currentTime - fgVideo.currentTime) > 0.25) {
-          bgBlur.currentTime = fgVideo.currentTime;
+      let blurEnabled = false;
+      let lastBackdropAt = -Infinity;
+      function paintBackdrop() {
+        if (!blurEnabled || fgVideo.readyState < 2 || !fgVideo.videoWidth) return;
+        const scale = 192 / Math.max(fgVideo.videoWidth, fgVideo.videoHeight);
+        const width = Math.max(1, Math.round(fgVideo.videoWidth * scale));
+        const height = Math.max(1, Math.round(fgVideo.videoHeight * scale));
+        if (bgBlur.width !== width || bgBlur.height !== height) {
+          bgBlur.width = width;
+          bgBlur.height = height;
         }
+        bgBlur.getContext('2d')?.drawImage(fgVideo, 0, 0, width, height);
+        lastBackdropAt = performance.now();
+      }
+      fgVideo.addEventListener('loadeddata', paintBackdrop);
+      fgVideo.addEventListener('seeked', paintBackdrop);
+      // A blurred backdrop only needs occasional samples from the already decoded video.
+      fgVideo.addEventListener('timeupdate', () => {
+        if (performance.now() - lastBackdropAt >= 83) paintBackdrop();
       });
+      fgVideo.src = videoUrl;
 
       window.__truongpaper_apply_video_adjustments = function (adj) {
         if (!adj) return;
         const fitMode = adj.fitMode || 'fill';
-        if (fitMode === 'fit_blur') {
-          fgVideo.style.objectFit = 'contain';
-          bgBlur.style.opacity = '1';
-          if (!fgVideo.paused && bgBlur.paused) bgBlur.play().catch(() => {});
-        } else if (fitMode === 'fit_black') {
-          fgVideo.style.objectFit = 'contain';
-          bgBlur.style.opacity = '0';
-          bgBlur.pause();
-        } else if (fitMode === 'stretch') {
-          fgVideo.style.objectFit = 'fill';
-          bgBlur.style.opacity = '0';
-          bgBlur.pause();
-        } else if (fitMode === 'center') {
-          fgVideo.style.objectFit = 'none';
-          bgBlur.style.opacity = '0';
-          bgBlur.pause();
-        } else {
-          fgVideo.style.objectFit = 'cover';
-          bgBlur.style.opacity = '0';
-          bgBlur.pause();
+        const fit = { fit_blur: 'contain', fit_black: 'contain', stretch: 'fill', center: 'none' };
+        fgVideo.style.objectFit = fit[fitMode] || 'cover';
+        const nextBlurEnabled = fitMode === 'fit_blur';
+        if (blurEnabled !== nextBlurEnabled) {
+          blurEnabled = nextBlurEnabled;
+          if (blurEnabled) paintBackdrop();
+          bgBlur.style.opacity = blurEnabled ? '1' : '0';
         }
 
         const muted = Boolean(adj.muted) || (adj.volume ?? 0) <= 0.001;
         fgVideo.muted = muted;
         fgVideo.volume = muted ? 0 : Math.min(1, Math.max(0, Number(adj.volume ?? 1)));
 
-        const rate = Math.min(4.0, Math.max(0.1, Number(adj.playbackSpeed ?? 1.0)));
-        fgVideo.playbackRate = rate;
-        bgBlur.playbackRate = rate;
+        const rate = Math.min(3.0, Math.max(0.1, Number(adj.playbackSpeed ?? 1.0)));
+        if (fgVideo.playbackRate !== rate) fgVideo.playbackRate = rate;
 
         const zoom = Number(adj.zoom ?? 1.0);
         const ox = Number(adj.offsetX ?? 0.0) * 50;
         const oy = Number(adj.offsetY ?? 0.0) * 50;
-        fgVideo.style.transform = `scale(${zoom}) translate(${ox}%, ${oy}%)`;
+        fgVideo.style.transform = zoom === 1 && ox === 0 && oy === 0
+          ? 'none' : `scale(${zoom}) translate(${ox}%, ${oy}%)`;
 
         const br = 1 + Number(adj.brightness ?? 0.0);
         const ct = Number(adj.contrast ?? 1.0);
         const sat = Number(adj.saturation ?? 1.0);
         const hue = Number(adj.hueShift ?? 0.0);
-        fgVideo.style.filter = `brightness(${br}) contrast(${ct}) saturate(${sat}) hue-rotate(${hue}rad)`;
+        fgVideo.style.filter = br === 1 && ct === 1 && sat === 1 && hue === 0
+          ? 'none' : `brightness(${br}) contrast(${ct}) saturate(${sat}) hue-rotate(${hue}rad)`;
       };
 
       window.__truongpaper_set_paused = function (paused) {
         if (paused) {
           fgVideo.pause();
-          bgBlur.pause();
         } else {
           fgVideo.play().catch(() => {});
-          if (bgBlur.style.opacity === '1') bgBlur.play().catch(() => {});
         }
       };
 

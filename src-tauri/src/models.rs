@@ -277,6 +277,7 @@ pub struct MonitorInfo {
     pub is_primary: bool,
     pub is_portrait: bool,
     pub active_source: WallpaperSource,
+    pub active_wallpaper_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -320,12 +321,13 @@ fn default_playlist_interval() -> u64 {
 // Event payloads
 // ---------------------------------------------------------------------------------------------
 
-/// `wallpaper://changed`: `{ monitorId, currentItem: WallpaperItem | PhotoItem, transitionUsed }`.
+/// The source assignment and its currently displayed item (if any).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WallpaperChangedPayload<'a, T: Serialize> {
     pub monitor_id: &'a str,
-    pub current_item: &'a T,
+    pub source: &'a WallpaperSource,
+    pub current_item: Option<&'a T>,
     pub transition_used: &'static str,
 }
 
@@ -518,12 +520,13 @@ mod tests {
         let item = json!({"id": "p"});
         let changed = WallpaperChangedPayload {
             monitor_id: "DISPLAY-1",
-            current_item: &item,
+            source: &WallpaperSource::PhotoApi,
+            current_item: Some(&item),
             transition_used: "liquid_glass",
         };
         assert_eq!(
             serde_json::to_value(&changed).unwrap(),
-            json!({"monitorId": "DISPLAY-1", "currentItem": {"id": "p"}, "transitionUsed": "liquid_glass"})
+            json!({"monitorId": "DISPLAY-1", "source": {"kind": "photo_api"}, "currentItem": {"id": "p"}, "transitionUsed": "liquid_glass"})
         );
         let prog = SteamDownloadProgress {
             workshop_id: "1".into(),

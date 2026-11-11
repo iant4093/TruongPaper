@@ -3,17 +3,21 @@ import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { parseOmnibarInput } from '../components/UniversalOmnibar';
-import { useAppStore } from '../store/useAppStore';
+import { Thumb } from '../components/ui';
+import { formatBytes, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { TransitionType } from '../types/ipc';
 
 export const TrayApp: React.FC = () => {
   const initAppListeners = useAppStore((s) => s.initAppListeners);
   const photoStatus = useAppStore((s) => s.photoStatus);
   const monitors = useAppStore((s) => s.monitors);
+  const wallpapers = useAppStore((s) => s.wallpapers);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const settings = useAppStore((s) => s.settings);
   const isPaused = useAppStore((s) => s.isPaused);
   const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
+  const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setPhotoFavorite = useAppStore((s) => s.setPhotoFavorite);
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
@@ -22,6 +26,8 @@ export const TrayApp: React.FC = () => {
   const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
 
   const [quickLink, setQuickLink] = useState('');
+  const [switching, setSwitching] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,8 +44,31 @@ export const TrayApp: React.FC = () => {
     };
   }, [initAppListeners]);
 
-  const activeMonitorId = selectedMonitorId ?? monitors[0]?.monitorId ?? 'DISPLAY-1';
-  const currentPhoto = photoStatus?.currentPhotoByMonitor?.[activeMonitorId] ?? photoStatus?.unusedQueue?.[0] ?? null;
+  const activeMonitor = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
+  const activeMonitorId = activeMonitor?.monitorId;
+  const { wallpaper: currentWallpaper, photo: currentPhoto } =
+    currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
+  const canRotate = !!currentPhoto || activeMonitor?.activeSource.kind === 'photo_api';
+  const currentTitle = currentWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
+  const currentDetails = currentWallpaper
+    ? `${WALLPAPER_TYPE_LABEL[currentWallpaper.type]} · ${formatBytes(currentWallpaper.bytes)}`
+    : currentPhoto?.width && currentPhoto?.height
+      ? `${currentPhoto.width} × ${currentPhoto.height} · ${formatBytes(currentPhoto.bytes)}`
+      : null;
+
+  const showPhotos = async () => {
+    if (!activeMonitorId) return;
+    setSwitching(true);
+    setActionError(null);
+    try {
+      if (canRotate) await rotateNextPhoto(activeMonitorId);
+      else await applyMonitorSource(activeMonitorId, { kind: 'photo_api' });
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const handleQuickPaste = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,14 +142,15 @@ export const TrayApp: React.FC = () => {
           <div style={{ fontSize: 11, color: 'var(--accent-cyan)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Current Wallpaper
           </div>
-          <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
-            {currentPhoto ? currentPhoto.albumSlug : 'Ian Truong Photo Pool'}
+          <div className="tray-wallpaper-title" title={currentTitle}>
+            {currentTitle}
           </div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-            {currentPhoto?.width && currentPhoto?.height
-              ? `${currentPhoto.width} × ${currentPhoto.height} • ${(currentPhoto.bytes / (1024 * 1024)).toFixed(1)} MB`
-              : 'Ready for instant offline rotation'}
-          </div>
+          {currentDetails && <div className="tray-wallpaper-meta">{currentDetails}</div>}
+          {currentWallpaper?.previewPath && (
+            <div className="tray-wallpaper-preview">
+              <Thumb src={currentWallpaper.previewPath} alt="" height={84} />
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -129,6 +159,7 @@ export const TrayApp: React.FC = () => {
               type="button"
               className="button"
               style={{ flex: 1 }}
+              disabled={!activeMonitorId}
               onClick={() => void setPlaybackPaused(!isPaused, activeMonitorId)}
             >
               {isPaused ? 'Resume' : 'Pause'}
@@ -137,9 +168,10 @@ export const TrayApp: React.FC = () => {
               type="button"
               className="button button-primary"
               style={{ flex: 1 }}
-              onClick={() => void rotateNextPhoto(activeMonitorId)}
+              disabled={!activeMonitorId || switching}
+              onClick={() => void showPhotos()}
             >
-              Next Wallpaper
+              {switching ? 'Loading photo…' : canRotate ? 'Next Wallpaper' : 'Switch to Photos'}
             </button>
           </div>
 
@@ -171,6 +203,7 @@ export const TrayApp: React.FC = () => {
               </button>
             </div>
           )}
+          {actionError && <div className="tray-wallpaper-error" role="alert" title={actionError}>{actionError}</div>}
         </div>
       </div>
 

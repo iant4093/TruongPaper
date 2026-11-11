@@ -7,7 +7,8 @@ use crate::binary::{parse_pkg_index, PkgArchive};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Cursor, Error, ErrorKind, Result as IoResult};
+use std::io::{Cursor, Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 /// A memory-mapped `.pkg` plus its parsed index. Entry reads are zero-copy slices of the mapping.
@@ -45,6 +46,45 @@ pub struct WeVirtualFileSystem {
 
 /// Alias used by the spec text.
 pub type WallpaperVfs = WeVirtualFileSystem;
+
+pub enum VfsAsset<'a> {
+    File(File, usize),
+    Bytes(&'a [u8]),
+}
+
+impl VfsAsset<'_> {
+    pub fn size(&self) -> usize {
+        match self {
+            Self::File(_, size) => *size,
+            Self::Bytes(bytes) => bytes.len(),
+        }
+    }
+
+    pub fn read(mut self, range: Range<usize>) -> IoResult<Vec<u8>> {
+        if range.start > range.end || range.end > self.size() {
+            return Err(Error::new(ErrorKind::InvalidInput, "Invalid asset range"));
+        }
+        match &mut self {
+            Self::File(file, _) => {
+                file.seek(SeekFrom::Start(range.start as u64))?;
+                let mut bytes = Vec::new();
+                file.take(range.len() as u64).read_to_end(&mut bytes)?;
+                if bytes.len() != range.len() {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "Asset was truncated"));
+                }
+                Ok(bytes)
+            }
+            Self::Bytes(bytes) => Ok(bytes[range].to_vec()),
+        }
+    }
+}
+
+fn open_file_asset(path: &Path) -> IoResult<VfsAsset<'static>> {
+    let file = File::open(path)?;
+    let size = usize::try_from(file.metadata()?.len())
+        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+    Ok(VfsAsset::File(file, size))
+}
 
 impl WeVirtualFileSystem {
     pub fn mount(wallpaper_dir: PathBuf, core_assets_dir: PathBuf) -> Self {
@@ -96,37 +136,44 @@ impl WeVirtualFileSystem {
 
     /// Resolves a virtual path across all 4 VFS layers in strict priority order.
     pub fn read_bytes(&self, virtual_path: &str) -> IoResult<Vec<u8>> {
+        let asset = self.open_asset(virtual_path)?;
+        let size = asset.size();
+        asset.read(0..size)
+    }
+
+    /// Resolves the asset without loading a loose file into memory.
+    pub fn open_asset(&self, virtual_path: &str) -> IoResult<VfsAsset<'_>> {
         let rel = Self::sanitize_virtual_path(virtual_path)?;
 
         // Layer 1: loose file in the wallpaper directory.
         let loose_path = self.wallpaper_dir.join(&rel);
         if loose_path.is_file() {
-            return std::fs::read(&loose_path);
+            return open_file_asset(&loose_path);
         }
 
         // Layer 2: scene.pkg.
         if let Some(pkg) = &self.scene_pkg {
             if let Some(slice) = pkg.read_entry(&rel) {
-                return Ok(slice.to_vec());
+                return Ok(VfsAsset::Bytes(slice));
             }
         }
 
         // Layer 3: gifscene.pkg.
         if let Some(pkg) = &self.gifscene_pkg {
             if let Some(slice) = pkg.read_entry(&rel) {
-                return Ok(slice.to_vec());
+                return Ok(VfsAsset::Bytes(slice));
             }
         }
 
         // Layer 4a: core Wallpaper Engine assets directory.
         let core_path = self.core_assets_dir.join(&rel);
         if core_path.is_file() {
-            return std::fs::read(&core_path);
+            return open_file_asset(&core_path);
         }
 
         // Layer 4b: built-in in-memory virtual files.
         if let Some(bytes) = self.builtin_virtual_files.get(rel.as_str()) {
-            return Ok(bytes.to_vec());
+            return Ok(VfsAsset::Bytes(bytes));
         }
 
         Err(Error::new(

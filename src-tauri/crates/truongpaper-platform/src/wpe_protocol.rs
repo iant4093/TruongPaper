@@ -9,19 +9,19 @@ use http::{header, Request, Response, StatusCode};
 use std::borrow::Cow;
 use std::io;
 use std::path::Path;
-use truongpaper_we_formats::vfs::{WallpaperVfs, WeVirtualFileSystem};
+use truongpaper_we_formats::vfs::{VfsAsset, WallpaperVfs, WeVirtualFileSystem};
 
 /// Anything that can resolve a sanitized, `/`-separated virtual path to bytes.
 ///
 /// Implemented for the real 4-layer [`WeVirtualFileSystem`]; tests (and future in-memory hosts)
 /// can implement it directly.
 pub trait WpeAssetSource {
-    fn read_bytes(&self, virtual_path: &str) -> io::Result<Vec<u8>>;
+    fn open_asset(&self, virtual_path: &str) -> io::Result<VfsAsset<'_>>;
 }
 
 impl WpeAssetSource for WeVirtualFileSystem {
-    fn read_bytes(&self, virtual_path: &str) -> io::Result<Vec<u8>> {
-        WeVirtualFileSystem::read_bytes(self, virtual_path)
+    fn open_asset(&self, virtual_path: &str) -> io::Result<VfsAsset<'_>> {
+        WeVirtualFileSystem::open_asset(self, virtual_path)
     }
 }
 
@@ -50,7 +50,7 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
         return error_response(StatusCode::NOT_FOUND, b"Not Found");
     }
 
-    let bytes = match vfs.read_bytes(&rel_path) {
+    let asset = match vfs.open_asset(&rel_path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             return error_response(StatusCode::FORBIDDEN, b"Forbidden");
@@ -58,7 +58,7 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
         Err(_) => return error_response(StatusCode::NOT_FOUND, b"Not Found"),
     };
 
-    let total_len = bytes.len();
+    let total_len = asset.size();
     let mime = guess_mime_type(Path::new(&rel_path));
 
     // HTTP Range header ("bytes=start-end") required by WKWebView & WebView2 media players.
@@ -69,7 +69,9 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
     {
         if let Some((start, end)) = parse_http_byte_range(range_val, total_len) {
             let chunk_len = end - start + 1;
-            let slice = bytes[start..=end].to_vec();
+            let Ok(slice) = asset.read(start..end + 1) else {
+                return error_response(StatusCode::NOT_FOUND, b"Not Found");
+            };
             return Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_TYPE, mime)
@@ -96,6 +98,9 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
         // Malformed Range header: RFC 9110 says ignore it and serve the full representation.
     }
 
+    let Ok(bytes) = asset.read(0..total_len) else {
+        return error_response(StatusCode::NOT_FOUND, b"Not Found");
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
@@ -191,10 +196,10 @@ mod tests {
     }
 
     impl WpeAssetSource for MemVfs {
-        fn read_bytes(&self, p: &str) -> io::Result<Vec<u8>> {
+        fn open_asset(&self, p: &str) -> io::Result<VfsAsset<'_>> {
             self.0
                 .get(p)
-                .cloned()
+                .map(|bytes| VfsAsset::Bytes(bytes))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, p.to_string()))
         }
     }

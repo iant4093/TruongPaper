@@ -300,17 +300,20 @@ impl WallpaperHost {
         }
     }
 
-    /// Takes the decoded photo stored for `generation` (stale entries are discarded).
+    /// Takes the decoded photo stored for `generation` without consuming a newer pending photo.
     pub fn take_pending_photo(
         &self,
         monitor_id: &str,
         generation: u64,
     ) -> Option<Arc<RgbaImageData>> {
         let mut pending = self.pending_photos.lock();
-        match pending.remove(monitor_id) {
-            Some((g, img)) if g == generation => Some(img),
-            _ => None,
+        if pending
+            .get(monitor_id)
+            .is_some_and(|(g, _)| *g == generation)
+        {
+            return pending.remove(monitor_id).map(|(_, img)| img);
         }
+        None
     }
 
     /// Clones every monitor's runtime state (render loop / webview manager tick).
@@ -739,6 +742,7 @@ mod tests {
             host.take_pending_photo("A", g - 1).is_none(),
             "stale generation"
         );
+        assert!(host.take_pending_photo("A", g).is_some());
         let g = host.set_photo("A", PathBuf::from("/p/2.jpg"), Some(img));
         assert!(host.take_pending_photo("A", g).is_some());
         assert!(host.take_pending_photo("A", g).is_none(), "taken once");

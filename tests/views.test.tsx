@@ -3,6 +3,7 @@
 // browser-preview mock backend (real @tauri-apps/api modules + mockIPC).
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { invoke } from '@tauri-apps/api/core';
 import { installBrowserPreviewMocksIfNeeded } from '../src/dev/mockTauri';
 import { App, STUDIO_TABS } from '../src/App';
 import { TrayApp } from '../src/tray/TrayApp';
@@ -102,5 +103,24 @@ describe('Tray popover', () => {
     expect(screen.getByText('Next Wallpaper')).toBeTruthy();
     expect(await screen.findByText(/Offline Ready/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Favorite/ })).toBeTruthy();
+  });
+
+  it('updates an open popover when Studio applies a video and can switch back to photos', async () => {
+    await act(async () => { render(<TrayApp />); });
+    await screen.findByRole('button', { name: 'Next Wallpaper' });
+
+    await act(async () => {
+      await invoke('monitor_apply_wallpaper', {
+        monitorId: 'DISPLAY-1',
+        source: { kind: 'workshop', wallpaperId: 'workshop:1966389027' },
+      });
+    });
+    expect(screen.getByText('Lo-fi Train Window')).toBeTruthy();
+    expect(screen.getByText(/^Video ·/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Favorite/ })).toBeNull();
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Switch to Photos' })); });
+    expect(screen.queryByText('Lo-fi Train Window')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Next Wallpaper' })).toBeTruthy();
   });
 });

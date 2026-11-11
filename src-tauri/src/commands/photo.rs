@@ -6,7 +6,9 @@
 //! are provided by `truongpaper-photo-api` / `truongpaper-core` and reused here. Those helpers
 //! bind every value as a SQL parameter instead of interpolating strings.
 
-use crate::commands::monitor::{live_monitor_orientations, lock_monitor_applies};
+use crate::commands::monitor::{
+    live_monitor_orientations, lock_monitor_applies, set_photo_host_source,
+};
 use crate::host::WallpaperHost;
 use crate::models::{
     IpcTransitionType, WallpaperChangedPayload, WallpaperSource, EVENT_PHOTO_QUEUE_UPDATED,
@@ -107,15 +109,32 @@ impl PhotoServiceState {
         }
     }
 
-    fn emit_changed(&self, app: &AppHandle, monitor_id: &str, item: &PhotoItem) {
+    fn show_prepared(
+        &self,
+        app: &AppHandle,
+        monitor_id: &str,
+        item: &PhotoItem,
+        decoded: Option<Arc<RgbaImageData>>,
+    ) -> Result<(), String> {
+        let source = if let Some(state) = app.try_state::<AppState>() {
+            let source = set_photo_host_source(&state, monitor_id)?;
+            state
+                .host
+                .set_photo(monitor_id, PathBuf::from(&item.file_path), decoded);
+            source
+        } else {
+            WallpaperSource::PhotoApi
+        };
         let _ = app.emit(
             EVENT_WALLPAPER_CHANGED,
             WallpaperChangedPayload {
                 monitor_id,
-                current_item: item,
+                source: &source,
+                current_item: Some(item),
                 transition_used: self.transition_used(),
             },
         );
+        Ok(())
     }
 
     fn pop(&self, filter: &PhotoFilter, displayed: &[String]) -> Result<Option<PhotoItem>, String> {
@@ -362,13 +381,8 @@ async fn rotate_photo_targets(
 
     if multi_monitor_mode == "clone" && monitor_id.is_none() {
         base_filter.required_orientation = None;
-        let mut item = state.pop(&base_filter, &displayed_ids)?;
-        if item.is_none() {
-            let _ = state
-                .refill(&base_filter, max_cache_bytes, &displayed_ids)
-                .await;
-            item = state.pop(&base_filter, &displayed_ids)?;
-        }
+        let mut item =
+            photo_for_rotation(state, &mut base_filter, max_cache_bytes, &displayed_ids).await?;
         let mut attempts = 0;
         let (chosen, decoded) = loop {
             let chosen = item.ok_or_else(|| "No eligible photos available in queue".to_string())?;
@@ -396,10 +410,7 @@ async fn rotate_photo_targets(
             }
         }
         for (mid, _) in &target_monitors {
-            if let Some(h) = &host {
-                h.set_photo(mid, PathBuf::from(&chosen.file_path), decoded.clone());
-            }
-            state.emit_changed(app, mid, &chosen);
+            state.show_prepared(app, mid, &chosen, decoded.clone())?;
         }
         last_applied_item = Some(chosen);
     } else {
@@ -412,20 +423,9 @@ async fn rotate_photo_targets(
                 }
             });
 
-            let mut item = state.pop(&base_filter, &displayed_ids)?;
-            if item.is_none() {
-                let _ = state
-                    .refill(&base_filter, max_cache_bytes, &displayed_ids)
-                    .await;
-                item = state.pop(&base_filter, &displayed_ids)?;
-            }
-
-            // Graceful fallback: album has 0 photos matching this monitor's orientation, so allow
-            // any orientation (shown with FitBlur).
-            if item.is_none() && base_filter.required_orientation.is_some() {
-                base_filter.required_orientation = None;
-                item = state.pop(&base_filter, &displayed_ids)?;
-            }
+            let mut item =
+                photo_for_rotation(state, &mut base_filter, max_cache_bytes, &displayed_ids)
+                    .await?;
 
             let mut attempts = 0;
             while let Some(chosen) = item.take() {
@@ -450,10 +450,7 @@ async fn rotate_photo_targets(
                     assign_photo_to_monitor(&conn, mid, &chosen.id).map_err(e)?;
                 }
                 displayed_ids.push(chosen.id.clone());
-                if let Some(h) = &host {
-                    h.set_photo(mid, PathBuf::from(&chosen.file_path), decoded);
-                }
-                state.emit_changed(app, mid, &chosen);
+                state.show_prepared(app, mid, &chosen, decoded)?;
                 last_applied_item = Some(chosen);
             }
         }
@@ -464,13 +461,52 @@ async fn rotate_photo_targets(
         base_filter.required_orientation = None;
         count_unused_in_queue(&conn, &base_filter).unwrap_or(0)
     };
-    if needs_refill(unused_remaining) {
-        let _ = trigger_refill(app, state).await;
-    } else {
-        state.emit_status(app);
+    state.emit_status(app);
+    if needs_refill(unused_remaining) && last_applied_item.is_some() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(state) = app.try_state::<PhotoServiceState>() {
+                let _ = trigger_refill(&app, &state).await;
+            }
+        });
     }
 
     last_applied_item.ok_or_else(|| "No eligible photo found".to_string())
+}
+
+fn cached_photo_for_rotation(
+    state: &PhotoServiceState,
+    filter: &mut PhotoFilter,
+    displayed_ids: &[String],
+) -> Result<Option<PhotoItem>, String> {
+    let mut item = state.pop(filter, displayed_ids)?;
+    if item.is_none() && filter.required_orientation.is_some() {
+        // Fill modes handle the aspect difference when no matching cached photo is ready.
+        let mut fallback = filter.clone();
+        fallback.required_orientation = None;
+        item = state.pop(&fallback, displayed_ids)?;
+        if item.is_some() {
+            *filter = fallback;
+        }
+    }
+    Ok(item)
+}
+
+async fn photo_for_rotation(
+    state: &PhotoServiceState,
+    filter: &mut PhotoFilter,
+    max_cache_bytes: u64,
+    displayed_ids: &[String],
+) -> Result<Option<PhotoItem>, String> {
+    if let Some(item) = cached_photo_for_rotation(state, filter, displayed_ids)? {
+        return Ok(Some(item));
+    }
+    let _refill = state.refill_mutex.lock().await;
+    if let Some(item) = cached_photo_for_rotation(state, filter, displayed_ids)? {
+        return Ok(Some(item));
+    }
+    let _ = state.refill(filter, max_cache_bytes, displayed_ids).await;
+    cached_photo_for_rotation(state, filter, displayed_ids)
 }
 
 /// 4. `photo_trigger_refill`

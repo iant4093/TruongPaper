@@ -2021,6 +2021,7 @@ export interface MonitorInfo {
   isPrimary: boolean;
   isPortrait: boolean;
   activeSource: WallpaperSource;
+  activeWallpaperId: string | null;
 }
 
 export type WallpaperSource =
@@ -2103,7 +2104,7 @@ invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: numb
 ```
 
 #### Rust $\to$ Frontend Event Channels (`app.emit(...)`)
-- `wallpaper://changed`: `{ monitorId: string, currentItem: WallpaperItem | PhotoItem, transitionUsed: TransitionType }`
+- `wallpaper://changed`: `{ monitorId: string, source: WallpaperSource, currentItem: WallpaperItem | PhotoItem | null, transitionUsed: TransitionType }`
 - `photo-queue://updated`: `PhotoStatus`
 - `steam-download://progress`: `{ workshopId: string, title: string, progressPercent: number, state: 'downloading' | 'completed' | 'error', error?: string }`
 - `steam-auth://qr-matrix`: `{ matrix: boolean[][] }`

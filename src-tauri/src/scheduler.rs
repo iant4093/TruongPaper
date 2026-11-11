@@ -16,8 +16,8 @@
 //! visible again. Playlist positions live in memory only (docs do not specify persistence).
 
 use crate::commands::monitor::{
-    apply_source, first_playlist_index, live_monitors, lock_monitor_apply, set_photo_host_source,
-    show_photo, show_playlist_item,
+    apply_source, first_playlist_index, live_monitors, lock_monitor_apply, show_photo,
+    show_playlist_item,
 };
 use crate::commands::photo::{rotate_photo_next, PhotoServiceState};
 use crate::models::{Playlist, PlaylistItem, PlaylistMode, WallpaperSource};
@@ -577,7 +577,7 @@ async fn execute(
             },
             RotationAction::NextPhoto if clone_photos && p.source == WallpaperSource::PhotoApi => {
                 cloned_photo_draw = true;
-                set_photo_host_source(state, id)
+                Ok(())
             }
             RotationAction::NextPhoto => show_photo(app, state, photo, id, true).await,
             RotationAction::ShowPlaylistItem {

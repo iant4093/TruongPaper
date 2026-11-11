@@ -4,9 +4,17 @@ Use this checklist after the automated checks pass. Test the actual desktop app,
 
 Start with the macOS checks (about 20–30 minutes), then Steam and one wallpaper of each type (another 15–30 minutes). Multi-display and Windows checks can be done separately when those devices are available. Stop at the first failure in a section and send the report format at the end; you do not need to debug it yourself.
 
-## Start here: the new Workshop browser and RAM meter
+## Start here with the macOS 1.0.5 build
 
-The local Mac build is **1.0.4** and is already running. These are the first checks that need your account or your observation:
+1. Open **Library** and apply the installed Workshop video `3836199874`.
+2. Select the video in Library. In the inspector, set **Playback Speed** to **2.20x**, minimize Studio, and watch the desktop for two loops. Repeat at **3.00x**. Report any stalls or uneven motion and the speed where it starts.
+3. Open the TruongPaper menu bar popover while the video is playing. Check the title, video label, and preview against the desktop.
+4. Select **Switch to Photos** in the popover. With photos already in the offline queue, the desktop should switch promptly. Check that the popover now shows the current album and **Next Wallpaper**. Repeat with the video paused.
+5. In Studio, narrow the window with the video's details open. Check that **Scheme Color** has a full swatch and a hex value below the label. If you have another wallpaper with longer property names, check that the labels wrap and the controls remain usable.
+
+## Workshop browser and RAM meter
+
+These checks cover guest and signed-in Workshop access.
 
 1. Open Workshop → Discover without signing in. Search a subject, change Type/Genre/Resolution, and try Next/Previous. Open a preview and check the download choices.
 2. Check that the sidebar has separate RAM and Disk cache rows and no status dot. RAM refreshes about every three seconds and reports the main process; helper processes and GPU memory are separate.
@@ -18,7 +26,7 @@ The native guest gallery and GGNetwork download of `3836199874` passed. The pack
 
 ## Priority retest: fill, gray flashes, and branding
 
-The current local Mac test build is **1.0.4**, including the wallpaper fixes, new icon, RAM reading, and Workshop browser. Confirm that version in Settings. Windows CI artifacts use their Actions run version; select the latest successful run for the current app changes.
+Confirm the local Mac build version in Settings. Windows CI artifacts use their Actions run version. Select the latest successful run for the current app changes.
 
 1. In Displays, choose **Fill / Center Crop**. It should affect the photo already on the desktop immediately. New installations now default to Fill; existing explicit fit choices are preserved.
 2. Minimize Studio and watch the desktop for at least 60 seconds. The picture should reach every edge without blurred strips, and should not alternate with a blank gray screen.

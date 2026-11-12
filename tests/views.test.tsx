@@ -83,6 +83,37 @@ describe('Main studio window', () => {
     expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
   });
 
+  it('edits shared Photography settings from the Library details drawer', async () => {
+    await act(async () => { render(<App />); });
+    const selectPhotography = screen.getByRole('button', { name: 'Select Ian Truong Photography' });
+    const fitBefore = useAppStore.getState().settings!.defaultFitMode;
+    const sourcesBefore = useAppStore.getState().monitors.map((monitor) => monitor.activeSource);
+    await act(async () => { fireEvent.click(selectPhotography); });
+    const details = within(screen.getByRole('complementary', { name: 'Wallpaper details' }));
+    expect(details.getByRole('heading', { name: 'Ian Truong Photography' })).toBeTruthy();
+    expect(details.getByRole('combobox', { name: 'Photo pool' })).toBeTruthy();
+    expect(details.getByRole('combobox', { name: 'Change photo every' })).toBeTruthy();
+    expect(details.getByRole('checkbox', { name: 'Match photo orientation to display' })).toBeTruthy();
+
+    const [fit, label] = fitBefore === 'fit_black' ? ['fill', 'Fill / Center Crop'] : ['fit_black', 'Fit + Black Bars'];
+    fireEvent.click(details.getByRole('combobox', { name: 'Photo fit' }));
+    try {
+      await act(async () => { fireEvent.click(screen.getByRole('option', { name: label })); });
+      expect(useAppStore.getState().settings!.defaultFitMode).toBe(fit);
+      expect(useAppStore.getState().monitors.map((monitor) => monitor.activeSource)).toEqual(sourcesBefore);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Toggle wallpaper details' }));
+      expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
+      fireEvent.click(selectPhotography);
+      expect(screen.getByRole('complementary', { name: 'Wallpaper details' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Select Neon Rain City' }));
+      expect(screen.getByText('Wallpaper properties')).toBeTruthy();
+      expect(screen.queryByRole('combobox', { name: 'Photo pool' })).toBeNull();
+    } finally {
+      await act(async () => { await useAppStore.getState().updateSettings({ defaultFitMode: fitBefore }); });
+    }
+  });
+
   it('shows the actual offline queue size and only filters for installed wallpaper types', async () => {
     await act(async () => { render(<App />); });
     await screen.findByRole('button', { name: 'Select Lo-fi Train Window' });

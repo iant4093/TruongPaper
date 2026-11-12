@@ -1,6 +1,6 @@
 // src/lib/format.ts
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { MonitorInfo, PhotoItem, PhotoStatus, WallpaperType } from '../types/ipc';
+import type { FilterMode, MonitorInfo, PhotoItem, PhotoStatus, WallpaperType } from '../types/ipc';
 
 export const MB = 1024 * 1024;
 export const GB = 1024 * MB;
@@ -67,6 +67,12 @@ export function workshopTypeFromTags(tags: string[]): string {
   const hit = tags.find((t) => known.some((k) => k.toLowerCase() === t.toLowerCase()));
   return hit ? hit[0].toUpperCase() + hit.slice(1).toLowerCase() : 'Wallpaper';
 }
+
+export const PHOTO_POOL_OPTIONS = [
+  ['all', 'All public photos'],
+  ['featured', 'Featured photos only'],
+  ['albums', 'Selected saved albums'],
+] as const satisfies ReadonlyArray<readonly [FilterMode, string]>;
 
 export const ROTATION_INTERVALS: Array<{ label: string; seconds: number }> = [
   { label: '1 min', seconds: 60 },

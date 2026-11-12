@@ -16,18 +16,12 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { parseImportLink } from '../../lib/importLinks';
-import { GB, MB, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
-import type { FilterMode, PhotoItem } from '../../types/ipc';
+import { GB, MB, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
+import type { PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 
 const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
-
-const POOL_OPTIONS = [
-  ['all', 'All Public Photos'],
-  ['featured', 'Featured Photos Only'],
-  ['albums', 'Selected Saved albums'],
-] as const satisfies ReadonlyArray<readonly [FilterMode, string]>;
 
 const photoDims = (p: PhotoItem) =>
   p.width && p.height ? `${p.width} × ${p.height}` : 'Full Resolution';
@@ -167,7 +161,7 @@ export const PhotosApiView: React.FC = () => {
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Photo source</div>
         <SegmentedControl
           value={mode}
-          options={POOL_OPTIONS}
+          options={PHOTO_POOL_OPTIONS}
           onChange={(next) => void setPhotoFilter(next, next === 'featured' ? true : featuredOnly)}
         />
         {mode === 'albums' && (

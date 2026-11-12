@@ -111,6 +111,13 @@ input.button { cursor: text; }
 .inspector-drawer { width: var(--drawer-width); height: 100%; overflow-y: auto; border-left: 1px solid var(--border); background: #1b1b1b; }
 .inspector-heading { padding: 12px 16px; font-size: 12px; color: #bdbdbd; border-bottom: 1px solid #303030; }
 .inspector-preview { padding: 14px 16px 0; }
+.photo-source-inspector { display: grid; gap: 14px; padding: 14px 16px 16px; }
+.photo-source-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.photo-source-heading p, .photo-source-hint { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.photo-source-fields { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.photo-source-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; font-size: 12px; }
+.photo-source-inspector .toggle-row { margin-bottom: 0; }
+.photo-source-inspector .toggle-switch { flex-shrink: 0; }
 .preset-bar { display: grid; gap: 6px; min-width: 0; padding: 10px 16px 0; }
 .preset-save { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
 .preset-save input { text-align: left; padding-inline: 8px; }

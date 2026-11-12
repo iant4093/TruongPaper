@@ -64,6 +64,7 @@ export interface AppState {
   monitors: MonitorInfo[];
   selectedMonitorId: string | null;
   selectedWallpaperId: string | null;
+  selectedPhotoSource: boolean;
   playlists: Playlist[];
   settings: AppSettings | null;
   isPaused: boolean;
@@ -108,6 +109,7 @@ export interface AppState {
 
   selectMonitor: (monitorId: string) => void;
   selectWallpaper: (wallpaperId: string | null) => void;
+  selectPhotoSource: () => void;
   applyMonitorSource: (monitorId: string, source: WallpaperSource) => Promise<void>;
   updateWallpaperProperty: (wallpaperId: string, key: string, value: string | number | boolean) => Promise<void>;
   updateWallpaperAdjustments: (wallpaperId: string, adjustments: UniversalAdjustments) => Promise<void>;
@@ -167,6 +169,7 @@ export const useAppStore = create<AppState>((set, get) => {
     monitors: [],
     selectedMonitorId: null,
     selectedWallpaperId: null,
+    selectedPhotoSource: false,
     playlists: [],
     settings: null,
     isPaused: false,
@@ -440,7 +443,8 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     selectMonitor: (monitorId) => set({ selectedMonitorId: monitorId }),
-    selectWallpaper: (wallpaperId) => set({ selectedWallpaperId: wallpaperId }),
+    selectWallpaper: (wallpaperId) => set({ selectedWallpaperId: wallpaperId, selectedPhotoSource: false }),
+    selectPhotoSource: () => set({ selectedWallpaperId: null, selectedPhotoSource: true }),
 
     applyMonitorSource: async (monitorId, source) => {
       await invoke('monitor_apply_wallpaper', { monitorId, source });

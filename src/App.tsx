@@ -2,6 +2,7 @@ import { Dropdown } from './components/Dropdown';
 import React, { useEffect, useState } from 'react';
 import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal } from 'lucide-react';
 import { PresetBar } from './components/PresetBar';
+import { PhotoSourceInspector } from './components/PhotoSourceInspector';
 import { PropertyInspector } from './components/PropertyInspector';
 import { SteamAuthModal } from './components/SteamAuthModal';
 import { WindowControls } from './components/WindowControls';
@@ -26,8 +27,8 @@ export const STUDIO_TABS = [
   ['monitors', 'Displays', Monitor],
   ['settings', 'Settings', SettingsIcon],
 ] as const;
-const VIEWS: Record<StudioTab, React.FC> = {
-  all: AllWallpapersView, photos: PhotosApiView, workshop: SteamWorkshopView,
+const VIEWS: Record<Exclude<StudioTab, 'all'>, React.FC> = {
+  photos: PhotosApiView, workshop: SteamWorkshopView,
   playlists: PlaylistsView, monitors: MonitorsView, settings: SettingsView,
 };
 const nativeMacTitlebar = /Mac/.test(navigator.platform);
@@ -39,6 +40,8 @@ export const App: React.FC = () => {
   const monitors = useAppStore((s) => s.monitors);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
+  const selectedPhotoSource = useAppStore((s) => s.selectedPhotoSource);
+  const selectPhotoSource = useAppStore((s) => s.selectPhotoSource);
   const isPaused = useAppStore((s) => s.isPaused);
   const systemPowerReasons = useAppStore((s) => s.systemPowerReasons);
   const policyStateByMonitor = useAppStore((s) => s.policyStateByMonitor);
@@ -68,9 +71,10 @@ export const App: React.FC = () => {
   const { wallpaper: activeWallpaper, photo: currentPhoto } =
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const selectedWallpaper = wallpapers.find((w) => w.wallpaperId === selectedWallpaperId);
-  const canInspect = !!selectedWallpaper && (activeTab === 'all' || activeTab === 'workshop');
+  const canInspect = (selectedPhotoSource && activeTab === 'all') ||
+    (!!selectedWallpaper && (activeTab === 'all' || activeTab === 'workshop'));
   const showInspector = detailsOpen && canInspect;
-  const ActiveView = VIEWS[activeTab];
+  const ActiveView = activeTab === 'all' ? null : VIEWS[activeTab];
   const activeLabel = STUDIO_TABS.find(([key]) => key === activeTab)?.[1];
   const autoPaused = systemPowerReasons.length > 0 || (activeMonitor && policyStateByMonitor[activeMonitor.monitorId] && policyStateByMonitor[activeMonitor.monitorId] !== 'playing');
   const playingLabel = isPaused ? 'Paused' : autoPaused ? 'Auto-paused' : 'Playing';
@@ -122,18 +126,26 @@ export const App: React.FC = () => {
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
           <main className="content-viewport">
             {(loadError || actionError) && <div role="alert" className="error-banner">{loadError ?? actionError}</div>}
-            <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}><ActiveView /></div>
+            <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}>
+              {ActiveView ? <ActiveView /> : (
+                <AllWallpapersView onSelectPhotoSource={() => { selectPhotoSource(); setDetailsOpen(true); }} />
+              )}
+            </div>
           </main>
           <div className="inspector-slot" inert={!showInspector} aria-hidden={!showInspector}>
-            {selectedWallpaper && (
+            {(selectedPhotoSource || selectedWallpaper) && (
               <aside className="inspector-drawer" aria-label="Wallpaper details">
-              <div className="inspector-heading">Wallpaper details</div>
-              <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
-              <PresetBar key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId} />
-              <PropertyInspector key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId}
-                project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} presets={[]}
-                onPropertyChange={(k, v) => setLocalWallpaperProperty(selectedWallpaper.wallpaperId, k, v)}
-                onAdjustmentChange={(next) => setLocalWallpaperAdjustments(selectedWallpaper.wallpaperId, next)} />
+                <div className="inspector-heading">Wallpaper details</div>
+                {selectedPhotoSource ? <PhotoSourceInspector monitor={activeMonitor} /> : selectedWallpaper && (
+                  <>
+                    <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
+                    <PresetBar key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId} />
+                    <PropertyInspector key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId}
+                      project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} presets={[]}
+                      onPropertyChange={(k, v) => setLocalWallpaperProperty(selectedWallpaper.wallpaperId, k, v)}
+                      onAdjustmentChange={(next) => setLocalWallpaperAdjustments(selectedWallpaper.wallpaperId, next)} />
+                  </>
+                )}
               </aside>
             )}
           </div>

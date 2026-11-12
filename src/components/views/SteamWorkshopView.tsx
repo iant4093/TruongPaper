@@ -128,7 +128,6 @@ const DownloadsList: React.FC = () => {
 
 const InstalledWorkshopView: React.FC<{ onBrowse: () => void; onOpenDetails: () => void }> = ({ onBrowse, onOpenDetails }) => {
   const wallpapers = useAppStore((s) => s.wallpapers);
-  const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const monitors = useAppStore((s) => s.monitors);
   const selectWallpaper = useAppStore((s) => s.selectWallpaper);
@@ -192,10 +191,10 @@ const InstalledWorkshopView: React.FC<{ onBrowse: () => void; onOpenDetails: () 
         renderItem={(w, cell) => (
           <WallpaperCard id={w.wallpaperId} title={w.title} preview={wallpaperPreviewSrc(w)}
             kind={WALLPAPER_TYPE_LABEL[w.type]} badge={isLocalSteamItem(w) ? 'Steam app' : w.windowsOnly ? 'Windows only' : undefined}
-            selected={w.wallpaperId === selectedWallpaperId} audioReactive={w.audioReactive}
+            audioReactive={w.audioReactive}
             active={activeSource?.kind === 'workshop' && activeSource.wallpaperId === w.wallpaperId}
             favorite={!!w.isFavorite} canApply={!!activeMonitorId} tabIndex={cell.tabIndex}
-            onSelect={selectWallpaper} onApply={apply} onDetails={details} onFavorite={favorite} />
+            onApply={apply} onDetails={details} onFavorite={favorite} />
         )} />
       {items.length === 0 && (
         <div className="empty-state" role="status">

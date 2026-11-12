@@ -12,6 +12,9 @@ import { WallpaperCard } from '../src/components/WallpaperCard';
 import { useAppStore } from '../src/store/useAppStore';
 import { confirmAction, toast, useFeedback } from '../src/store/feedback';
 
+/** Wallpaper tiles (focusable, not clickable: the highlight marks the current wallpaper). */
+const tileEls = () => Array.from(document.querySelectorAll<HTMLElement>('[data-grid-select]'));
+
 const initial = useAppStore.getState();
 
 beforeAll(() => {
@@ -34,7 +37,7 @@ const LOFI = 'workshop:1966389027';
 const nav = (label: string) => within(screen.getByRole('navigation', { name: 'Studio views' })).getByRole('button', { name: label });
 const openApp = async () => {
   await act(async () => { render(<App />); });
-  await screen.findByRole('button', { name: 'Select Neon Rain City' });
+  await screen.findByRole('button', { name: 'Details for Neon Rain City' });
 };
 const goto = async (label: string, heading: RegExp | string) => {
   await act(async () => { fireEvent.click(nav(label)); });
@@ -121,8 +124,8 @@ describe('Library cards', () => {
     expect(screen.getByRole('button', { name: 'Remove Neon Rain City from favorites' }).getAttribute('aria-pressed')).toBe('true');
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Favorites/ })); });
-    const names = screen.getAllByRole('button', { name: /^Select / }).map((b) => b.getAttribute('aria-label'));
-    expect(names).toEqual(['Select Neon Rain City']);
+    const names = tileEls().map((b) => b.getAttribute('aria-label'));
+    expect(names).toEqual(['Neon Rain City']);
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Remove Neon Rain City from favorites' })); });
     expect(screen.getByText(/No favorites yet/)).toBeTruthy();
@@ -167,9 +170,9 @@ describe('Library cards', () => {
 describe('keyboard navigation in the grid', () => {
   it('moves with the arrow keys, applies with Enter and jumps to search with /', async () => {
     await openApp();
-    const tiles = () => screen.getAllByRole('button', { name: /^Select / });
+    const tiles = () => tileEls();
     const first = tiles()[0];
-    expect(first.getAttribute('aria-label')).toBe('Select Ian Truong Photography');
+    expect(first.getAttribute('aria-label')).toMatch(/^Ian Truong Photography/);
     first.focus();
     fireEvent.keyDown(first, { key: 'ArrowRight' });
     expect(document.activeElement).toBe(tiles()[1]);
@@ -221,7 +224,7 @@ describe('VirtualGrid windowing', () => {
       <VirtualGrid items={items} getKey={(i) => i.id} label="Test grid"
         renderItem={(item, cell) => (
           <WallpaperCard id={item.id} title={item.title} preview={null} kind="Scene" canApply tabIndex={cell.tabIndex}
-            onSelect={() => {}} onApply={() => {}} />
+            onApply={() => {}} />
         )} />
     </div>
   );
@@ -230,17 +233,17 @@ describe('VirtualGrid windowing', () => {
     defineSize();
     try {
       render(<Harness />);
-      await waitFor(() => expect(screen.getAllByRole('button', { name: /^Select / }).length).toBeLessThan(40));
-      const rendered = () => screen.getAllByRole('button', { name: /^Select / });
+      await waitFor(() => expect(tileEls().length).toBeLessThan(40));
+      const rendered = () => tileEls();
       expect(rendered().length).toBeGreaterThanOrEqual(8);
-      expect(rendered()[0].getAttribute('aria-label')).toBe('Select Item 0');
+      expect(rendered()[0].getAttribute('aria-label')).toBe('Item 0');
       const grid = screen.getByRole('group', { name: 'Test grid' });
       expect(parseFloat(grid.style.paddingBottom)).toBeGreaterThan(1000);
 
       const scroller = screen.getByTestId('scroller');
       scroller.scrollTop = 6000;
       fireEvent.scroll(scroller);
-      await waitFor(() => expect(rendered()[0].getAttribute('aria-label')).not.toBe('Select Item 0'));
+      await waitFor(() => expect(rendered()[0].getAttribute('aria-label')).not.toBe('Item 0'));
       expect(rendered().length).toBeLessThan(40);
     } finally { restoreSize(); }
   });
@@ -249,19 +252,19 @@ describe('VirtualGrid windowing', () => {
     defineSize();
     try {
       render(<Harness />);
-      await waitFor(() => expect(screen.getAllByRole('button', { name: /^Select / }).length).toBeLessThan(40));
-      const first = screen.getByRole('button', { name: 'Select Item 0' });
+      await waitFor(() => expect(tileEls().length).toBeLessThan(40));
+      const first = tileEls().find((t) => t.getAttribute('aria-label') === 'Item 0')!;
       first.focus();
       fireEvent.keyDown(first, { key: 'End' });
       fireEvent.scroll(screen.getByTestId('scroller'));
-      await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Select Item 199'));
+      await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Item 199'));
     } finally { restoreSize(); }
   });
 
   it('renders small lists completely', () => {
     render(<VirtualGrid items={items.slice(0, 20)} getKey={(i) => i.id} label="Small"
-      renderItem={(item) => <WallpaperCard id={item.id} title={item.title} preview={null} kind="Scene" canApply onSelect={() => {}} onApply={() => {}} />} />);
-    expect(screen.getAllByRole('button', { name: /^Select / })).toHaveLength(20);
+      renderItem={(item) => <WallpaperCard id={item.id} title={item.title} preview={null} kind="Scene" canApply onApply={() => {}} />} />);
+    expect(tileEls()).toHaveLength(20);
   });
 });
 

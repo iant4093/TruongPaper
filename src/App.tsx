@@ -108,9 +108,25 @@ export const App: React.FC = () => {
     if (opener?.isConnected) opener.focus();
   }, []);
   const openDetails = useCallback(() => setDetailsOpen(true), []);
+  // The top-right button always shows the wallpaper on screen for the chosen display.
+  const showingCurrent = useAppStore((s) => {
+    const m = s.monitors.find((x) => x.monitorId === s.selectedMonitorId) ?? s.monitors[0];
+    if (!m) return false;
+    const currentId = m.activeSource.kind === 'workshop' ? m.activeSource.wallpaperId
+      : m.activeSource.kind === 'playlist' ? m.activeWallpaperId : null;
+    return currentId ? s.selectedWallpaperId === currentId && !s.selectedPhotoSource : s.selectedPhotoSource;
+  });
+  const openCurrentDetails = useCallback(() => {
+    const s = useAppStore.getState();
+    const m = s.monitors.find((x) => x.monitorId === s.selectedMonitorId) ?? s.monitors[0];
+    const source = m?.activeSource;
+    if (source?.kind === 'workshop') s.selectWallpaper(source.wallpaperId);
+    else if (source?.kind === 'playlist' && m?.activeWallpaperId) s.selectWallpaper(m.activeWallpaperId);
+    else s.selectPhotoSource();
+    setDetailsOpen(true);
+  }, []);
 
-  const canInspect = (photoSourceSelected && activeTab === 'all') ||
-    (wallpaperSelected && (activeTab === 'all' || activeTab === 'workshop'));
+  const canInspect = photoSourceSelected || wallpaperSelected;
   const showInspector = detailsOpen && canInspect;
   const wasInspectorOpen = useRef(false);
   useEffect(() => {
@@ -173,12 +189,16 @@ export const App: React.FC = () => {
             <Dropdown className="display-select" label="Active display" value={activeId} options={monitors}
               onChange={selectMonitor} placeholder="No displays connected" />
           </div>
-          {canInspect && (
-            <button type="button" className={`button details-toggle ${detailsOpen ? 'is-active' : ''}`} aria-pressed={detailsOpen}
-              onClick={(event) => { openerRef.current = event.currentTarget; setDetailsOpen(!detailsOpen); }}>
-              {detailsOpen ? 'Hide details' : 'Details'}
-            </button>
-          )}
+          {(() => {
+            const hide = showInspector && showingCurrent;
+            return (
+              <button type="button" className={`button details-toggle ${hide ? 'is-active' : ''}`} aria-pressed={hide}
+                disabled={monitors.length === 0}
+                onClick={(event) => { openerRef.current = event.currentTarget; if (hide) closeDetails(); else openCurrentDetails(); }}>
+                {hide ? 'Hide details' : 'Current wallpaper'}
+              </button>
+            );
+          })()}
         </header>
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
           <main className="content-viewport" onClickCapture={(event) => {

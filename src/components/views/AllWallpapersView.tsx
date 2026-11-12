@@ -77,8 +77,6 @@ export const AllWallpapersView: React.FC<{
   const matchOrientation = useAppStore((s) => s.settings?.skipMismatchedOrientation ?? true);
   const monitors = useAppStore((s) => s.monitors);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
-  const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
-  const selectedPhotoSource = useAppStore((s) => s.selectedPhotoSource);
   const selectWallpaper = useAppStore((s) => s.selectWallpaper);
   const selectPhotoSource = useAppStore((s) => s.selectPhotoSource);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
@@ -181,17 +179,16 @@ export const AllWallpapersView: React.FC<{
       <VirtualGrid items={entries} getKey={(e) => e.id} label="Wallpapers"
         renderItem={(entry, cell) => entry.kind === 'photos' ? (
           <WallpaperCard id={PHOTOS_ID} title="Ian Truong Photography" preview={photoPreview}
-            kind="Photography · rotating photos" selected={selectedPhotoSource}
+            kind="Photography · rotating photos"
             active={activeSource?.kind === 'photo_api'} canApply={canApply} applying={applying === PHOTOS_ID}
-            tabIndex={cell.tabIndex} onSelect={select} onApply={apply} onDetails={details} />
+            tabIndex={cell.tabIndex} onApply={apply} onDetails={details} />
         ) : (
           <WallpaperCard id={entry.id} title={entry.item.title} preview={wallpaperPreviewSrc(entry.item)}
             kind={WALLPAPER_TYPE_LABEL[entry.item.type]} badge={entry.item.windowsOnly ? 'Windows only' : undefined}
             audioReactive={entry.item.audioReactive} favorite={!!entry.item.isFavorite}
-            selected={entry.id === selectedWallpaperId}
             active={activeSource?.kind === 'workshop' && activeSource.wallpaperId === entry.id}
             canApply={canApply} applying={applying === entry.id} tabIndex={cell.tabIndex}
-            onSelect={select} onApply={apply} onDetails={details} onFavorite={favorite} />
+            onApply={apply} onDetails={details} onFavorite={favorite} />
         )} />
       {!emptyLibrary && !entries.some((e) => e.kind === 'wallpaper') && entries.length <= 1 && (search || filter !== 'all') && (
         <div className="empty-state" role="status">

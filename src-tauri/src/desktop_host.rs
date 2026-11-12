@@ -1670,10 +1670,14 @@ impl MonitorRenderer {
         match active {
             ActiveRuntime::Photo { path } => {
                 let was_photo = matches!(self.content, Content::Photo);
+                // A Web/Video still is a real picture: fade from it instead of from black.
+                let was_preview = matches!(self.content, Content::WebviewPreview);
                 self.content = Content::Photo;
                 if !was_photo {
                     self.from = None;
-                    self.to = None;
+                    if !was_preview {
+                        self.to = None;
+                    }
                     self.compositor.invalidate_caches();
                     release_free_memory();
                 }
@@ -1909,7 +1913,9 @@ impl MonitorRenderer {
             _ => 1.0,
         };
         let Some(to) = &self.to else {
-            if self.dirty {
+            // While the new photo decodes, leave the last frame on screen. Clearing here
+            // showed a black flash between the old wallpaper and the photo.
+            if self.dirty && self.awaiting_photo.is_none() {
                 self.present_clear(device, queue);
             }
             return false;

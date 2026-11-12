@@ -194,8 +194,8 @@ input.button { cursor: text; }
 .wallpaper-card .thumbnail { aspect-ratio: 16 / 10; border: 1px solid #3b3b3b; border-radius: 7px; }
 .wallpaper-card .thumbnail > * { position: absolute; inset: 0; }
 .wallpaper-select { width: 100%; border: 0; background: transparent; color: inherit; padding: 0; text-align: left; border-radius: 7px; display: block; position: relative; }
-.wallpaper-select:hover .thumbnail { border-color: #868686; }
-.wallpaper-select[aria-pressed='true'] .thumbnail { border-color: #c4c4c4; box-shadow: 0 0 0 1px #c4c4c4; }
+.wallpaper-card.is-current .thumbnail { border-color: #c4c4c4; box-shadow: 0 0 0 1px #c4c4c4; }
+.wallpaper-select:focus-visible { outline: 2px solid #bbb; outline-offset: 2px; }
 .wallpaper-info { display: flex; flex-direction: column; gap: 2px; height: 112px; padding: 10px 1px 0; overflow: hidden; }
 .wallpaper-title { font-size: 13px; font-weight: 500; color: #e8e8e8; line-height: 1.35; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; min-height: 35px; }
 .wallpaper-meta { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-muted); }

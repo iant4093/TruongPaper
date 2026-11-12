@@ -10,23 +10,22 @@ export interface WallpaperCardProps {
   kind: string;
   /** Short badge on the thumbnail, e.g. "Windows only". */
   badge?: string;
+  /** The wallpaper on screen for the chosen display. It is the highlighted tile. */
   active?: boolean;
-  selected?: boolean;
   audioReactive?: boolean;
   canApply: boolean;
   applying?: boolean;
   /** Undefined hides the star (the Photography tile cannot be starred). */
   favorite?: boolean;
   tabIndex?: 0 | -1;
-  onSelect?: (id: string) => void;
   onApply: (id: string) => void;
   onDetails?: (id: string) => void;
   onFavorite?: (id: string, next: boolean) => void;
 }
 
 const WallpaperCardBase: React.FC<WallpaperCardProps> = ({
-  id, title, preview, kind, badge, active, selected, audioReactive, canApply, applying, favorite, tabIndex = 0,
-  onSelect, onApply, onDetails, onFavorite,
+  id, title, preview, kind, badge, active, audioReactive, canApply, applying, favorite, tabIndex = 0,
+  onApply, onDetails, onFavorite,
 }) => {
   const thumb = <Thumb src={preview} alt={title} height="auto" lazy />;
   const chips = <>
@@ -34,19 +33,17 @@ const WallpaperCardBase: React.FC<WallpaperCardProps> = ({
     {badge && <span className="wallpaper-badge">{badge}</span>}
   </>;
   return (
-    <article className="wallpaper-card">
+    <article className={`wallpaper-card${active ? ' is-current' : ''}`}>
       <div className="wallpaper-media">
-        {onSelect ? (
-          <button type="button" className="wallpaper-select" data-grid-select="" tabIndex={tabIndex}
-            aria-label={`Select ${title}`} aria-pressed={!!selected}
-            onClick={() => onSelect(id)} onDoubleClick={() => onDetails?.(id)}
-            onKeyDown={(event) => {
-              // Enter sets the wallpaper; Space still selects.
-              if (event.key === 'Enter' && canApply && !active && !applying) { event.preventDefault(); onApply(id); }
-            }}>
-            {thumb}{chips}
-          </button>
-        ) : <div className="wallpaper-select">{thumb}{chips}</div>}
+        {/* Clicking a tile does nothing: the highlight always marks what is on screen. It stays
+            focusable for arrow-key moves, and Enter sets it as the wallpaper. */}
+        <div className="wallpaper-select" data-grid-select="" tabIndex={tabIndex} role="group"
+          aria-label={active ? `${title}, current wallpaper` : title}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && canApply && !active && !applying) { event.preventDefault(); onApply(id); }
+          }}>
+          {thumb}{chips}
+        </div>
         {favorite !== undefined && onFavorite && (
           <button type="button" className={`wallpaper-star${favorite ? ' is-on' : ''}`} aria-pressed={favorite}
             aria-label={favorite ? `Remove ${title} from favorites` : `Add ${title} to favorites`}

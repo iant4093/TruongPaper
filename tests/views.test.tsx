@@ -9,6 +9,8 @@ import { App, STUDIO_TABS } from '../src/App';
 import { TrayApp } from '../src/tray/TrayApp';
 import { useAppStore } from '../src/store/useAppStore';
 
+const tileEls = () => Array.from(document.querySelectorAll<HTMLElement>('[data-grid-select]'));
+
 const HEADINGS: Record<string, RegExp> = {
   all: /^Library$/,
   photos: /^Ian Truong Photography$/,
@@ -74,23 +76,25 @@ describe('Main studio window', () => {
     expect(screen.getByText('Rain Speed')).toBeTruthy();
   });
 
-  it('filters the library and opens details only from the Details control', async () => {
+  it('opens the current wallpaper from the top button and other wallpapers only from their i button', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
     await act(async () => { fireEvent.change(screen.getByRole('textbox', { name: 'Search library' }), { target: { value: 'Neon' } }); });
-    expect(screen.queryByRole('button', { name: 'Select Lo-fi Train Window' })).toBeNull();
-    // Selecting a tile only highlights it; the drawer stays closed until asked for.
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select Neon Rain City' })); });
+    expect(screen.queryByRole('button', { name: 'Details for Lo-fi Train Window' })).toBeNull();
+    // Clicking a tile does nothing: the highlight stays on the wallpaper that is on screen.
+    const tile = tileEls().find((t) => t.getAttribute('aria-label')?.startsWith('Neon Rain City'))!;
+    await act(async () => { fireEvent.click(tile); });
     expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Details' })).toBeTruthy();
+    // The i button opens that wallpaper; the top button then offers the current one.
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Details for Neon Rain City' })); });
     expect(screen.getByRole('complementary', { name: 'Wallpaper details' })).toBeTruthy();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Hide details' })); });
+    const top = () => screen.getByRole('button', { name: /^(Current wallpaper|Hide details)$/ });
+    await act(async () => { fireEvent.click(top()); });
+    expect(top().textContent).toBe('Hide details');
+    await act(async () => { fireEvent.click(top()); });
     expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
-    // Double-clicking a tile is a shortcut for Details.
-    await act(async () => { fireEvent.doubleClick(screen.getByRole('button', { name: 'Select Neon Rain City' })); });
-    expect(screen.getByRole('complementary', { name: 'Wallpaper details' })).toBeTruthy();
+    expect(top().textContent).toBe('Current wallpaper');
   });
 
   it('saves scene framing from the wallpaper details without changing Photography fit', async () => {
@@ -149,7 +153,7 @@ describe('Main studio window', () => {
 
   it('shows the offline queue only in Photography and filters Library by installed wallpaper types', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Lo-fi Train Window' });
+    await screen.findByRole('button', { name: 'Details for Lo-fi Train Window' });
     const { photoStatus, wallpapers } = useAppStore.getState();
     const queuedPhoto = photoStatus!.unusedQueue[0];
     await act(async () => {

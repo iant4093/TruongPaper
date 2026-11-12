@@ -421,6 +421,7 @@ mod tests {
             "monitors_list",
             "monitor_apply_wallpaper",
             "playback_set_paused",
+            "playback_next",
             "playlist_list",
             "settings_get",
             "settings_update",

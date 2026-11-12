@@ -739,6 +739,8 @@ pub struct SurfaceTarget {
     /// Physical pixels.
     pub width: u32,
     pub height: u32,
+    /// Backing scale (physical pixels per logical point); 1.0 where pixels are the unit.
+    pub scale_factor: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -880,6 +882,7 @@ mod platform {
                             surface,
                             width,
                             height,
+                            scale_factor: scale as f32,
                         }),
                         Err(err) => tracing::warn!("desktop surface for {monitor_id}: {err}"),
                     }
@@ -1012,6 +1015,7 @@ mod platform {
                             surface,
                             width: width as u32,
                             height: height as u32,
+                            scale_factor: 1.0,
                         }),
                         Err(err) => {
                             tracing::warn!("desktop surface for {}: {err}", m.device_name)
@@ -1471,6 +1475,7 @@ struct MonitorRenderer {
     monitor_id: String,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    scale_factor: f32,
     compositor: CompositorPipeline,
     generation: Option<u64>,
     content: Content,
@@ -1551,6 +1556,7 @@ impl MonitorRenderer {
         target.surface.configure(device, &config);
         let compositor = CompositorPipeline::new(device, format, config.width, config.height);
         Some(Self {
+            scale_factor: target.scale_factor.max(1.0),
             monitor_id: target.monitor_id,
             surface: target.surface,
             config,
@@ -1744,7 +1750,7 @@ impl MonitorRenderer {
                     self.content = Content::None;
                     release_free_memory();
                 }
-                match load_scene(device, queue, &self.config, &desc, rt) {
+                match load_scene(device, queue, &self.config, self.scale_factor, &desc, rt) {
                     Ok(state) => {
                         self.content = Content::Scene(Box::new(state));
                         release_free_memory();
@@ -2157,17 +2163,31 @@ impl MonitorRenderer {
     }
 }
 
+/// The screen size scenes see as `engine.screenResolution`: logical points, not backing pixels.
+/// Scripts position text/layers as a percentage of it (e.g. Persica's clock sits at
+/// `screenResolution / 100 * 100` in a 3840x2160 scene), which assumes a 1080p-class value; the
+/// 3456x2234 physical pixels of a Retina panel push those layers off the canvas.
+pub fn scene_monitor_size(width: u32, height: u32, scale_factor: f32) -> [f32; 2] {
+    let s = if scale_factor.is_finite() && scale_factor >= 1.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    [(width as f32 / s).round(), (height as f32 / s).round()]
+}
+
 /// Loads a scene wallpaper on the render thread: SceneRuntime (scripts), SceneRenderer (GPU
 /// resources), an offscreen target, scene sounds and embedded videos.
 fn load_scene(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     config: &wgpu::SurfaceConfiguration,
+    scale_factor: f32,
     desc: &SceneDescriptor,
     rt: Option<&MonitorRuntime>,
 ) -> anyhow::Result<SceneState> {
     let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
-    let monitor_size = [config.width as f32, config.height as f32];
+    let monitor_size = scene_monitor_size(config.width, config.height, scale_factor);
     let mut runtime = SceneRuntime::load(
         &vfs,
         &desc.scene_file,
@@ -2680,6 +2700,13 @@ fn run_renderer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scene_monitor_size_is_logical() {
+        assert_eq!(super::scene_monitor_size(3456, 2234, 2.0), [1728.0, 1117.0]);
+        assert_eq!(super::scene_monitor_size(1920, 1080, 1.0), [1920.0, 1080.0]);
+        assert_eq!(super::scene_monitor_size(1920, 1080, 0.0), [1920.0, 1080.0]);
+    }
+
     use super::*;
     use serde_json::json;
 

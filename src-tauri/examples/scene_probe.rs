@@ -83,7 +83,24 @@ async fn render() -> anyhow::Result<()> {
         )?;
         return Ok(());
     }
-    let mut runtime = SceneRuntime::load(&vfs, "scene.json", defaults.as_deref(), [1280.0, 720.0])?;
+    // PROBE_MONITOR=3456x2234 sets the monitor size handed to the scene (engine.screenResolution),
+    // PROBE_OUT=1920x1080 sets the rendered image size.
+    let dims = |key: &str, default: (u32, u32)| -> (u32, u32) {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse().ok()?, h.parse().ok()?))
+            })
+            .unwrap_or(default)
+    };
+    let (mon_w, mon_h) = dims("PROBE_MONITOR", (1280, 720));
+    let mut runtime = SceneRuntime::load(
+        &vfs,
+        "scene.json",
+        defaults.as_deref(),
+        [mon_w as f32, mon_h as f32],
+    )?;
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = SceneRenderer::new(&device, &queue, fmt, runtime.graph().scene_size);
     let warnings = renderer.load(&device, &queue, &vfs, runtime.graph());
@@ -92,8 +109,7 @@ async fn render() -> anyhow::Result<()> {
         runtime.graph().layers.len(),
         warnings.len()
     );
-    let width = 1280;
-    let height = 720;
+    let (width, height) = dims("PROBE_OUT", (1280, 720));
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {

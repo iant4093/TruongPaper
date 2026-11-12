@@ -211,6 +211,7 @@ export interface AppSettings {
   batteryPolicy: 'continue' | 'pause_animations' | 'switch_to_photo';
   launchAtLogin: boolean;
   syncLockScreen: boolean;
+  multiMonitorMode: 'independent' | 'span';
 }
 
 // ---------------------------------------------------------------------------

@@ -148,6 +148,14 @@ pub struct AppSettings {
     pub launch_at_login: bool,
     #[serde(default)]
     pub sync_lock_screen: bool,
+    /// `"independent"` (each display has its own wallpaper) or `"span"` (one wallpaper across
+    /// the union of all displays).
+    #[serde(default = "default_multi_monitor_mode")]
+    pub multi_monitor_mode: String,
+}
+
+fn default_multi_monitor_mode() -> String {
+    "independent".into()
 }
 
 impl Default for AppSettings {
@@ -167,6 +175,7 @@ impl Default for AppSettings {
             battery_policy: "pause_animations".into(),
             launch_at_login: false,
             sync_lock_screen: false,
+            multi_monitor_mode: default_multi_monitor_mode(),
         }
     }
 }

@@ -343,6 +343,15 @@ impl WallpaperHost {
         out
     }
 
+    /// Drops runtime state (and pending photos) of monitors not in `connected`, so an unplugged
+    /// display no longer counts towards `audio_demand` or other aggregate queries.
+    pub fn retain_monitors(&self, connected: &[String]) {
+        self.monitors.lock().retain(|id, _| connected.contains(id));
+        self.pending_photos
+            .lock()
+            .retain(|id, _| connected.contains(id));
+    }
+
     /// Monitors currently showing `wallpaper_id`.
     pub fn monitors_showing(&self, wallpaper_id: &str) -> Vec<(String, MonitorRuntime)> {
         self.monitors_snapshot()
@@ -932,5 +941,23 @@ mod tests {
         assert_eq!(rt.uniforms.zoom, 1.5);
         assert_eq!(host.monitors_showing("w").len(), 1);
         assert!(host.monitors_showing("x").is_empty());
+    }
+
+    #[test]
+    fn retain_monitors_prunes_unplugged_displays_from_audio_demand() {
+        let host = WallpaperHost::new();
+        let adj = UniversalAdjustments::default();
+        host.set_runtime("A", scene(), adj, true);
+        host.set_runtime("B", scene(), adj, true);
+        host.set_policy("A", MonitorPlaybackPolicy::PausedMaximized);
+        assert!(host.audio_demand().is_some(), "B keeps capture running");
+        host.retain_monitors(&["A".to_string()]);
+        assert!(host.monitor("B").is_none());
+        assert!(host.monitor("A").is_some());
+        assert_eq!(
+            host.audio_demand(),
+            None,
+            "unplugged B no longer demands audio"
+        );
     }
 }

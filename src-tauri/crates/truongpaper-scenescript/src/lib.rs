@@ -255,6 +255,8 @@ globalThis.__layerStubs = function () {
         getAnimation() { return globalThis.__animStub(); },
         getAnimationLayer() { return globalThis.__animStub(); },
         getTextureAnimation() { return globalThis.__animStub(); },
+        play() {}, stop() {}, pause() {}, isPlaying() { return false; },
+        setVolume() {}, getVolume() { return 1; }, volume: 1,
         getParent() { return null; },
         getChildren() { return []; },
         getBoundingBox() { return null; },

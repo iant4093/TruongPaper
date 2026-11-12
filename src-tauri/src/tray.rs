@@ -3,7 +3,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
 };
 
 pub(crate) fn show_studio(app: &AppHandle) {
@@ -67,12 +67,9 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
             "open_studio" => {
                 show_studio(app);
             }
-            "next_wallpaper" => {
-                let _ = app.emit("tray://next-requested", ());
-            }
-            "toggle_pause" => {
-                let _ = app.emit("tray://toggle-pause-requested", ());
-            }
+            // Same Rust handlers as the global hotkeys; they work with Studio closed.
+            "next_wallpaper" => crate::controls::next_wallpaper(app),
+            "toggle_pause" => crate::controls::toggle_pause(app),
             "quit" => {
                 app.exit(0);
             }

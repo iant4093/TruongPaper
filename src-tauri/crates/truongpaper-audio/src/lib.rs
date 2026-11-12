@@ -276,21 +276,60 @@ impl AudioTicker {
 pub trait LoopbackBackend {
     /// Starts capture and returns the capture sample rate in Hz.
     fn start(&mut self, ring: Arc<Mutex<StereoRingBuffer>>) -> anyhow::Result<f32>;
+
+    /// Stops capture and releases the device. Called when every monitor is paused, before a
+    /// restart and when the worker exits. Must be safe to call when not started.
+    fn stop(&mut self) {}
+
+    /// `true` when the running capture is no longer healthy (stream error, default output
+    /// device changed) and must be stopped and started again. Polled about every
+    /// [`HEALTH_CHECK_PERIOD`].
+    fn needs_restart(&mut self) -> bool {
+        false
+    }
 }
 
-/// Handle to the running 60 Hz analyzer thread.
+/// How often a running backend is asked [`LoopbackBackend::needs_restart`].
+pub const HEALTH_CHECK_PERIOD: Duration = Duration::from_secs(2);
+/// Minimum spacing of capture start attempts after a failure (device missing / busy).
+pub const RESTART_BACKOFF: Duration = Duration::from_secs(2);
+/// Poll period of a paused worker (also woken immediately by resume / stop).
+const PAUSED_POLL: Duration = Duration::from_millis(250);
+
+struct WorkerShared {
+    stop: Arc<AtomicBool>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    waker: std::thread::Thread,
+}
+
+impl Drop for WorkerShared {
+    /// The last handle stops the analyzer thread, releases the capture device and waits for it.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.waker.unpark();
+        if let Some(thread) = self.thread.lock().take() {
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+/// Handle to the running 60 Hz analyzer thread. Clones share the worker; dropping the last
+/// clone stops it and joins the thread (the capture backend is stopped with it).
 #[derive(Clone)]
 pub struct AudioWorkerHandle {
     /// Ring shared with the capture backend. External PCM injectors (e.g. macOS ScreenCaptureKit
     /// `SCStreamOutputTypeAudio`) can call `push_interleaved` on it.
     pub ring: Arc<Mutex<StereoRingBuffer>>,
-    stop: Arc<AtomicBool>,
+    shared: Arc<WorkerShared>,
 }
 
 impl AudioWorkerHandle {
-    /// Asks the ticker thread to exit (the capture backend is dropped with it).
+    /// Asks the ticker thread to exit (the capture backend is stopped with it).
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.waker.unpark();
     }
 }
 
@@ -298,6 +337,10 @@ impl AudioWorkerHandle {
 ///
 /// `make_backend` runs on the worker thread; returning `None` or a failing `start` leaves the
 /// ring empty, so the watchdog keeps the spectrum at silence (external injectors still work).
+/// While `all_monitors_paused` is set the capture device is released; it is opened again on
+/// resume. A running capture that reports [`LoopbackBackend::needs_restart`] (stream error,
+/// default device change) is restarted, and a failed start is retried every
+/// [`RESTART_BACKOFF`].
 pub fn spawn_audio_worker<F>(
     make_backend: F,
     latest_frame: Arc<ArcSwap<AudioSpectrumFrame>>,
@@ -312,63 +355,103 @@ where
     let ring_for_thread = Arc::clone(&ring);
     let stop_for_thread = Arc::clone(&stop);
 
-    std::thread::spawn(move || {
-        let mut backend = make_backend();
-        let mut sample_rate = 48_000.0_f32;
-        if let Some(b) = backend.as_mut() {
-            match b.start(Arc::clone(&ring_for_thread)) {
-                Ok(sr) if sr > 0.0 => sample_rate = sr,
-                Ok(_) => tracing::warn!("Audio loopback reported invalid sample rate"),
-                Err(e) => tracing::warn!("Audio loopback start failed: {e}"),
+    let thread = std::thread::Builder::new()
+        .name("truongpaper-audio".into())
+        .spawn(move || {
+            let mut backend = make_backend();
+            let mut sample_rate = 48_000.0_f32;
+            let mut ticker = AudioTicker::new(Arc::clone(&ring_for_thread), sample_rate);
+            let mut running = false;
+            let mut warned = false;
+            let mut retry_at = Instant::now();
+            let mut health_at = Instant::now() + HEALTH_CHECK_PERIOD;
+            let mut next_deadline = Instant::now();
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                if all_monitors_paused.load(Ordering::Relaxed) {
+                    if running {
+                        if let Some(b) = backend.as_mut() {
+                            b.stop();
+                        }
+                        running = false;
+                    }
+                    std::thread::park_timeout(PAUSED_POLL);
+                    next_deadline = Instant::now();
+                    retry_at = next_deadline;
+                    continue;
+                }
+                let now = Instant::now();
+                if let Some(b) = backend.as_mut() {
+                    if running && now >= health_at {
+                        health_at = now + HEALTH_CHECK_PERIOD;
+                        if b.needs_restart() {
+                            tracing::info!("Audio loopback restarting (device or stream changed)");
+                            b.stop();
+                            running = false;
+                            retry_at = now;
+                        }
+                    }
+                    if !running && now >= retry_at {
+                        match b.start(Arc::clone(&ring_for_thread)) {
+                            Ok(sr) => {
+                                running = true;
+                                warned = false;
+                                health_at = now + HEALTH_CHECK_PERIOD;
+                                if sr > 0.0 {
+                                    if (sr - sample_rate).abs() > f32::EPSILON {
+                                        sample_rate = sr;
+                                        ticker = AudioTicker::new(
+                                            Arc::clone(&ring_for_thread),
+                                            sample_rate,
+                                        );
+                                    }
+                                } else {
+                                    tracing::warn!("Audio loopback reported invalid sample rate");
+                                }
+                            }
+                            Err(e) => {
+                                if !warned {
+                                    tracing::warn!("Audio loopback start failed: {e}");
+                                    warned = true;
+                                }
+                                retry_at = now + RESTART_BACKOFF;
+                            }
+                        }
+                    }
+                }
+                // 60 Hz tick even during WASAPI silence (no callbacks).
+                next_deadline += TICK_PERIOD;
+                let now = Instant::now();
+                if let Some(wait) = next_deadline.checked_duration_since(now) {
+                    std::thread::park_timeout(wait);
+                } else {
+                    next_deadline = now; // fell behind; don't burst
+                }
+                let gain = f32::from_bits(sensitivity_gain.load(Ordering::Relaxed));
+                latest_frame.store(Arc::new(ticker.tick(gain)));
             }
-        }
+            if let Some(b) = backend.as_mut() {
+                b.stop();
+            }
+        })
+        .expect("spawn the audio analyzer thread");
 
-        let mut ticker = AudioTicker::new(ring_for_thread, sample_rate);
-        let mut next_deadline = Instant::now();
-        while !stop_for_thread.load(Ordering::Relaxed) {
-            if all_monitors_paused.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(250));
-                next_deadline = Instant::now();
-                continue;
-            }
-            // 60 Hz tick even during WASAPI silence (no callbacks).
-            next_deadline += TICK_PERIOD;
-            let now = Instant::now();
-            if let Some(wait) = next_deadline.checked_duration_since(now) {
-                std::thread::sleep(wait);
-            } else {
-                next_deadline = now; // fell behind; don't burst
-            }
-            let gain = f32::from_bits(sensitivity_gain.load(Ordering::Relaxed));
-            latest_frame.store(Arc::new(ticker.tick(gain)));
-        }
-    });
-
-    AudioWorkerHandle { ring, stop }
+    AudioWorkerHandle {
+        ring,
+        shared: Arc::new(WorkerShared {
+            stop,
+            waker: thread.thread().clone(),
+            thread: Mutex::new(Some(thread)),
+        }),
+    }
 }
 
-/// Starts cross-platform loopback capture:
+/// Starts cross-platform loopback capture with an explicit stop handle for runtime ownership
+/// (dropping the last clone of the handle stops and joins the worker):
 /// - Windows: WASAPI Loopback (`host.default_output_device()` opened as an input stream).
 /// - macOS: Virtual loopback audio device (`BlackHole` / `Loopback` / `Soundflower`) without ever
 ///   activating the hardware microphone, plus an external PCM injector handle
 ///   (`Arc<Mutex<StereoRingBuffer>>`) so `ScreenCaptureKit` can push native system audio directly.
 /// - Other platforms: no capture; the ring can still be fed externally.
-pub fn spawn_audio_loopback_worker(
-    latest_frame: Arc<ArcSwap<AudioSpectrumFrame>>,
-    sensitivity_gain: Arc<AtomicU32>, // f32::to_bits
-    all_monitors_paused: Arc<AtomicBool>,
-) -> Arc<Mutex<StereoRingBuffer>> {
-    spawn_audio_worker(
-        default_backend,
-        latest_frame,
-        sensitivity_gain,
-        all_monitors_paused,
-    )
-    .ring
-}
-
-/// Starts loopback capture with an explicit stop handle for runtime ownership.
-/// The legacy ring-only helper remains available for external PCM injectors.
 pub fn start_audio_loopback_worker(
     latest_frame: Arc<ArcSwap<AudioSpectrumFrame>>,
     sensitivity_gain: Arc<AtomicU32>,
@@ -399,25 +482,47 @@ mod cpal_backend {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::SampleFormat;
     use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    /// Holds the live `cpal::Stream` (kept alive for as long as the backend exists).
+    /// Holds the live `cpal::Stream` (kept alive until [`LoopbackBackend::stop`]).
     #[derive(Default)]
     pub struct CpalLoopbackBackend {
         stream: Option<cpal::Stream>,
+        /// Name of the device the stream was opened on.
+        device_name: Option<String>,
+        /// Set by the stream error callback (device unplugged, format change).
+        failed: Arc<AtomicBool>,
     }
 
     impl LoopbackBackend for CpalLoopbackBackend {
         fn start(&mut self, ring: Arc<Mutex<StereoRingBuffer>>) -> anyhow::Result<f32> {
+            self.stop();
             let host = cpal::default_host();
             let (device, config) = find_device(&host)
                 .ok_or_else(|| anyhow::anyhow!("no loopback audio device available"))?;
             let sample_rate = config.sample_rate().0 as f32;
-            let stream = build_capture_stream(&device, &config, ring)
+            self.failed.store(false, Ordering::Relaxed);
+            let stream = build_capture_stream(&device, &config, ring, Arc::clone(&self.failed))
                 .ok_or_else(|| anyhow::anyhow!("unsupported loopback sample format"))?;
             stream.play()?;
+            self.device_name = device.name().ok();
             self.stream = Some(stream);
             Ok(sample_rate)
+        }
+
+        fn stop(&mut self) {
+            self.stream = None;
+        }
+
+        fn needs_restart(&mut self) -> bool {
+            if self.failed.load(Ordering::Relaxed) {
+                return true;
+            }
+            // The default device (Windows) / first loopback device (macOS) changed.
+            let host = cpal::default_host();
+            let current = find_device(&host).and_then(|(device, _)| device.name().ok());
+            current != self.device_name
         }
     }
 
@@ -456,10 +561,14 @@ mod cpal_backend {
         device: &cpal::Device,
         config: &cpal::SupportedStreamConfig,
         ring: Arc<Mutex<StereoRingBuffer>>,
+        failed: Arc<AtomicBool>,
     ) -> Option<cpal::Stream> {
         let channels = config.channels() as usize;
         let stream_config: cpal::StreamConfig = config.clone().into();
-        let err_fn = |err| tracing::warn!("Audio loopback stream error: {err}");
+        let err_fn = move |err: cpal::StreamError| {
+            tracing::warn!("Audio loopback stream error: {err}");
+            failed.store(true, Ordering::Relaxed);
+        };
 
         match config.sample_format() {
             SampleFormat::F32 => device
@@ -735,5 +844,133 @@ mod tests {
             "frame must return to zeros without further callbacks"
         );
         handle.stop();
+    }
+
+    /// Counts how the worker drives a backend.
+    #[derive(Default)]
+    struct Counters {
+        starts: std::sync::atomic::AtomicUsize,
+        stops: std::sync::atomic::AtomicUsize,
+        restart: AtomicBool,
+        dropped: AtomicBool,
+    }
+
+    struct MockBackend {
+        counters: Arc<Counters>,
+        fail_starts: usize,
+    }
+
+    impl LoopbackBackend for MockBackend {
+        fn start(&mut self, _ring: Arc<Mutex<StereoRingBuffer>>) -> anyhow::Result<f32> {
+            if self.fail_starts > 0 {
+                self.fail_starts -= 1;
+                anyhow::bail!("device busy");
+            }
+            self.counters.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(44_100.0)
+        }
+        fn stop(&mut self) {
+            self.counters.stops.fetch_add(1, Ordering::SeqCst);
+        }
+        fn needs_restart(&mut self) -> bool {
+            self.counters.restart.swap(false, Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for MockBackend {
+        fn drop(&mut self) {
+            self.counters.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn spawn_mock(
+        counters: &Arc<Counters>,
+        fail_starts: usize,
+        paused: &Arc<AtomicBool>,
+    ) -> AudioWorkerHandle {
+        let c = Arc::clone(counters);
+        spawn_audio_worker(
+            move || {
+                Some(Box::new(MockBackend {
+                    counters: c,
+                    fail_starts,
+                }) as Box<dyn LoopbackBackend>)
+            },
+            Arc::default(),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Arc::clone(paused),
+        )
+    }
+
+    #[test]
+    fn worker_releases_the_device_while_paused_and_reopens_on_resume() {
+        let counters = Arc::new(Counters::default());
+        let paused = Arc::new(AtomicBool::new(false));
+        let worker = spawn_mock(&counters, 0, &paused);
+        wait_for("first start", || {
+            counters.starts.load(Ordering::SeqCst) == 1
+        });
+        paused.store(true, Ordering::SeqCst);
+        wait_for("device release", || {
+            counters.stops.load(Ordering::SeqCst) == 1
+        });
+        assert_eq!(counters.starts.load(Ordering::SeqCst), 1);
+        paused.store(false, Ordering::SeqCst);
+        wait_for("restart on resume", || {
+            counters.starts.load(Ordering::SeqCst) == 2
+        });
+        drop(worker);
+    }
+
+    #[test]
+    fn worker_restarts_after_a_stream_error_or_device_change() {
+        let counters = Arc::new(Counters::default());
+        let paused = Arc::new(AtomicBool::new(false));
+        let worker = spawn_mock(&counters, 0, &paused);
+        wait_for("first start", || {
+            counters.starts.load(Ordering::SeqCst) == 1
+        });
+        counters.restart.store(true, Ordering::SeqCst);
+        wait_for("restart", || counters.starts.load(Ordering::SeqCst) == 2);
+        assert!(counters.stops.load(Ordering::SeqCst) >= 1);
+        drop(worker);
+    }
+
+    #[test]
+    fn worker_retries_a_failed_start() {
+        let counters = Arc::new(Counters::default());
+        let paused = Arc::new(AtomicBool::new(false));
+        let worker = spawn_mock(&counters, 1, &paused);
+        wait_for("retry after failure", || {
+            counters.starts.load(Ordering::SeqCst) == 1
+        });
+        drop(worker);
+    }
+
+    #[test]
+    fn dropping_the_last_handle_stops_and_joins_the_worker() {
+        let counters = Arc::new(Counters::default());
+        let paused = Arc::new(AtomicBool::new(false));
+        let worker = spawn_mock(&counters, 0, &paused);
+        let clone = worker.clone();
+        wait_for("start", || counters.starts.load(Ordering::SeqCst) == 1);
+        drop(worker);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !counters.dropped.load(Ordering::SeqCst),
+            "a live clone keeps the worker running"
+        );
+        drop(clone);
+        // Drop joined the thread: the backend was stopped and released already.
+        assert!(counters.dropped.load(Ordering::SeqCst));
+        assert!(counters.stops.load(Ordering::SeqCst) >= 1);
     }
 }

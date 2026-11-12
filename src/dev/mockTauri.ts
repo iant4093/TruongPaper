@@ -279,6 +279,8 @@ export function createMockBackend(
     launchAtLogin: true,
     syncLockScreen: false,
     multiMonitorMode: 'independent',
+    nextHotkey: 'CmdOrCtrl+Alt+Right',
+    pauseHotkey: 'CmdOrCtrl+Alt+P',
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });
@@ -676,6 +678,15 @@ export function createMockBackend(
       const paused = Boolean(args.paused);
       monitors = monitors.map((m) => monitorId === null || m.monitorId === monitorId ? { ...m, userPaused: paused } : m);
       emitEvent('playback://pause-changed', { monitorId, paused });
+      return null;
+    },
+
+    monitor_set_volume: (args) => {
+      const monitorId = String(args.monitorId);
+      const volume = Number(args.volume);
+      if (!Number.isFinite(volume) || volume < 0 || volume > 1) throw new Error('Volume must be between 0 and 1');
+      if (!monitors.some((m) => m.monitorId === monitorId)) throw new Error(`Monitor '${monitorId}' is not connected`);
+      monitors = monitors.map((m) => (m.monitorId === monitorId ? { ...m, volume } : m));
       return null;
     },
 

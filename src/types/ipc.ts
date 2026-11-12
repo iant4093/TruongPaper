@@ -178,6 +178,8 @@ export interface MonitorInfo {
   userPaused: boolean;
   activeSource: WallpaperSource;
   activeWallpaperId: string | null;
+  /** Per-display output volume 0..1 (multiplies the wallpaper's own volume); omitted = 1. */
+  volume?: number;
 }
 
 export interface PlaybackPauseChanged {
@@ -214,6 +216,10 @@ export interface AppSettings {
   launchAtLogin: boolean;
   syncLockScreen: boolean;
   multiMonitorMode: 'independent' | 'span';
+  /** Global shortcut (Tauri accelerator, e.g. `CmdOrCtrl+Alt+Right`) for Next wallpaper; empty = disabled. */
+  nextHotkey: string;
+  /** Global shortcut for Pause / Resume all displays; empty = disabled. */
+  pauseHotkey: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +265,7 @@ export const IPC_COMMANDS = [
   'wallpaper_save_preset',
   'wallpaper_apply_preset',
   'playback_set_paused',
+  'monitor_set_volume',
   // Playlists, Auto-Updater & Global Settings
   'playlist_list',
   'playlist_save',

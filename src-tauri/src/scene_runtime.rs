@@ -310,11 +310,6 @@ impl SceneRuntime {
         &self.skipped_slots
     }
 
-    /// Human-readable non-fatal problems of this scene (stub; a later change fills it in).
-    pub fn diagnostics(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Advances the scene by `dt` seconds. `cursor_norm` is the cursor on this monitor in
     /// `[0,1]` with a top-left origin; `left_64` / `right_64` are
     /// `AudioSpectrumFrame::{left_64, right_64}`. Returns `false` (and does nothing) while

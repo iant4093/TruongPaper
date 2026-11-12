@@ -2097,6 +2097,7 @@ invoke<void>('monitor_update_adjustments', { wallpaperId: string, adjustments: U
 invoke<WallpaperPreset>('wallpaper_save_preset', { wallpaperId: string, presetName: string });
 invoke<void>('wallpaper_apply_preset', { wallpaperId: string, presetId: string });
 invoke<void>('playback_set_paused', { monitorId?: string, paused: boolean });
+invoke<void>('monitor_set_volume', { monitorId: string, volume: number }); // 0..1, multiplies the wallpaper volume; only the sound owner of a wallpaper is audible
 
 // --- Playlists, Auto-Updater & Global Settings Commands ---
 invoke<Playlist[]>('playlist_list');

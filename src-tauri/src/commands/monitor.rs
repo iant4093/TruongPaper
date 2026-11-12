@@ -307,14 +307,17 @@ async fn start_wallpaper_runtime(
                 (
                     WebviewKind::Web,
                     truongpaper_renderer::web_wallpaper_url(&project_file),
-                    format!(
-                        "{}{}",
-                        wallpaper_webview::web_volume_script(adjustments.volume, adjustments.muted),
-                        web_properties_js(&props)?
-                    ),
+                    // Volume is owned by the webview bridge (sound owner x display volume);
+                    // the page starts silent.
+                    web_properties_js(&props)?,
                 )
             } else {
-                let adj_json = serde_json::to_string(&adjustments).map_err(|e| e.to_string())?;
+                // Starts muted; the webview bridge sets the real sound once the page loaded.
+                let silent = UniversalAdjustments {
+                    muted: true,
+                    ..adjustments
+                };
+                let adj_json = serde_json::to_string(&silent).map_err(|e| e.to_string())?;
                 (
                     WebviewKind::Video,
                     truongpaper_renderer::video_host_url(&project_file),
@@ -513,18 +516,8 @@ pub(crate) fn forward_adjustments(
         *adjustments,
         adjustments.compositor_uniforms(transition),
     );
-    wallpaper_webview::eval_for_wallpaper(
-        wallpaper_id,
-        WebviewKind::Web,
-        &wallpaper_webview::web_volume_script(adjustments.volume, adjustments.muted),
-    );
-    match serde_json::to_string(adjustments)
-        .map_err(|e| e.to_string())
-        .and_then(|json| truongpaper_renderer::video_adjustments_js(&json))
-    {
-        Ok(js) => wallpaper_webview::eval_for_wallpaper(wallpaper_id, WebviewKind::Video, &js),
-        Err(err) => tracing::warn!("adjustments for {wallpaper_id}: {err}"),
-    }
+    // Web / Video sound (volume, mute, playback speed) is pushed by the webview bridge from the
+    // host state updated above, so the sound owner and display volume rules always apply.
 }
 
 /// Updates the source assignment and fit mode for the photo about to be shown.
@@ -734,6 +727,7 @@ pub async fn monitors_list(
         .into_iter()
         .map(|m| {
             let runtime = state.host.monitor(&m.id).filter(|rt| rt.generation != 0);
+            let volume = state.host.monitor_volume(&m.id);
             MonitorInfo {
                 active_source: runtime
                     .as_ref()
@@ -750,6 +744,7 @@ pub async fn monitors_list(
                 scale_factor: m.scale_factor,
                 refresh_rate_hz: DEFAULT_REFRESH_RATE_HZ,
                 is_primary: m.is_primary,
+                volume: Some(volume),
             }
         })
         .collect())
@@ -814,15 +809,56 @@ pub async fn playback_set_paused(
     monitor_id: Option<String>,
     paused: bool,
 ) -> Result<(), String> {
+    apply_user_pause(&app, &state, monitor_id, paused)
+}
+
+/// Sets the user pause of one display (`Some`) or all displays (`None`), persists it and emits
+/// `playback://pause-changed`. Shared by the IPC command, the tray menu and the global hotkey.
+/// Unknown display ids are rejected.
+pub(crate) fn apply_user_pause(
+    app: &AppHandle,
+    state: &AppState,
+    monitor_id: Option<String>,
+    paused: bool,
+) -> Result<(), String> {
     if let Some(id) = &monitor_id {
         validate_monitor_id(id)?;
+        ensure_live_monitor(app, id)?;
     }
     state.host.set_user_paused(monitor_id.as_deref(), paused);
+    if let Err(err) =
+        crate::controls::persist_pause(&state.db.lock(), monitor_id.as_deref(), paused)
+    {
+        tracing::warn!("cannot persist the pause state: {err}");
+    }
     let _ = app.emit(
         EVENT_PLAYBACK_PAUSE_CHANGED,
         PlaybackPauseChanged { monitor_id, paused },
     );
     Ok(())
+}
+
+fn ensure_live_monitor(app: &AppHandle, monitor_id: &str) -> Result<(), String> {
+    if live_monitors(app).iter().any(|m| m.id == monitor_id) {
+        Ok(())
+    } else {
+        Err(format!("Monitor '{monitor_id}' is not connected"))
+    }
+}
+
+/// Per-display output volume `0..=1`; the played volume is the wallpaper's volume times this.
+#[tauri::command]
+pub async fn monitor_set_volume(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    monitor_id: String,
+    volume: f32,
+) -> Result<(), String> {
+    validate_monitor_id(&monitor_id)?;
+    let volume = crate::controls::validate_volume(volume)?;
+    ensure_live_monitor(&app, &monitor_id)?;
+    state.host.set_monitor_volume(&monitor_id, volume);
+    crate::controls::persist_monitor_volume(&state.db.lock(), &monitor_id, volume)
 }
 
 #[cfg(test)]

@@ -150,6 +150,8 @@ pub struct MonitorRuntime {
     pub adjustments: UniversalAdjustments,
     /// `project.json` declares audio processing (drives the system-audio loopback worker).
     pub audio_reactive: bool,
+    /// Per-display output volume `0..=1`; multiplies `adjustments.volume`.
+    pub monitor_volume: f32,
 }
 
 impl Default for MonitorRuntime {
@@ -165,11 +167,19 @@ impl Default for MonitorRuntime {
             presented_generation: 0,
             adjustments: UniversalAdjustments::default(),
             audio_reactive: false,
+            monitor_volume: 1.0,
         }
     }
 }
 
 impl MonitorRuntime {
+    /// `adjustments` with the volume scaled by the display volume (what is actually played).
+    pub fn effective_adjustments(&self) -> UniversalAdjustments {
+        let mut adjustments = self.adjustments;
+        adjustments.volume = (adjustments.volume * self.monitor_volume).clamp(0.0, 1.0);
+        adjustments
+    }
+
     /// Should the render loop advance frames for this monitor?
     pub fn should_render(&self) -> bool {
         !self.user_paused && !self.policy.is_paused()
@@ -546,6 +556,63 @@ impl WallpaperHost {
                 }
             }
         }
+    }
+
+    /// Sets the per-display volume (`0..=1`, callers validate).
+    pub fn set_monitor_volume(&self, monitor_id: &str, volume: f32) {
+        let global = *self.global_paused.lock();
+        self.monitors
+            .lock()
+            .entry(monitor_id.to_string())
+            .or_insert_with(|| MonitorRuntime {
+                user_paused: global,
+                ..MonitorRuntime::default()
+            })
+            .monitor_volume = volume;
+    }
+
+    pub fn monitor_volume(&self, monitor_id: &str) -> f32 {
+        self.monitors
+            .lock()
+            .get(monitor_id)
+            .map_or(1.0, |rt| rt.monitor_volume)
+    }
+
+    /// Adjustments to play on every monitor showing a Web / Video wallpaper: the same wallpaper
+    /// on several displays is heard once (see [`crate::desktop_host::sound_owners`]); the other
+    /// copies are muted. The owner's volume is scaled by its display volume.
+    pub fn webview_audio_adjustments(
+        &self,
+        playing: impl Fn(&str) -> bool,
+    ) -> HashMap<String, UniversalAdjustments> {
+        let snapshot: Vec<(String, MonitorRuntime)> = self
+            .monitors_snapshot()
+            .into_iter()
+            .filter(|(_, rt)| matches!(rt.active, ActiveRuntime::Webview { .. }))
+            .collect();
+        let keys: Vec<Option<(String, bool)>> = snapshot
+            .iter()
+            .map(|(id, rt)| {
+                let ActiveRuntime::Webview { kind, .. } = &rt.active else {
+                    return None;
+                };
+                let key = match &rt.wallpaper_id {
+                    Some(wallpaper) => format!("{kind:?}|{wallpaper}"),
+                    None => format!("{kind:?}#{id}"),
+                };
+                Some((key, playing(id)))
+            })
+            .collect();
+        let owners = crate::desktop_host::sound_owners(&keys);
+        snapshot
+            .into_iter()
+            .zip(owners)
+            .map(|((id, rt), owner)| {
+                let mut adjustments = rt.effective_adjustments();
+                adjustments.muted |= !owner;
+                (id, adjustments)
+            })
+            .collect()
     }
 
     pub fn set_policy(&self, monitor_id: &str, policy: MonitorPlaybackPolicy) {
@@ -959,5 +1026,79 @@ mod tests {
             None,
             "unplugged B no longer demands audio"
         );
+    }
+
+    fn webview(kind: WebviewKind, monitor: &str) -> ActiveRuntime {
+        ActiveRuntime::Webview {
+            kind,
+            label: format!("wallpaper-{monitor}"),
+            preview_path: None,
+        }
+    }
+
+    #[test]
+    fn monitor_volume_scales_the_wallpaper_volume() {
+        let host = WallpaperHost::new();
+        let adj = UniversalAdjustments {
+            volume: 0.8,
+            ..UniversalAdjustments::default()
+        };
+        host.set_runtime("A", scene(), adj, false);
+        assert_eq!(host.monitor_volume("A"), 1.0);
+        host.set_monitor_volume("A", 0.5);
+        let rt = host.monitor("A").unwrap();
+        assert!((rt.effective_adjustments().volume - 0.4).abs() < 1e-6);
+        assert_eq!(rt.adjustments.volume, 0.8, "stored volume is untouched");
+        // A new wallpaper on the display keeps the display volume.
+        host.set_runtime("A", scene(), adj, false);
+        assert_eq!(host.monitor_volume("A"), 0.5);
+        // A display volume set before its first wallpaper honors "pause all".
+        host.set_user_paused(None, true);
+        host.set_monitor_volume("B", 0.2);
+        assert!(host.monitor("B").unwrap().user_paused);
+    }
+
+    #[test]
+    fn same_webview_wallpaper_on_two_displays_is_heard_once() {
+        let host = WallpaperHost::new();
+        let adj = UniversalAdjustments {
+            volume: 0.6,
+            ..UniversalAdjustments::default()
+        };
+        for id in ["A", "B"] {
+            host.set_source(
+                id,
+                crate::models::WallpaperSource::Workshop {
+                    wallpaper_id: "w1".into(),
+                },
+                Some("w1".into()),
+                Default::default(),
+            );
+            host.set_runtime(id, webview(WebviewKind::Web, id), adj, false);
+        }
+        host.set_source(
+            "C",
+            crate::models::WallpaperSource::Workshop {
+                wallpaper_id: "w2".into(),
+            },
+            Some("w2".into()),
+            Default::default(),
+        );
+        host.set_runtime("C", webview(WebviewKind::Video, "C"), adj, false);
+        host.set_monitor_volume("A", 0.5);
+        let all = |_: &str| true;
+        let levels = host.webview_audio_adjustments(all);
+        assert!(!levels["A"].muted);
+        assert!((levels["A"].volume - 0.3).abs() < 1e-6);
+        assert!(levels["B"].muted, "second copy is silent");
+        assert!(!levels["C"].muted, "a different wallpaper keeps its sound");
+        // The owner moves to a playing display when the first one is paused.
+        let levels = host.webview_audio_adjustments(|id| id != "A");
+        assert!(levels["A"].muted);
+        assert!(!levels["B"].muted);
+        // When every copy is paused the first display keeps ownership.
+        let levels = host.webview_audio_adjustments(|_| false);
+        assert!(!levels["A"].muted);
+        assert!(levels["B"].muted);
     }
 }

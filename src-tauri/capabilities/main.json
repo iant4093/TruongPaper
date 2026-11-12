@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Default capabilities for TruongPaper Main Studio and Tray Popover windows",
+  "identifier": "main",
+  "description": "Capabilities of the TruongPaper Studio window",
   "windows": [
-    "main",
-    "tray-popover"
+    "main"
   ],
   "permissions": [
     "core:default",
@@ -60,6 +59,7 @@
     "allow-wallpaper-save-preset",
     "allow-wallpaper-apply-preset",
     "allow-playback-set-paused",
+    "allow-monitor-set-volume",
     "allow-playlist-list",
     "allow-playlist-save",
     "allow-settings-get",

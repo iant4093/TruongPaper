@@ -36,6 +36,8 @@ pub const AUDIO_PUSH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 /// Bridge tick while a webview wallpaper is playing / while idle.
 const ACTIVE_TICK: Duration = Duration::from_millis(16);
 const IDLE_TICK: Duration = Duration::from_millis(250);
+/// Bridge tick while only Video windows (or paused pages) exist: keeps volume edits responsive.
+const WINDOW_TICK: Duration = Duration::from_millis(50);
 const GEOMETRY_REFRESH: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const REVEAL_DURATION: Duration = Duration::from_millis(210);
@@ -105,6 +107,46 @@ pub fn plan_pause_updates(
             let paused = !playing(&w.monitor_id);
             (w.paused_sent != Some(paused))
                 .then(|| (w.label.clone(), pause_script(w.kind, paused), paused))
+        })
+        .collect()
+}
+
+/// Volume state of one webview window as tracked by the bridge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAudioState {
+    pub monitor_id: String,
+    pub label: String,
+    pub kind: WebviewKind,
+    pub loaded: bool,
+    pub audio_sent: Option<String>,
+}
+
+/// Script that sets the sound of a webview wallpaper from its effective adjustments (volume
+/// already scaled by the display volume, `muted` set for non-owners).
+pub fn audio_script(
+    kind: WebviewKind,
+    adjustments: &crate::models::UniversalAdjustments,
+) -> String {
+    match kind {
+        WebviewKind::Web => web_volume_script(adjustments.volume, adjustments.muted),
+        WebviewKind::Video => serde_json::to_string(adjustments)
+            .map_err(|e| e.to_string())
+            .and_then(|json| truongpaper_renderer::video_adjustments_js(&json))
+            .unwrap_or_else(|_| web_volume_script(0.0, true)),
+    }
+}
+
+/// `(label, script)` for every loaded window whose desired sound differs from the last one sent.
+pub fn plan_audio_updates(
+    windows: &[WindowAudioState],
+    adjustments: &HashMap<String, crate::models::UniversalAdjustments>,
+) -> Vec<(String, String)> {
+    windows
+        .iter()
+        .filter(|w| w.loaded)
+        .filter_map(|w| {
+            let script = audio_script(w.kind, adjustments.get(&w.monitor_id)?);
+            (w.audio_sent.as_deref() != Some(script.as_str())).then(|| (w.label.clone(), script))
         })
         .collect()
 }
@@ -212,6 +254,8 @@ struct WebWindow {
     loaded: bool,
     preview_ready_at: Instant,
     paused_sent: Option<bool>,
+    /// Last volume / mute script sent to the page (`None` = never sent since load).
+    audio_sent: Option<String>,
     /// Logical rect of the window (its monitor's rect when it was last placed).
     logical: LogicalRect,
     /// CSS pixel size of the page (logical monitor size) for cursor coordinates.
@@ -281,6 +325,10 @@ pub async fn show(
     if let Some(label) = reuse {
         host.set_webview_vfs(&label, &spec.wallpaper_id, vfs);
         activate(label.clone())?;
+        if let Some(w) = WINDOWS.lock().get_mut(&spec.monitor_id) {
+            // The page keeps its volume, but re-sent scripts may reset it: resend ours.
+            w.audio_sent = None;
+        }
         for js in &spec.on_load_scripts {
             eval(app, &label, js);
         }
@@ -429,6 +477,7 @@ pub async fn show(
             loaded: loaded.load(Ordering::Acquire),
             preview_ready_at,
             paused_sent: None,
+            audio_sent: None,
             logical: (lx, ly, lw, lh),
             css_size: (lw, lh),
             last_cursor: None,
@@ -714,7 +763,11 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
         }
 
         // 2. Audio loopback worker runs only while an audio-reactive wallpaper plays.
-        crate::audio_bridge::set_demand(host.audio_demand());
+        crate::audio_bridge::set_demand(if crate::power::rendering_suspended() {
+            None
+        } else {
+            host.audio_demand()
+        });
 
         // 3. Pause / resume (user pause + Smart Pause).
         let states: Vec<WindowPauseState> = WINDOWS
@@ -734,6 +787,29 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
             eval(&app, &label, &js);
             if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
                 w.paused_sent = Some(paused);
+            }
+        }
+
+        // 3b. Volume: one sound owner per wallpaper, scaled by the display volume.
+        let audio_states: Vec<WindowAudioState> = WINDOWS
+            .lock()
+            .iter()
+            .map(|(id, w)| WindowAudioState {
+                monitor_id: id.clone(),
+                label: w.label.clone(),
+                kind: w.kind,
+                loaded: w.loaded,
+                audio_sent: w.audio_sent.clone(),
+            })
+            .collect();
+        let has_windows = !audio_states.is_empty();
+        if audio_states.iter().any(|w| w.loaded) {
+            let adjustments = host.webview_audio_adjustments(playing);
+            for (label, script) in plan_audio_updates(&audio_states, &adjustments) {
+                eval(&app, &label, &script);
+                if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
+                    w.audio_sent = Some(script);
+                }
             }
         }
 
@@ -780,10 +856,12 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
             }
         }
 
-        std::thread::sleep(if live.is_empty() {
-            IDLE_TICK
-        } else {
+        std::thread::sleep(if !live.is_empty() {
             ACTIVE_TICK
+        } else if has_windows {
+            WINDOW_TICK
+        } else {
+            IDLE_TICK
         });
     }
     close_all();
@@ -944,6 +1022,7 @@ mod tests {
             loaded: true,
             preview_ready_at: Instant::now(),
             paused_sent: None,
+            audio_sent: None,
             logical: (0.0, 0.0, 100.0, 100.0),
             css_size: (100.0, 100.0),
             last_cursor: None,
@@ -989,5 +1068,53 @@ mod tests {
         host.note_presented("A", generation);
         assert!(!keep_outgoing_window(host.monitor("A").as_ref(), true));
         assert!(!window_matches_host(&window, None));
+    }
+
+    #[test]
+    fn audio_updates_follow_owner_and_volume_changes() {
+        let mut adj = std::collections::HashMap::new();
+        let loud = UniversalAdjustments {
+            volume: 0.5,
+            ..UniversalAdjustments::default()
+        };
+        adj.insert("A".to_string(), loud);
+        adj.insert(
+            "B".to_string(),
+            UniversalAdjustments {
+                muted: true,
+                ..loud
+            },
+        );
+        let state = |id: &str, kind, loaded, sent: Option<String>| WindowAudioState {
+            monitor_id: id.into(),
+            label: format!("wallpaper-{id}"),
+            kind,
+            loaded,
+            audio_sent: sent,
+        };
+        let windows = [
+            state("A", WebviewKind::Web, true, None),
+            state("B", WebviewKind::Web, true, None),
+            state("C", WebviewKind::Web, false, None),
+            state("D", WebviewKind::Web, true, None),
+        ];
+        let plan = plan_audio_updates(&windows, &adj);
+        assert_eq!(
+            plan,
+            vec![
+                ("wallpaper-A".to_string(), web_volume_script(0.5, false)),
+                ("wallpaper-B".to_string(), web_volume_script(0.5, true)),
+            ],
+            "unloaded windows and windows without host state are skipped"
+        );
+        let synced = [
+            state("A", WebviewKind::Web, true, Some(plan[0].1.clone())),
+            state("B", WebviewKind::Web, true, Some(plan[1].1.clone())),
+        ];
+        assert!(plan_audio_updates(&synced, &adj).is_empty());
+        let video = plan_audio_updates(&[state("A", WebviewKind::Video, true, None)], &adj);
+        assert!(video[0]
+            .1
+            .starts_with("window.__truongpaper_apply_video_adjustments("));
     }
 }

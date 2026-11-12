@@ -1,6 +1,7 @@
 // src-tauri/src/lib.rs
 pub mod audio_bridge;
 pub mod commands;
+pub mod controls;
 pub mod db;
 pub mod desktop_host;
 pub mod host;
@@ -44,6 +45,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let state = AppState::new(conn, app_data_dir.clone(), http.clone());
+    // Pause and display volumes survive restarts; restore them before any renderer starts.
+    controls::restore_persisted(&state.db.lock(), &state.host);
+    let hotkeys = {
+        let s = state.settings.lock();
+        (s.next_hotkey.clone(), s.pause_hotkey.clone())
+    };
     let photo =
         PhotoServiceState::new(state.db.clone(), app_data_dir, http, state.settings.clone());
     let (settings, host) = (state.settings.clone(), state.host.clone());
@@ -51,6 +58,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(photo);
 
     tray::setup_system_tray(app.handle())?;
+    if let Err(err) = controls::apply_hotkeys(app.handle(), &hotkeys.0, &hotkeys.1) {
+        tracing::warn!("global hotkeys not registered: {err}");
+    }
     power::start(app.handle());
     smart_pause::spawn(app.handle().clone(), settings.clone(), host.clone());
     // Live runtimes: Web / Video webview windows + their bridge, then the desktop render thread
@@ -93,6 +103,13 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    controls::on_shortcut(app, shortcut, event.state());
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_studio(app);
         }))
@@ -164,6 +181,7 @@ pub fn run() {
             commands::library::wallpaper_save_preset,
             commands::library::wallpaper_apply_preset,
             commands::monitor::playback_set_paused,
+            commands::monitor::monitor_set_volume,
             // --- Playlists, Auto-Updater & Global Settings ---
             commands::playlist::playlist_list,
             commands::playlist::playlist_save,
@@ -232,7 +250,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 41, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 42, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 
@@ -277,9 +295,30 @@ mod tests {
             .collect();
         assert_eq!(labels, ["main", "tray-popover"]);
 
-        let caps: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        assert_eq!(caps["windows"], serde_json::json!(["main", "tray-popover"]));
+        assert_eq!(
+            capability(include_str!("../capabilities/main.json"))["windows"],
+            serde_json::json!(["main"])
+        );
+        assert_eq!(
+            capability(include_str!("../capabilities/tray.json"))["windows"],
+            serde_json::json!(["tray-popover"])
+        );
+    }
+
+    fn capability(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    /// `allow-<command>` permissions granted by a capability file.
+    fn granted_commands(text: &str) -> BTreeSet<String> {
+        capability(text)["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .filter(|p| p.starts_with("allow-"))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Command names in the `APP_COMMANDS` app ACL manifest of `build.rs`.
@@ -304,21 +343,51 @@ mod tests {
         // grant a permission for nothing.
         assert_eq!(manifest_commands(), registered_commands());
 
-        let caps: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let granted: BTreeSet<String> = caps["permissions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|p| p.as_str())
-            .filter(|p| p.starts_with("allow-"))
-            .map(str::to_string)
-            .collect();
+        let granted = granted_commands(include_str!("../capabilities/main.json"));
         let expected: BTreeSet<String> = registered_commands()
             .iter()
             .map(|c| format!("allow-{}", c.replace('_', "-")))
             .collect();
         assert_eq!(granted, expected);
+    }
+
+    #[test]
+    fn tray_capability_is_a_small_subset_of_studio() {
+        let studio = granted_commands(include_str!("../capabilities/main.json"));
+        let tray_text = include_str!("../capabilities/tray.json");
+        let tray = granted_commands(tray_text);
+        assert!(tray.is_subset(&studio));
+        // What TrayApp / the store call from the popover; anything else must stay Studio-only.
+        let needed: BTreeSet<String> = [
+            "photo_get_status",
+            "photo_rotate_next",
+            "photo_set_favorite",
+            "photo_blacklist_and_skip",
+            "steam_account",
+            "library_list_wallpapers",
+            "monitors_list",
+            "monitor_apply_wallpaper",
+            "playback_set_paused",
+            "playlist_list",
+            "settings_get",
+            "settings_update",
+        ]
+        .iter()
+        .map(|c| format!("allow-{}", c.replace('_', "-")))
+        .collect();
+        assert_eq!(tray, needed);
+        let all = capability(tray_text)["permissions"].to_string();
+        for forbidden in [
+            "dialog:",
+            "updater:",
+            "autostart:",
+            "process:",
+            "allow-close",
+            "allow-minimize",
+            "shell:default",
+        ] {
+            assert!(!all.contains(forbidden), "tray must not grant {forbidden}");
+        }
     }
 
     #[test]

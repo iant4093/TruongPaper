@@ -1461,7 +1461,9 @@ impl MonitorRenderer {
             base.span_scale_x = span.scale[0];
             base.span_scale_y = span.scale[1];
         }
-        let adjustments = rt.map(|r| r.adjustments).unwrap_or_default();
+        let adjustments = rt
+            .map(MonitorRuntime::effective_adjustments)
+            .unwrap_or_default();
         if let Content::Scene(scene) = &mut self.content {
             scene.set_paused(!should_render);
             scene.set_sound_owner(sound_owner);
@@ -1712,7 +1714,7 @@ fn load_scene(
 ) -> anyhow::Result<SceneState> {
     let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
     let monitor_size = [config.width as f32, config.height as f32];
-    let runtime = SceneRuntime::load(
+    let mut runtime = SceneRuntime::load(
         &vfs,
         &desc.scene_file,
         Some(&desc.user_properties_json),
@@ -1747,10 +1749,14 @@ fn load_scene(
     let mut renderer =
         SceneRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, scene_size);
     let load_warnings = renderer.load(device, queue, &vfs, runtime.graph());
+    // Skipped effect passes and shader fallbacks join the scene report.
+    runtime.add_diagnostics(renderer.diagnostics());
     for warning in &load_warnings {
         tracing::debug!("scene {}: {warning}", desc.scene_file);
     }
-    let adjustments = rt.map(|r| r.adjustments).unwrap_or_default();
+    let adjustments = rt
+        .map(MonitorRuntime::effective_adjustments)
+        .unwrap_or_default();
     let videos = open_embedded_videos(&renderer, &vfs, desc, &adjustments);
     let mut state = SceneState {
         wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),

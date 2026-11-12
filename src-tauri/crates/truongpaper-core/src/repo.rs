@@ -31,8 +31,9 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// "Unused" means not in the persistent shown history. `last_shown_at` is kept across history
+/// resets (it only orders rotation), so it is deliberately not part of this predicate.
 const UNUSED_PREDICATE: &str = "file_present = 1
-    AND last_shown_at IS NULL
     AND id NOT IN (SELECT photo_id FROM photos_history)
     AND id NOT IN (SELECT photo_id FROM photos_blacklist)";
 
@@ -175,6 +176,56 @@ pub enum RotationPhotoPool {
     PreviouslyShown,
 }
 
+fn pool_predicate_and_order(pool: RotationPhotoPool) -> (&'static str, &'static str) {
+    match pool {
+        RotationPhotoPool::Unused => (UNUSED_PREDICATE, "last_shown_at ASC, downloaded_at ASC, id"),
+        RotationPhotoPool::Favorites => (
+            "file_present = 1 AND is_favorite = 1 AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
+            "last_shown_at ASC, downloaded_at ASC, id",
+        ),
+        RotationPhotoPool::PreviouslyShown => (
+            "file_present = 1 AND last_shown_at IS NOT NULL AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
+            "last_shown_at ASC, downloaded_at ASC, id",
+        ),
+    }
+}
+
+/// Largest number of recently shown photos kept out of the Favorites / PreviouslyShown pools.
+pub const RECENT_SHOWN_WINDOW: usize = 20;
+
+/// Ids to keep out of a repeat-prone pool: the last `min(20, pool_size - 1)` shown photos of
+/// that pool, so at least one candidate always remains. The `Unused` pool needs no window.
+pub fn recent_shown_exclusions(
+    conn: &Connection,
+    filter: &PhotoFilter,
+    pool: RotationPhotoPool,
+) -> CoreResult<Vec<String>> {
+    if matches!(pool, RotationPhotoPool::Unused) {
+        return Ok(Vec::new());
+    }
+    let (predicate, _) = pool_predicate_and_order(pool);
+    let (clause, values) = filter_clause(filter);
+    let size: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM photos_cache WHERE {predicate}{clause}"),
+        params_from_iter(values.iter()),
+        |r| r.get(0),
+    )?;
+    let window = (size.max(0) as usize)
+        .saturating_sub(1)
+        .min(RECENT_SHOWN_WINDOW);
+    if window == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM photos_cache WHERE {predicate}{clause}
+         AND last_shown_at IS NOT NULL ORDER BY last_shown_at DESC, id LIMIT {window}"
+    ))?;
+    let ids = stmt
+        .query_map(params_from_iter(values.iter()), |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Picks the oldest unused or least recently shown eligible photo. Missing files are skipped
 /// and their cache rows are marked unavailable.
 fn pop_candidate(
@@ -187,17 +238,7 @@ fn pop_candidate(
     let (clause, mut values) = filter_clause(filter);
     let (excl, excl_values) = exclusion_clause("id", exclude_ids);
     values.extend(excl_values);
-    let (predicate, order) = match pool {
-        RotationPhotoPool::Unused => (UNUSED_PREDICATE, "downloaded_at ASC, id"),
-        RotationPhotoPool::Favorites => (
-            "file_present = 1 AND is_favorite = 1 AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
-            "last_shown_at ASC, downloaded_at ASC, id",
-        ),
-        RotationPhotoPool::PreviouslyShown => (
-            "file_present = 1 AND last_shown_at IS NOT NULL AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
-            "last_shown_at ASC, downloaded_at ASC, id",
-        ),
-    };
+    let (predicate, order) = pool_predicate_and_order(pool);
     let sql = format!(
         "SELECT id, file_path FROM photos_cache WHERE {predicate}{clause}{excl} ORDER BY {order} LIMIT 1"
     );
@@ -326,6 +367,10 @@ pub fn upsert_cached_photo(conn: &Connection, photo: &NewCachedPhoto) -> CoreRes
         ON CONFLICT(id) DO UPDATE SET
             file_path = excluded.file_path,
             file_present = 1,
+            album_slug = excluded.album_slug,
+            album_url = excluded.album_url,
+            featured = excluded.featured,
+            fallback_used = excluded.fallback_used,
             width = excluded.width,
             height = excluded.height,
             orientation = excluded.orientation,
@@ -418,7 +463,8 @@ pub fn classify_candidate(
     // A photo on screen is treated like a queued one so its history row cannot trigger an
     // exhaustion reset.
     if exists(
-        "SELECT 1 FROM photos_cache WHERE id = ?1 AND file_present = 1 AND last_shown_at IS NULL",
+        "SELECT 1 FROM photos_cache WHERE id = ?1 AND file_present = 1
+         AND id NOT IN (SELECT photo_id FROM photos_history)",
     )? || currently_displayed_ids.iter().any(|d| d == photo_id)
     {
         return Ok(CandidateStatus::AlreadyInUnusedQueue);
@@ -448,18 +494,16 @@ pub fn reset_exhausted_filter_history(
         params_from_iter(hist_values),
     )?;
 
-    let (cache_excl, cache_excl_values) = exclusion_clause("id", currently_displayed_ids);
-    let mut cache_values = filter_values;
-    cache_values.extend(cache_excl_values);
-    let requeued = tx.execute(
-        &format!(
-            "UPDATE photos_cache SET last_shown_at = NULL
-             WHERE file_present = 1
-               AND id NOT IN (SELECT photo_id FROM photos_blacklist){clause}{cache_excl}"
-        ),
-        params_from_iter(cache_values),
+    // `last_shown_at` is kept: it orders rotation, so a photo shown moments ago does not come
+    // straight back. Cached files return to the unused queue because their history is gone.
+    let (unused_sql, unused_values) = filter_clause(filter);
+    let requeued: i64 = tx.query_row(
+        &format!("SELECT COUNT(*) FROM photos_cache WHERE {UNUSED_PREDICATE}{unused_sql}"),
+        params_from_iter(unused_values),
+        |r| r.get(0),
     )?;
     tx.commit()?;
+    let requeued = requeued.max(0) as usize;
     Ok(requeued)
 }
 
@@ -509,6 +553,7 @@ pub fn plan_cache_eviction(
          WHERE file_present = 1
            AND is_favorite = 0
            AND last_shown_at IS NOT NULL
+           AND id IN (SELECT photo_id FROM photos_history)
          ORDER BY last_shown_at ASC",
     )?;
     let candidates = stmt
@@ -591,10 +636,27 @@ pub fn evict_old_cached_files_preserving_history_unlocked(
     };
     let mut evicted = Vec::with_capacity(plan.len());
     for (id, path) in plan {
-        remove_cached_photo_files(&path);
-        let conn = db.lock();
-        mark_file_evicted(&conn, &id)?;
-        evicted.push(id);
+        // The plan is a snapshot; a photo may have been favorited or put on screen since.
+        // Re-check against fresh state under the lock and flip `file_present` in the same
+        // critical section, so nothing can pick the file once it is condemned.
+        let claimed = {
+            let conn = db.lock();
+            let mut displayed = list_displayed_photo_ids(&conn)?;
+            displayed.extend(currently_displayed_ids.iter().cloned());
+            if displayed.contains(&id) {
+                false
+            } else {
+                conn.execute(
+                    "UPDATE photos_cache SET file_present = 0
+                     WHERE id = ?1 AND file_present = 1 AND is_favorite = 0",
+                    params![id],
+                )? > 0
+            }
+        };
+        if claimed {
+            remove_cached_photo_files(&path);
+            evicted.push(id);
+        }
     }
     Ok(evicted)
 }
@@ -1257,17 +1319,114 @@ mod tests {
             get_history_entry(&conn, "other").unwrap().is_some(),
             "other album untouched"
         );
-        assert!(get_cached_photo(&conn, "a")
-            .unwrap()
-            .unwrap()
-            .last_shown_at
-            .is_none());
+        assert!(
+            get_cached_photo(&conn, "a")
+                .unwrap()
+                .unwrap()
+                .last_shown_at
+                .is_some(),
+            "last_shown_at survives a reset so recency ordering still works"
+        );
         assert!(get_cached_photo(&conn, "c")
             .unwrap()
             .unwrap()
             .last_shown_at
             .is_some());
         assert_eq!(count_unused_in_queue(&conn, &f).unwrap(), 1);
+    }
+
+    #[test]
+    fn after_reset_least_recently_shown_comes_first() {
+        let mut conn = db();
+        let dir = TempDir::new();
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            add(&conn, &dir, &photo(id, "s", 4000, 3000, 10, i as i64));
+        }
+        for id in ["a", "b", "c"] {
+            mark_photo_shown(&mut conn, id).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        reset_exhausted_filter_history(&mut conn, &filter(), &[]).unwrap();
+        let first = pop_next_queued_photo(&conn, &dir.0, &filter())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first.0, "a",
+            "oldest shown first, the latest ('c') comes last"
+        );
+        assert_eq!(count_unused_in_queue(&conn, &filter()).unwrap(), 3);
+    }
+
+    #[test]
+    fn recent_exclusions_cover_window_but_never_empty_the_pool() {
+        let mut conn = db();
+        let dir = TempDir::new();
+        for i in 0..30 {
+            add(
+                &conn,
+                &dir,
+                &photo(&format!("p{i:02}"), "s", 4000, 3000, 10, i),
+            );
+        }
+        let ids = |conn: &Connection, pool| recent_shown_exclusions(conn, &filter(), pool).unwrap();
+        assert!(ids(&conn, RotationPhotoPool::PreviouslyShown).is_empty());
+        for i in 0..30 {
+            mark_photo_shown(&mut conn, &format!("p{i:02}")).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let recent = ids(&conn, RotationPhotoPool::PreviouslyShown);
+        assert_eq!(recent.len(), RECENT_SHOWN_WINDOW);
+        assert_eq!(recent[0], "p29");
+        assert!(ids(&conn, RotationPhotoPool::Unused).is_empty());
+
+        // Pool of 2 favorites: window is 1, so one candidate always remains.
+        set_favorite(&conn, "p28", true).unwrap();
+        set_favorite(&conn, "p29", true).unwrap();
+        assert_eq!(
+            ids(&conn, RotationPhotoPool::Favorites),
+            vec!["p29".to_string()]
+        );
+        // Pool of 1: nothing excluded.
+        set_favorite(&conn, "p28", false).unwrap();
+        assert!(ids(&conn, RotationPhotoPool::Favorites).is_empty());
+    }
+
+    #[test]
+    fn upsert_refreshes_album_and_flag_metadata() {
+        let conn = db();
+        let mut p = photo("a", "old-album", 4000, 3000, 10, 1);
+        upsert_cached_photo(&conn, &p).unwrap();
+        p.album_slug = "new-album".into();
+        p.album_url = "https://iantruongphotography.com/album/new-album".into();
+        p.featured = true;
+        p.fallback_used = true;
+        upsert_cached_photo(&conn, &p).unwrap();
+        let row = get_cached_photo(&conn, "a").unwrap().unwrap();
+        assert_eq!(row.album_slug, "new-album");
+        assert!(row.album_url.ends_with("new-album"));
+        assert!(row.featured && row.fallback_used);
+    }
+
+    #[test]
+    fn eviction_rechecks_favorite_and_displayed_state_before_each_delete() {
+        let mut conn = db();
+        let dir = TempDir::new();
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            add(&conn, &dir, &photo(id, "s", 1, 1, 100, i as i64));
+            mark_photo_shown(&mut conn, id).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // After the plan would be computed: "a" gets favorited, "b" goes on screen.
+        set_favorite(&conn, "a", true).unwrap();
+        assign_photo_to_monitor(&conn, "DISPLAY-1", "b").unwrap();
+        let shared = Arc::new(Mutex::new(conn));
+        // The caller's displayed list is stale (empty); the fresh DB state must win.
+        let evicted =
+            evict_old_cached_files_preserving_history_unlocked(&shared, &dir.0, 0, 0, &[]).unwrap();
+        assert_eq!(evicted, vec!["c".to_string()]);
+        assert!(dir.0.join("wallpapers/photos/a.jpg").exists());
+        assert!(dir.0.join("wallpapers/photos/b.jpg").exists());
+        assert!(!dir.0.join("wallpapers/photos/c.jpg").exists());
     }
 
     #[test]

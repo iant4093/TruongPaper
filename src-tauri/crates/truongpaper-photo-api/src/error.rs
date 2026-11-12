@@ -1,5 +1,6 @@
 //! Error type for the Photo API client, queue refill and decoder.
 
+use std::time::Duration;
 use thiserror::Error;
 use truongpaper_core::CoreError;
 
@@ -9,10 +10,14 @@ pub enum PhotoApiError {
     /// Network / TLS / timeout failure from the HTTP transport.
     #[error("transport error: {0}")]
     Transport(String),
-    /// HTTP 403 / 429 / 503: the ~100 requests per 5 minutes budget is spent or the host is
+    /// HTTP 429 / 503 (403 on the JSON endpoint): the ~100 requests per 5 minutes budget is spent or the host is
     /// shedding load. The caller must back off.
-    #[error("rate limited by server (HTTP {0})")]
-    RateLimited(u16),
+    /// `retry_after` is the parsed `Retry-After` header, when the server sent one.
+    #[error("rate limited by server (HTTP {status})")]
+    RateLimited {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
     /// HTTP 400 `{"error":"invalid_parameters"}`.
     #[error("invalid request parameters (HTTP 400)")]
     InvalidParameters,
@@ -51,7 +56,20 @@ pub enum PhotoApiError {
 impl PhotoApiError {
     /// True for the statuses that must trigger exponential backoff.
     pub fn is_throttle(&self) -> bool {
-        matches!(self, PhotoApiError::RateLimited(_))
+        matches!(self, PhotoApiError::RateLimited { .. })
+    }
+
+    /// Server-requested wait from a `Retry-After` header.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            PhotoApiError::RateLimited { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// True for network-level failures (no HTTP response at all).
+    pub fn is_network(&self) -> bool {
+        matches!(self, PhotoApiError::Transport(_))
     }
 }
 

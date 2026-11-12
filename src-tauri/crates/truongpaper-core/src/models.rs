@@ -321,6 +321,10 @@ pub struct PhotoStatus {
     pub blacklist_count: usize,
     pub is_refilling: bool,
     pub rate_limit_remaining: usize,
+    /// The last API attempt failed with a network error and nothing has succeeded since.
+    pub offline: bool,
+    /// Offline with no unused photo left: rotation is serving already-shown cached photos.
+    pub showing_cached_only: bool,
 }
 
 #[cfg(test)]

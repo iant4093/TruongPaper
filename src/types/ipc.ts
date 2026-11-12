@@ -58,6 +58,8 @@ export interface PhotoStatus {
   blacklistCount: number;
   isRefilling: boolean;
   rateLimitRemaining: number;
+  offline: boolean;
+  showingCachedOnly: boolean;
 }
 
 export interface ProjectJsonComboOption {

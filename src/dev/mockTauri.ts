@@ -379,6 +379,8 @@ export function createMockBackend(
     blacklistCount,
     isRefilling,
     rateLimitRemaining,
+    offline: false,
+    showingCachedOnly: false,
   });
 
   const updatePhoto = (id: string, patch: Partial<PhotoItem>) => {

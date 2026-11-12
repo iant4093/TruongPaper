@@ -5,7 +5,7 @@
 //! below, makes at most [`MAX_REFILL_ATTEMPTS`] random-photo requests, and shares one
 //! [`SlidingRateLimiter`] between JSON calls and image downloads.
 
-use crate::client::{PhotoApiClient, PhotoTransport, RandomPhotoQuery};
+use crate::client::{is_allowed_image_url, PhotoApiClient, PhotoTransport, RandomPhotoQuery};
 use crate::decoder::inspect_display_dimensions;
 use crate::error::{PhotoApiError, PhotoApiResult};
 use crate::limiter::SlidingRateLimiter;
@@ -22,7 +22,6 @@ use truongpaper_core::{
     now_ms, parse_album_slug, reset_exhausted_filter_history, upsert_cached_photo, CandidateStatus,
     NewCachedPhoto, PhotoFilter,
 };
-use url::Url;
 
 /// Largest image the refill loop will accept (the API serves originals around 10-30 MB).
 pub const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
@@ -42,6 +41,8 @@ pub enum RefillOutcome {
     FilterExhaustedHoldingLast,
     /// Local budget spent or the server asked us to back off.
     RateLimitedOrBackedOff,
+    /// A network error ended the refill; the limiter is cooling down and flagged offline.
+    Offline,
     /// [`MAX_REFILL_ATTEMPTS`] (or [`MAX_API_REJECTIONS`]) reached without a clear verdict.
     RetryCapReached { unused_count: usize },
 }
@@ -84,12 +85,6 @@ pub fn is_safe_photo_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn is_https_url(url: &str) -> bool {
-    Url::parse(url)
-        .map(|u| u.scheme() == "https")
-        .unwrap_or(false)
 }
 
 fn unused_count(db: &Arc<Mutex<Connection>>, filter: &PhotoFilter) -> PhotoApiResult<usize> {
@@ -235,8 +230,13 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
                 meta
             }
             Err(e) if e.is_throttle() => {
-                limiter.note_throttled();
+                limiter.note_throttled_with(e.retry_after());
                 return Ok(RefillOutcome::RateLimitedOrBackedOff);
+            }
+            Err(e) if e.is_network() => {
+                tracing::warn!("photo API unreachable: {e}");
+                limiter.note_network_error();
+                return Ok(RefillOutcome::Offline);
             }
             Err(
                 PhotoApiError::NoPhotos
@@ -250,8 +250,8 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
             Err(e) => return Err(e),
         };
 
-        if !is_safe_photo_id(&meta.id) || !is_https_url(&meta.image_url) {
-            tracing::warn!(id = %meta.id, "ignoring photo with unsafe id or non-https imageUrl");
+        if !is_safe_photo_id(&meta.id) || !is_allowed_image_url(&meta.image_url) {
+            tracing::warn!(id = %meta.id, "ignoring photo with unsafe id or imageUrl outside https://*.iantruongphotography.com");
             api_rejections += 1;
             continue;
         }
@@ -289,45 +289,59 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
         let part_path = photos_dir.join(format!("{}.jpg.part", meta.id));
 
         if !final_path.exists() {
+            // Take the token right before the request.
             if !limiter.try_acquire() {
                 return Ok(RefillOutcome::RateLimitedOrBackedOff);
             }
-            // File removal happens outside the SQLite mutex.
-            evict_old_cached_files_preserving_history_unlocked(
-                db,
-                app_data_dir,
-                meta.bytes,
-                max_cache_bytes,
-                currently_displayed_ids,
-            )?;
-
-            let bytes = match client.download_image(&meta.image_url).await {
+            let downloaded = client
+                .download_image_to(&meta.image_url, &part_path, MAX_IMAGE_BYTES as u64)
+                .await;
+            let downloaded_bytes = match downloaded {
                 Ok(bytes) => {
                     limiter.note_success();
                     bytes
                 }
                 Err(e) if e.is_throttle() => {
-                    limiter.note_throttled();
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    limiter.note_throttled_with(e.retry_after());
                     return Ok(RefillOutcome::RateLimitedOrBackedOff);
                 }
-                Err(PhotoApiError::UnexpectedStatus(_) | PhotoApiError::NoPhotos) => {
+                Err(e) if e.is_network() => {
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    tracing::warn!("photo download failed: {e}");
+                    limiter.note_network_error();
+                    return Ok(RefillOutcome::Offline);
+                }
+                // 403 / 404 / oversized / empty: this photo is unusable, the API is fine.
+                Err(
+                    PhotoApiError::UnexpectedStatus(_)
+                    | PhotoApiError::NoPhotos
+                    | PhotoApiError::Rejected(_),
+                ) => {
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    tracing::warn!(id = %meta.id, "rejecting image download");
                     api_rejections += 1;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                    return Err(e);
+                }
             };
-            if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-                tracing::warn!(id = %meta.id, len = bytes.len(), "rejecting image with unusable size");
-                api_rejections += 1;
-                continue;
-            }
 
-            let written = async {
-                tokio::fs::write(&part_path, &bytes).await?;
-                tokio::fs::rename(&part_path, &final_path).await
+            // Evict only now that the download succeeded, so a failed download never costs
+            // the user cached photos.
+            if let Err(e) = evict_old_cached_files_preserving_history_unlocked(
+                db,
+                app_data_dir,
+                downloaded_bytes,
+                max_cache_bytes,
+                currently_displayed_ids,
+            ) {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                return Err(e.into());
             }
-            .await;
-            if let Err(e) = written {
+            if let Err(e) = tokio::fs::rename(&part_path, &final_path).await {
                 let _ = tokio::fs::remove_file(&part_path).await;
                 return Err(e.into());
             }
@@ -428,7 +442,7 @@ mod tests {
         format!(
             r#"{{"albumSlug":"{slug}","albumUrl":"https://iantruongphotography.com/album/{slug}",
             "bytes":{bytes},"fallbackUsed":false,"featured":false,"height":{h},"id":"{id}",
-            "imageUrl":"https://img.test/{id}","width":{w}}}"#
+            "imageUrl":"https://photos-api.iantruongphotography.com/v1/images/{id}","width":{w}}}"#
         )
     }
 
@@ -461,6 +475,7 @@ mod tests {
                 Ok(HttpResponse {
                     status: 200,
                     body: image.clone(),
+                    retry_after: None,
                 })
             }
         });
@@ -798,7 +813,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn image_download_403_also_backs_off() {
+    async fn image_download_403_rejects_that_photo_without_throttling() {
+        let dir = TempDir::new();
+        let db = new_db();
+        let (t, counters) = {
+            let c = Arc::new(Counters::default());
+            let c2 = c.clone();
+            (
+                FnTransport(move |url: &str, _: &[(&str, &str)]| {
+                    Ok(if url == API_RANDOM_URL {
+                        let n = c2.json.fetch_add(1, Ordering::SeqCst);
+                        HttpResponse::json(200, &meta_json(&format!("p{n}"), "a-1", 64, 48, 10))
+                    } else {
+                        c2.images.fetch_add(1, Ordering::SeqCst);
+                        HttpResponse::json(403, "")
+                    })
+                }),
+                c,
+            )
+        };
+        let limiter = SlidingRateLimiter::new();
+        let out = refill_queue(&t, &limiter, &db, &dir.0, &filter(&[]), 1 << 30, &[])
+            .await
+            .unwrap();
+        assert_eq!(out, RefillOutcome::RetryCapReached { unused_count: 0 });
+        assert!(limiter.cooldown_remaining().is_none(), "no global throttle");
+        assert_eq!(limiter.consecutive_failures(), 0);
+        assert_eq!(counters.images.load(Ordering::SeqCst), MAX_API_REJECTIONS);
+        assert!(get_cached_photo(&db.lock(), "p0").unwrap().is_none());
+        assert!(!dir.0.join("wallpapers/photos/p0.jpg.part").exists());
+    }
+
+    #[tokio::test]
+    async fn image_download_429_honours_retry_after() {
         let dir = TempDir::new();
         let db = new_db();
         let t = FnTransport(|url: &str, _: &[(&str, &str)]| {
@@ -806,8 +853,9 @@ mod tests {
                 HttpResponse::json(200, &meta_json("p", "a-1", 64, 48, 10))
             } else {
                 HttpResponse {
-                    status: 403,
+                    status: 429,
                     body: vec![],
+                    retry_after: Some(Duration::from_secs(90)),
                 }
             })
         });
@@ -816,8 +864,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, RefillOutcome::RateLimitedOrBackedOff);
+        assert!(limiter.cooldown_remaining().unwrap() > Duration::from_secs(80));
+    }
+
+    #[tokio::test]
+    async fn network_error_goes_offline_with_cooldown_and_no_hot_loop() {
+        let dir = TempDir::new();
+        let db = new_db();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let t = FnTransport(move |_: &str, _: &[(&str, &str)]| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(PhotoApiError::Transport("dns".into()))
+        });
+        let limiter = SlidingRateLimiter::new();
+        let out = refill_queue(&t, &limiter, &db, &dir.0, &filter(&[]), 1 << 30, &[])
+            .await
+            .unwrap();
+        assert_eq!(out, RefillOutcome::Offline);
+        assert!(limiter.is_offline());
         assert!(limiter.cooldown_remaining().is_some());
-        assert!(get_cached_photo(&db.lock(), "p").unwrap().is_none());
+        let out = refill_queue(&t, &limiter, &db, &dir.0, &filter(&[]), 1 << 30, &[])
+            .await
+            .unwrap();
+        assert_eq!(out, RefillOutcome::RateLimitedOrBackedOff);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "second call stays local");
+    }
+
+    #[tokio::test]
+    async fn failed_download_does_not_evict_cached_photos() {
+        let dir = TempDir::new();
+        let db = new_db();
+        seed_shown(&db, &dir.0, &["old1", "old2"], "x-1", 1000);
+        let t = FnTransport(|url: &str, _: &[(&str, &str)]| {
+            Ok(if url == API_RANDOM_URL {
+                HttpResponse::json(200, &meta_json("big", "x-1", 64, 48, 1000))
+            } else {
+                HttpResponse::json(500, "")
+            })
+        });
+        refill_queue(
+            &t,
+            &SlidingRateLimiter::new(),
+            &db,
+            &dir.0,
+            &filter(&[]),
+            2000,
+            &[],
+        )
+        .await
+        .unwrap();
+        let conn = db.lock();
+        assert!(
+            get_cached_photo(&conn, "old1")
+                .unwrap()
+                .unwrap()
+                .file_present
+        );
+        assert!(dir.0.join("wallpapers/photos/old1.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn oversized_download_is_rejected_and_leaves_no_part_file() {
+        let dir = TempDir::new();
+        let db = new_db();
+        let (t, _) = fake(
+            |n| HttpResponse::json(200, &meta_json(&format!("p{n}"), "a-1", 64, 48, 10)),
+            vec![1; 64],
+        );
+        let client = PhotoApiClient::new(&t);
+        let photos = dir.0.join("wallpapers/photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        let err = client
+            .download_image_to(
+                "https://photos-api.iantruongphotography.com/v1/images/x",
+                &photos.join("x.jpg.part"),
+                32,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PhotoApiError::Rejected(_)));
+        assert!(!photos.join("x.jpg.part").exists());
+        drop(db);
     }
 
     #[tokio::test]
@@ -964,14 +1092,14 @@ mod tests {
             |n| HttpResponse::json(200, &meta_json(&format!("n{n}"), "x-1", 64, 48, 1000)),
             make_jpeg(64, 48),
         );
-        // Budget 2500 bytes: with 2000 cached, the first 1000-byte incoming photo frees the oldest.
+        // Budget 2000 bytes: with 2000 cached, the first downloaded photo frees the oldest.
         refill_queue(
             &t,
             &SlidingRateLimiter::new(),
             &db,
             &dir.0,
             &filter(&[]),
-            2500,
+            2000,
             &[],
         )
         .await

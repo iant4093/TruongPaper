@@ -85,10 +85,14 @@ impl PhotoServiceState {
     pub fn status(&self) -> Result<PhotoStatus, String> {
         let (mode, filter, max_cache_bytes, _) = self.load_active_filter(None)?;
         let conn = self.db.lock();
+        let unused_queue = list_unused_queue(&conn, &self.app_data_dir, &filter).map_err(e)?;
+        let offline = self.limiter.is_offline();
         Ok(PhotoStatus {
             filter_mode: mode,
             featured_only: filter.featured_only,
-            unused_queue: list_unused_queue(&conn, &self.app_data_dir, &filter).map_err(e)?,
+            showing_cached_only: offline && unused_queue.is_empty(),
+            offline,
+            unused_queue,
             favorite_photos: list_favorite_photos(&conn, &self.app_data_dir).map_err(e)?,
             current_photo_by_monitor: current_photo_by_monitor(&conn, &self.app_data_dir)
                 .map_err(e)?,
@@ -146,14 +150,28 @@ impl PhotoServiceState {
         pool: RotationPhotoPool,
     ) -> Result<Option<PhotoItem>, String> {
         loop {
-            let item = pick_cached_rotation_photo(
-                &self.db.lock(),
-                &self.app_data_dir,
-                filter,
-                displayed,
-                pool,
-            )
-            .map_err(e)?;
+            let item = {
+                let conn = self.db.lock();
+                // Favorites / PreviouslyShown keep the last N shown photos out of the pick so
+                // the same few never alternate; if that leaves nothing, retry without it.
+                let mut excluded = displayed.to_vec();
+                let recent = recent_shown_exclusions(&conn, filter, pool).map_err(e)?;
+                excluded.extend(recent.iter().cloned());
+                let mut item =
+                    pick_cached_rotation_photo(&conn, &self.app_data_dir, filter, &excluded, pool)
+                        .map_err(e)?;
+                if item.is_none() && !recent.is_empty() {
+                    item = pick_cached_rotation_photo(
+                        &conn,
+                        &self.app_data_dir,
+                        filter,
+                        displayed,
+                        pool,
+                    )
+                    .map_err(e)?;
+                }
+                item
+            };
             let Some(mut item) = item else {
                 return Ok(None);
             };
@@ -190,7 +208,35 @@ impl PhotoServiceState {
         displayed: &[String],
         prefer_favorite: bool,
     ) -> Result<Option<PhotoItem>, String> {
+        self.rotation_candidate_with(filter, displayed, prefer_favorite, false)
+    }
+
+    /// `offline_fallback` serves already-shown cached photos (then favorites) regardless of
+    /// the auto-reset setting, so Next keeps working without a network.
+    fn rotation_candidate_with(
+        &self,
+        filter: &PhotoFilter,
+        displayed: &[String],
+        prefer_favorite: bool,
+        offline_fallback: bool,
+    ) -> Result<Option<PhotoItem>, String> {
         use RotationPhotoPool::{Favorites, PreviouslyShown, Unused};
+        if offline_fallback {
+            for pool in [
+                prefer_favorite.then_some(Favorites),
+                Some(Unused),
+                Some(PreviouslyShown),
+                Some(Favorites),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(item) = self.pop(filter, displayed, pool)? {
+                    return Ok(Some(item));
+                }
+            }
+            return Ok(None);
+        }
         let fallback = if filter.auto_reset_history_on_exhaustion {
             Some(PreviouslyShown)
         } else if !prefer_favorite {
@@ -602,8 +648,19 @@ async fn photo_for_rotation(
     if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
         return Ok(Some(item));
     }
-    let _ = state.refill(filter, max_cache_bytes, displayed_ids).await;
-    state.rotation_candidate(filter, displayed_ids, prefer_favorite)
+    let outcome = state.refill(filter, max_cache_bytes, displayed_ids).await;
+    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
+        return Ok(Some(item));
+    }
+    // A network failure (this refill, or one still cooling down) must not strand the user on
+    // one photo: fall back to anything cached, whatever the auto-reset setting says.
+    let offline = matches!(outcome, Ok(RefillOutcome::Offline))
+        || outcome.as_ref().err().is_some_and(|err| err.is_network())
+        || state.limiter.is_offline();
+    if offline {
+        return state.rotation_candidate_with(filter, displayed_ids, prefer_favorite, true);
+    }
+    Ok(None)
 }
 
 /// 4. `photo_trigger_refill`
@@ -1003,6 +1060,8 @@ mod tests {
             "blacklistCount",
             "isRefilling",
             "rateLimitRemaining",
+            "offline",
+            "showingCachedOnly",
         ] {
             assert!(json.get(key).is_some(), "PhotoStatus missing {key}");
         }
@@ -1151,6 +1210,132 @@ mod tests {
         assert_eq!(pick(&filter, &displayed, false).as_deref(), Some("cached"));
         filter.auto_reset_history_on_exhaustion = false;
         assert_eq!(pick(&filter, &displayed, false), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Seeds `n` shown favorite photos (`f00`..) with strictly increasing `last_shown_at`.
+    fn seed_shown_favorites(state: &PhotoServiceState, dir: &Path, n: usize, favorite: bool) {
+        for i in 0..n {
+            let id = format!("f{i:02}");
+            let rel_path = format!("{id}.png");
+            std::fs::write(dir.join(&rel_path), TINY_PNG).unwrap();
+            let mut conn = state.db.lock();
+            upsert_cached_photo(
+                &conn,
+                &NewCachedPhoto {
+                    id: id.clone(),
+                    rel_path,
+                    album_slug: "album".into(),
+                    album_url: "https://example.com/album".into(),
+                    featured: false,
+                    fallback_used: false,
+                    width: 1,
+                    height: 1,
+                    bytes: TINY_PNG.len() as u64,
+                    downloaded_at: i as i64,
+                },
+            )
+            .unwrap();
+            mark_photo_shown(&mut conn, &id).unwrap();
+            set_favorite(&conn, &id, favorite).unwrap();
+            drop(conn);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn temp_state(tag: &str) -> (PhotoServiceState, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("truongpaper-photo-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = service();
+        state.app_data_dir = dir.clone();
+        (state, dir)
+    }
+
+    #[test]
+    fn favorites_do_not_repeat_within_the_recent_window() {
+        let (state, dir) = temp_state("recent-window");
+        seed_shown_favorites(&state, &dir, 5, true);
+        let filter = PhotoFilter::default();
+        // Rotate 12 times through 5 favorites, showing each pick like the real flow.
+        let mut shown: Vec<String> = Vec::new();
+        let mut displayed: Vec<String> = Vec::new();
+        for _ in 0..12 {
+            let item = state
+                .rotation_candidate(&filter, &displayed, true)
+                .unwrap()
+                .expect("a favorite is always available");
+            mark_photo_shown(&mut state.db.lock(), &item.id).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            displayed = vec![item.id.clone()];
+            shown.push(item.id);
+        }
+        // Pool of 5 -> window of 4: no id repeats within any 5 consecutive picks.
+        for w in shown.windows(5) {
+            let mut ids = w.to_vec();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), 5, "repeat inside window: {shown:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn small_pools_still_rotate() {
+        let (state, dir) = temp_state("small-pool");
+        seed_shown_favorites(&state, &dir, 2, true);
+        let filter = PhotoFilter::default();
+        let mut displayed = vec!["f01".to_string()];
+        let mut picks = Vec::new();
+        for _ in 0..4 {
+            let item = state
+                .rotation_candidate(&filter, &displayed, true)
+                .unwrap()
+                .expect("two favorites keep rotating");
+            mark_photo_shown(&mut state.db.lock(), &item.id).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            displayed = vec![item.id.clone()];
+            picks.push(item.id);
+        }
+        assert_eq!(picks, ["f00", "f01", "f00", "f01"]);
+        // A single favorite that is on screen is still served rather than emptying the pool.
+        let (single, dir1) = temp_state("single-pool");
+        seed_shown_favorites(&single, &dir1, 1, true);
+        assert!(single
+            .rotation_candidate(&filter, &[], true)
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(dir1).unwrap();
+    }
+
+    #[test]
+    fn offline_next_falls_back_to_cached_photos_even_without_auto_reset() {
+        let (state, dir) = temp_state("offline-fallback");
+        seed_shown_favorites(&state, &dir, 3, false);
+        let filter = PhotoFilter {
+            auto_reset_history_on_exhaustion: false,
+            ..Default::default()
+        };
+        let displayed = vec!["f02".to_string()];
+        assert!(state
+            .rotation_candidate(&filter, &displayed, false)
+            .unwrap()
+            .is_none());
+        let item = state
+            .rotation_candidate_with(&filter, &displayed, false, true)
+            .unwrap()
+            .expect("offline fallback serves a previously shown photo");
+        assert_eq!(item.id, "f00");
+
+        // Status reports offline + cached-only once a network error was recorded.
+        assert!(!state.status().unwrap().offline);
+        state.limiter.note_network_error();
+        let status = state.status().unwrap();
+        assert!(status.offline && status.showing_cached_only);
+        state.limiter.note_success();
+        assert!(!state.status().unwrap().offline);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

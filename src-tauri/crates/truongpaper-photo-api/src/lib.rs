@@ -22,7 +22,8 @@ pub mod limiter;
 pub mod queue;
 
 pub use client::{
-    check_status, FnTransport, HttpResponse, PhotoApiClient, PhotoTransport, RandomPhotoQuery,
+    check_status, is_allowed_image_url, parse_retry_after, DownloadOutcome, FnTransport,
+    HttpResponse, PhotoApiClient, PhotoTransport, RandomPhotoQuery,
 };
 pub use decoder::{
     decode_photo_bytes_for_wgpu, decode_photo_for_wgpu, effective_max_dimension,

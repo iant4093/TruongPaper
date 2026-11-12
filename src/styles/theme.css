@@ -280,3 +280,5 @@ input.button { cursor: text; }
 .rotation-source > .segmented-control, .rotation-source-apply { justify-self: start; }
 .rotation-source-choice { min-height: 31px; max-width: 440px; }
 .playlist-interval { margin-top: 12px; }
+.workshop-mirror-badge { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 999px; font-size: 9px; letter-spacing: 0.02em; color: var(--accent-cyan); background: rgba(34, 211, 238, 0.12); }
+.local-import { position: relative; display: inline-flex; gap: 6px; align-items: center; }

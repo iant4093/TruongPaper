@@ -2077,6 +2077,7 @@ invoke<void>('photo_reset_history', { albumSlug?: string });
 // --- Steam Workshop & Wallpaper Engine Commands ---
 invoke<WorkshopBrowsePage>('steam_browse_workshop', { query: WorkshopBrowseQuery }); // Guest public catalog: search, sort, page, days, tags
 invoke<WorkshopPreview>('steam_inspect_url', { urlOrId: string });
+invoke<GuestAvailabilityMap>('steam_guest_availability', { workshopIds: string[] }); // GuestAvailabilityMap = Record<workshopId, 'available' | 'unavailable' | 'unknown'>: which items the third-party GGNetwork mirror can serve (max 30 ids, cached 10 min)
 invoke<string>('steam_download_workshop_item', { urlOrId: string, source?: 'steam' | 'ggnetwork' });
 invoke<string>('steam_login_qr'); // Resolves with the account name after the phone approves; times out after 3 minutes
 invoke<string>('steam_login_credentials', { username: string, password: string });
@@ -2086,6 +2087,7 @@ invoke<string | null>('steam_account'); // Saved account name, or null when sign
 invoke<void>('steam_logout');
 invoke<WallpaperItem[]>('steam_sync_local_folders');
 invoke<WallpaperItem[]>('library_list_wallpapers');
+invoke<WallpaperItem>('library_import_local', { path: string }); // Copies a Wallpaper Engine item folder (project.json) or a .mp4/.webm/.mov/.mkv file into the library as `local:<slug>`; max 4 GB, no symlinks
 invoke<void>('library_delete_wallpaper', { wallpaperId: string });
 
 // --- Monitor, Playback & Property Customization Commands ---

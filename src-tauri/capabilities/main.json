@@ -40,6 +40,8 @@
     "allow-photo-clear-cache",
     "allow-photo-reset-history",
     "allow-steam-browse-workshop",
+    "allow-steam-guest-availability",
+    "allow-library-import-local",
     "allow-steam-inspect-url",
     "allow-steam-download-workshop-item",
     "allow-steam-login-qr",

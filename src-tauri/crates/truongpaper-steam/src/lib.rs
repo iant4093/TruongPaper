@@ -7,6 +7,7 @@ pub use browse::{browse_workshop, WorkshopBrowsePage, WorkshopBrowseQuery};
 
 pub mod commands;
 pub mod guest_download;
+pub mod local_import;
 pub mod local_sync;
 pub mod metadata;
 pub mod qr;
@@ -18,7 +19,8 @@ pub const WALLPAPER_ENGINE_CORE_DEPOT_ID: u32 = 431961;
 
 pub use commands::{
     core_assets_bootstrap_args, core_assets_bootstrapped, password_login_args,
-    pubfile_download_args, qr_login_args, write_core_assets_filelist, DEFAULT_MAX_DOWNLOADS,
+    pubfile_download_args, qr_login_args, validate_password, write_core_assets_filelist,
+    DEFAULT_MAX_DOWNLOADS,
 };
 pub use local_sync::{
     discover_all_steam_libraries, find_default_steam_roots, find_local_we_core_assets_dir,

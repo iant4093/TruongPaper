@@ -23,10 +23,37 @@ pub async fn list_items(state: &AppState) -> Result<Vec<WallpaperItem>, String> 
         .map_err(|e| e.to_string())
 }
 
+/// `<app_data>/wallpapers/local`: copies made by `library_import_local`.
+pub fn local_dir(state: &AppState) -> PathBuf {
+    state.app_data_dir.join("wallpapers").join("local")
+}
+
+/// Stores an imported item. It has no Workshop id, so `workshop_id` stays NULL.
+pub fn upsert_local(
+    conn: &rusqlite::Connection,
+    item: &truongpaper_steam::local_sync::DiscoveredWorkshopWallpaper,
+) -> Result<(), String> {
+    db::upsert_discovered(conn, item)?;
+    conn.execute(
+        "UPDATE wallpaper_configs SET workshop_id = NULL WHERE wallpaper_id = ?1",
+        [&item.wallpaper_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// `true` when `child` resolves to a path strictly inside `parent` (symlinks resolved).
 pub fn is_strictly_within(child: &Path, parent: &Path) -> bool {
     match (child.canonicalize(), parent.canonicalize()) {
         (Ok(c), Ok(p)) => c != p && c.starts_with(&p),
+        _ => false,
+    }
+}
+
+/// `true` when `child` resolves (symlinks resolved) to an immediate subfolder of `parent`.
+pub fn is_direct_child(child: &Path, parent: &Path) -> bool {
+    match (child.canonicalize(), parent.canonicalize()) {
+        (Ok(c), Ok(p)) => c.parent() == Some(p.as_path()),
         _ => false,
     }
 }
@@ -54,9 +81,34 @@ pub async fn library_list_wallpapers(
     Ok(items)
 }
 
+/// Copies a Wallpaper Engine item folder (with `project.json`) or a video file
+/// (.mp4/.webm/.mov/.mkv) into the app's local library and returns the new item (`local:<slug>`).
+#[tauri::command]
+pub async fn library_import_local(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WallpaperItem, String> {
+    let root = local_dir(&state);
+    let source = PathBuf::from(path);
+    let found = tokio::task::spawn_blocking(move || {
+        truongpaper_steam::local_import::import_local(&source, &root)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let fit = default_fit(&state);
+    let row = {
+        let conn = state.db.lock();
+        upsert_local(&conn, &found)?;
+        db::get_wallpaper(&conn, &found.wallpaper_id)?
+    };
+    row.and_then(|r| r.to_item(fit))
+        .ok_or_else(|| "The imported wallpaper could not be read".to_string())
+}
+
 /// Removes the wallpaper from the library. Files are deleted only for items TruongPaper
-/// downloaded itself (`<app_data>/wallpapers/workshop/<id>`); folders owned by a local Steam
-/// install are left for Steam to manage.
+/// downloaded or imported itself (`<app_data>/wallpapers/workshop/<id>` or a direct child of
+/// `<app_data>/wallpapers/local`); folders owned by a local Steam install are left for Steam.
 #[tauri::command]
 pub async fn library_delete_wallpaper(
     state: State<'_, AppState>,
@@ -71,8 +123,11 @@ pub async fn library_delete_wallpaper(
 
     let install_dir = PathBuf::from(&row.install_dir);
     let workshop_root = state.workshop_dir();
+    let local_root = local_dir(&state);
     tokio::task::spawn_blocking(move || {
-        if is_strictly_within(&install_dir, &workshop_root) {
+        if is_strictly_within(&install_dir, &workshop_root)
+            || is_direct_child(&install_dir, &local_root)
+        {
             std::fs::remove_dir_all(&install_dir)
                 .map_err(|e| format!("Removed from library but deleting files failed: {e}"))
         } else {
@@ -134,6 +189,19 @@ mod tests {
         assert!(!is_strictly_within(&root.join("123/../.."), &root));
         assert!(!is_strictly_within(&std::env::temp_dir(), &root));
         assert!(!is_strictly_within(&root.join("missing"), &root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn direct_child_guards_local_deletion() {
+        let root = std::env::temp_dir().join(format!("truongpaper-direct-{}", std::process::id()));
+        let item = root.join("clip-1");
+        std::fs::create_dir_all(item.join("nested")).unwrap();
+        assert!(is_direct_child(&item, &root));
+        assert!(!is_direct_child(&item.join("nested"), &root));
+        assert!(!is_direct_child(&root, &root));
+        assert!(!is_direct_child(&root.join("clip-1/.."), &root));
+        assert!(!is_direct_child(&root.join("missing"), &root));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

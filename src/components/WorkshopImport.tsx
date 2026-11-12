@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Link2, Plus } from 'lucide-react';
 import { parseImportLink } from '../lib/importLinks';
 import { useAppStore } from '../store/useAppStore';
+import { LocalImport } from './LocalImport';
 
 export const WorkshopImport: React.FC = () => {
   const [input, setInput] = useState('');
@@ -65,6 +66,7 @@ export const WorkshopImport: React.FC = () => {
         <input type="text" aria-label="Steam Workshop link or item ID" value={input} onChange={(e) => setInput(e.target.value)} placeholder="Paste a Steam Workshop link or item ID…" />
       </div>
       <button type="submit" className="button"><Plus size={14} />Import</button>
+      <LocalImport onStatus={setStatusMsg} />
       {statusMsg && (
         <span className="omnibar-status" role="status">
           {statusMsg}

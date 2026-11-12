@@ -161,6 +161,7 @@ pub fn run() {
             commands::photo::photo_reset_history,
             // --- Steam Workshop & Wallpaper Engine ---
             commands::steam::steam_browse_workshop,
+            commands::steam::steam_guest_availability,
             commands::steam::steam_inspect_url,
             commands::steam::steam_download_workshop_item,
             commands::steam::steam_login_qr,
@@ -172,6 +173,7 @@ pub fn run() {
             commands::steam::steam_sync_local_folders,
             commands::library::library_list_wallpapers,
             commands::library::library_delete_wallpaper,
+            commands::library::library_import_local,
             // --- Monitor, Playback & Property Customization ---
             commands::monitor::monitors_list,
             commands::monitor::monitor_apply_wallpaper,
@@ -250,7 +252,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 42, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 45, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

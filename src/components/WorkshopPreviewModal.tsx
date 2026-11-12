@@ -19,12 +19,17 @@ export const WorkshopPreviewModal: React.FC = () => {
   const closeWorkshopPreview = useAppStore((s) => s.closeWorkshopPreview);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const selectWallpaper = useAppStore((s) => s.selectWallpaper);
+  const guestStatus = useAppStore((s) => (preview ? s.guestAvailability[preview.workshopId] : undefined));
+  const loadGuestAvailability = useAppStore((s) => s.loadGuestAvailability);
 
   const download = useAppStore((s) => s.downloadWorkshopItem);
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
   const [starting, setStarting] = useState<WorkshopDownloadSource | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   React.useEffect(() => { setDownloadError(null); setStarting(null); }, [preview?.workshopId]);
+  React.useEffect(() => {
+    if (preview) void loadGuestAvailability([preview.workshopId]);
+  }, [preview?.workshopId, loadGuestAvailability]);
   const startDownload = async (source: WorkshopDownloadSource) => {
     if (!preview) return;
     setStarting(source); setDownloadError(null);
@@ -96,14 +101,19 @@ export const WorkshopPreviewModal: React.FC = () => {
               {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && (
                 <div className="workshop-download-actions">
                   {workshopTypeFromTags(preview.tags) !== 'Application' && (
-                    <button className="button button-primary" disabled={!!starting} onClick={() => void startDownload('ggnetwork')}>
-                      {starting === 'ggnetwork' ? 'Checking GGNetwork…' : 'Download via GGNetwork'}
+                    <button className="button button-primary" disabled={!!starting || guestStatus === 'unavailable'} onClick={() => void startDownload('ggnetwork')}>
+                      {guestStatus === 'unavailable' ? 'Not on GGNetwork' : starting === 'ggnetwork' ? 'Checking GGNetwork…' : 'Download via GGNetwork'}
                     </button>
                   )}
                   <button className="button" disabled={!!starting} onClick={() => void startDownload('steam')}>
                     {starting === 'steam' ? 'Starting download…' : progress?.state === 'error' ? 'Retry with Steam' : 'Download with Steam'}
                   </button>
                 </div>
+              )}
+              {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && workshopTypeFromTags(preview.tags) !== 'Application' && (
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '10px 0 0' }}>
+                  GGNetwork is a third-party mirror, not run by Steam or TruongPaper. Downloading with Steam needs your own Steam account.
+                </p>
               )}
               {error && <p role="alert" className="workshop-error">{error}</p>}
               {progress?.state === 'downloading' && (

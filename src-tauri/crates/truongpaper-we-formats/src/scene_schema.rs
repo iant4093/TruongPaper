@@ -28,6 +28,28 @@ pub enum UserConditionSpec {
     },
 }
 
+/// A vector-shaped field (like `padding`) that some scenes store as `"X Y"` and others as a
+/// single scalar number applied to every component. Always deserializes to its `"X Y..."`
+/// string form so callers can use [`parse_vec2_or`]/[`parse_vec3_or`] on it either way.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct FlexibleVecString(pub String);
+
+impl<'de> Deserialize<'de> for FlexibleVecString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Number(f64),
+        }
+        Ok(Self(match Repr::deserialize(deserializer)? {
+            Repr::Text(s) => s,
+            Repr::Number(n) => n.to_string(),
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UserBoundValue<T> {
@@ -422,9 +444,10 @@ pub struct SceneObject {
     /// Text layers: `top` / `center` / `bottom`.
     #[serde(default)]
     pub verticalalign: Option<String>,
-    /// Text layers: inner margin in scene units.
+    /// Text layers: inner margin in scene units, usually `"x y"` (like `origin`/`scale`), but
+    /// some scenes store a single scalar number applied to every component.
     #[serde(default)]
-    pub padding: Option<UserBoundValue<f32>>,
+    pub padding: Option<UserBoundValue<FlexibleVecString>>,
     #[serde(
         default,
         rename = "animationlayers",
@@ -765,6 +788,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scene.objects[0].name, "x");
+    }
+
+    #[test]
+    fn text_layer_padding_is_a_vec2_string_not_a_scalar() {
+        // WE stores text `padding` as an "x y" vector (like `origin`/`scale`), not a bare
+        // number; a scene with a text layer failed to load entirely when this was typed as
+        // `UserBoundValue<f32>`.
+        let scene = parse_scene_json(
+            r#"{ "general": {}, "objects": [ { "name": "t", "padding": "32.00000 32.00000" } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            scene.objects[0].padding.as_ref().unwrap().default_value().0,
+            "32.00000 32.00000"
+        );
+    }
+
+    #[test]
+    fn text_layer_padding_also_accepts_a_bare_scalar() {
+        let scene =
+            parse_scene_json(r#"{ "general": {}, "objects": [ { "name": "t", "padding": 6 } ] }"#)
+                .unwrap();
+        assert_eq!(
+            scene.objects[0].padding.as_ref().unwrap().default_value().0,
+            "6"
+        );
     }
 
     #[test]

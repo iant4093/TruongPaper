@@ -27,8 +27,8 @@ use glam::{Mat4, Vec2, Vec3};
 use truongpaper_we_formats::{
     parse_scene_json, parse_tex, parse_user_properties, parse_vec2_or, parse_vec3_or,
     parse_vec_components, resolve_bound_bool, resolve_bound_value, resolve_json_binding,
-    SceneEffectRef, SceneFile, SceneObject, UserBoundValue, UserConditionSpec, UserPropertyMap,
-    WeVirtualFileSystem,
+    FlexibleVecString, SceneEffectRef, SceneFile, SceneObject, UserBoundValue, UserConditionSpec,
+    UserPropertyMap, WeVirtualFileSystem,
 };
 
 use crate::diagnostics::DiagnosticsLog;
@@ -513,6 +513,21 @@ fn opt_f32(b: &Option<UserBoundValue<f32>>, props: &UserPropertyMap, default: f3
         .unwrap_or(default)
 }
 
+/// Resolves a vec2-shaped bound value (`"x y"` or a bare scalar, like `padding`) to its x
+/// component.
+fn opt_vec2_x(
+    b: &Option<UserBoundValue<FlexibleVecString>>,
+    props: &UserPropertyMap,
+    default: f32,
+) -> f32 {
+    b.as_ref()
+        .map(|b| {
+            let raw: FlexibleVecString = resolve_bound_value(b, props);
+            parse_vec2_or(&raw.0, Vec2::splat(default)).x
+        })
+        .unwrap_or(default)
+}
+
 /// Text-layer style from the scene object (bound values resolved).
 fn text_style(obj: &SceneObject, props: &UserPropertyMap) -> TextStyle {
     let pointsize = opt_f32(&obj.pointsize, props, DEFAULT_POINT_SIZE);
@@ -525,7 +540,7 @@ fn text_style(obj: &SceneObject, props: &UserPropertyMap) -> TextStyle {
         font: obj.font.clone().filter(|f| !f.trim().is_empty()),
         halign: HAlign::parse(obj.horizontalalign.as_deref()),
         valign: VAlign::parse(obj.verticalalign.as_deref()),
-        padding: opt_f32(&obj.padding, props, 0.0).max(0.0),
+        padding: opt_vec2_x(&obj.padding, props, 0.0).max(0.0),
     }
 }
 

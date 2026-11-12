@@ -18,10 +18,10 @@ pub use mdl::{
 pub use scene_schema::{
     condition_matches, parse_scene_json, parse_user_properties, parse_vec2_or, parse_vec3_or,
     parse_vec4_or, parse_vec_components, resolve_bound_bool, resolve_bound_value,
-    resolve_json_binding, EffectBindSlot, EffectFboSpec, EffectFile, EffectPassSpec, MaterialFile,
-    MaterialPassSpec, ModelJsonFile, OrthogonalProjection, SceneCamera, SceneEffectRef, SceneFile,
-    SceneGeneral, SceneObject, ScenePassOverride, UserBoundValue, UserConditionSpec,
-    UserPropertyMap,
+    resolve_json_binding, EffectBindSlot, EffectFboSpec, EffectFile, EffectPassSpec,
+    FlexibleVecString, MaterialFile, MaterialPassSpec, ModelJsonFile, OrthogonalProjection,
+    SceneCamera, SceneEffectRef, SceneFile, SceneGeneral, SceneObject, ScenePassOverride,
+    UserBoundValue, UserConditionSpec, UserPropertyMap,
 };
 pub use vfs::{MappedPkg, WallpaperVfs, WeVirtualFileSystem};
 

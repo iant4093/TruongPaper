@@ -240,6 +240,48 @@ globalThis.__WEColor = {
     globalThis.engine.isLandscape = function () { return true; };
 })();
 
+
+// Animation / hierarchy API: accepted and inert (the renderer drives animation itself).
+globalThis.__animStub = function () {
+    const a = {
+        rate: 1, frame: 0, visible: true, name: '', duration: 0,
+        play() {}, pause() {}, stop() {}, isPlaying() { return false; },
+        setFrame(f) { a.frame = f; }, getFrame() { return a.frame; },
+    };
+    return a;
+};
+globalThis.__layerStubs = function () {
+    return {
+        getAnimation() { return globalThis.__animStub(); },
+        getAnimationLayer() { return globalThis.__animStub(); },
+        getTextureAnimation() { return globalThis.__animStub(); },
+        getParent() { return null; },
+        getChildren() { return []; },
+        getBoundingBox() { return null; },
+        getInitialLayer() { return this; },
+        setParent() {},
+        destroy() {},
+        localToWorld(p) { return p; },
+        worldToLocal(p) { return p; },
+    };
+};
+{
+    const stubLayer = (name) => Object.assign({
+        name, origin: new Vec3(0, 0, 0), scale: new Vec3(1, 1, 1), angles: new Vec3(0, 0, 0),
+        size: new Vec2(0, 0), color: new Vec3(1, 1, 1), alpha: 1, visible: true, text: '',
+        getEffect() { return { visible: true }; },
+    }, globalThis.__layerStubs());
+    globalThis.thisScene.getLayer = function (name) {
+        return globalThis.__layers[name] || (globalThis.__layers[name] = stubLayer(name));
+    };
+    globalThis.thisScene.getAnimation = function () { return globalThis.__animStub(); };
+    globalThis.thisScene.destroyLayer = function () {};
+    globalThis.thisScene.createLayer = function (d) { return stubLayer(typeof d === 'string' ? d : 'layer'); };
+    globalThis.thisScene.sortLayer = function () {};
+    globalThis.thisScene.getLayerIndex = function () { return 0; };
+    globalThis.thisScene.bloom = {}; globalThis.thisScene.camera = {};
+    globalThis.thisScene.clearColor = new Vec3(0, 0, 0);
+}
 // Host-side helper: call `fname(arg)` on every slot that exports it; one failing script
 // must not take down the others.
 globalThis.__callAll = function (fname, arg) {
@@ -352,7 +394,7 @@ fn load_script_module<'js>(
     source: &str,
 ) -> anyhow::Result<rquickjs::Object<'js>> {
     let full = format!(
-        "const thisLayer = globalThis.__cur.thisLayer, createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
+        "const thisObject = globalThis.__cur.thisLayer, thisLayer = thisObject, createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
     );
     let module = Module::declare(ctx.clone(), format!("__slot{unique}"), full)
         .map_err(|e| js_err(ctx, e))?;
@@ -469,7 +511,8 @@ impl SceneScriptEngine {
                     alpha: {},
                     visible: {},
                     text: '',
-                    getEffect() {{ return {{ visible: true }}; }}
+                    getEffect() {{ return {{ visible: true }}; }},
+                    ...__layerStubs()
                 }};",
                 js_num(origin[0]),
                 js_num(origin[1]),

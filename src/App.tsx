@@ -2,7 +2,7 @@ import { Dropdown } from './components/Dropdown';
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Settings as SettingsIcon } from 'lucide-react';
 import { DetailsDrawer } from './components/DetailsDrawer';
-import { FeedbackHost } from './components/Feedback';
+import { FeedbackHost, StatusBanner } from './components/Feedback';
 import { PlaybackBar } from './components/PlaybackBar';
 import { ResourceUsage } from './components/ResourceUsage';
 import { WindowControls } from './components/WindowControls';
@@ -169,13 +169,14 @@ export const App: React.FC = () => {
         {authOpen && <SteamAuthModal />}
         {previewOpen && <WorkshopPreviewModal />}
       </Suspense>
-      <FeedbackHost />
+      <FeedbackHost floatingToasts={false} />
       <aside className="app-sidebar">
         <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && <WindowControls />}</div>
         <div className="app-brand" data-tauri-drag-region><img src="/app-icon.png" width={23} height={23} alt="" /><span>TruongPaper</span></div>
         <nav aria-label="Studio views" className="sidebar-nav">
           {STUDIO_TABS.filter(([key]) => key !== 'settings').map(navButton)}
           <div className="sidebar-spacer" />
+          <StatusBanner />
           <ResourceUsage cachedBytes={cachedBytes} />
           {navButton(STUDIO_TABS[STUDIO_TABS.length - 1])}
         </nav>

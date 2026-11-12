@@ -325,19 +325,6 @@ export const PlaylistsView: React.FC = () => {
         </div>
       )}
 
-      <SectionTitle>Change photo every</SectionTitle>
-      <div className="card" style={{ padding: 16 }}>
-        <SegmentedControl
-          value={String(settings?.rotationIntervalSeconds ?? 1800)}
-          options={ROTATION_INTERVALS.map((r) => [String(r.seconds), r.label] as const)}
-          onChange={(next) => void save(() => updateSettings({ rotationIntervalSeconds: Number(next) }))}
-        />
-        <div className="view-subtitle" style={{ marginTop: 12 }}>
-          Applies to displays showing photos, at launch and after wake. Choose “Never” to change photos by hand.
-          Playlists use their own interval.
-        </div>
-      </div>
-
       <SectionTitle>Transition effect</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
         <SegmentedControl

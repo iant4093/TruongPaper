@@ -350,7 +350,8 @@ describe('Playlists', () => {
       expect(document.body.textContent).not.toMatch(word);
     }
     expect(screen.getByText('Transition effect')).toBeTruthy();
-    expect(screen.getByText('Change photo every')).toBeTruthy();
+    // The photo timer now lives with Photography, not Playlists.
+    expect(screen.queryByText('Change photo every')).toBeNull();
   });
 });
 
@@ -551,5 +552,26 @@ describe('Tray popover', () => {
     await act(async () => { useAppStore.setState({ retryPhotoNow: retry, photoStatus: { ...useAppStore.getState().photoStatus!, offline: true } }); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry now' })); });
     expect(retry).toHaveBeenCalled();
+  });
+});
+
+describe('status banner and photo timer', () => {
+  it('shows only the newest message in the sidebar, not as floating toasts', async () => {
+    await openApp();
+    const { toast } = await import('../src/store/feedback');
+    await act(async () => { toast.success('First'); toast.success('Saved'); });
+    const banner = document.querySelector('.app-sidebar .status-banner');
+    expect(banner?.textContent).toContain('Saved');
+    expect(banner?.textContent).not.toContain('First');
+    expect(document.querySelector('.toast-stack')).toBeNull();
+  });
+
+  it('sets how often photos change from Photography', async () => {
+    await openApp();
+    await goto('Photography', /^Ian Truong Photography$/);
+    const picker = screen.getByRole('combobox', { name: 'Change photo every' });
+    fireEvent.click(picker);
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: '5 min' })); });
+    expect(useAppStore.getState().settings!.rotationIntervalSeconds).toBe(300);
   });
 });

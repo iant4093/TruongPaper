@@ -18,7 +18,7 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import { confirmAction, toast } from '../../store/feedback';
 import { parseImportLink } from '../../lib/importLinks';
-import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, plural } from '../../lib/format';
+import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, plural } from '../../lib/format';
 import type { FitMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 import { Dropdown } from '../Dropdown';
@@ -250,6 +250,13 @@ export const PhotosApiView: React.FC = () => {
             />
           </div>
         )}
+        <div className="settings-field" style={{ marginTop: 12 }}>
+          <span>Change photo every</span>
+          <Dropdown<number> label="Change photo every" value={settings?.rotationIntervalSeconds ?? 1800}
+            options={ROTATION_INTERVALS.map((r) => [r.seconds, r.label] as const)}
+            onChange={(rotationIntervalSeconds) => void runPhotoAction(() => updateSettings({ rotationIntervalSeconds }), 'Saved')} />
+          <span className="view-subtitle">For displays showing photos. Playlists keep their own timer.</span>
+        </div>
         <div className="settings-field" style={{ marginTop: 12 }}>
           <span>Photo fit</span>
           <Dropdown<FitMode> label="Photo fit" value={settings?.defaultFitMode ?? 'fill'}

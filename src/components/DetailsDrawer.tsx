@@ -7,7 +7,8 @@ import { SceneReport } from './SceneReport';
 import { Thumb } from './ui';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import { confirmAction, toast } from '../store/feedback';
-import { WALLPAPER_TYPE_LABEL, formatBytes, photoPreviewSrc, wallpaperPreviewSrc } from '../lib/format';
+import { ROTATION_INTERVALS, WALLPAPER_TYPE_LABEL, formatBytes, photoPreviewSrc, wallpaperPreviewSrc } from '../lib/format';
+import { Dropdown } from './Dropdown';
 import type { WallpaperSource } from '../types/ipc';
 import type { StudioTab } from '../App';
 
@@ -36,6 +37,8 @@ export const DetailsDrawer: React.FC<{
   const setLocalWallpaperProperty = useAppStore((s) => s.setLocalWallpaperProperty);
   const setLocalWallpaperAdjustments = useAppStore((s) => s.setLocalWallpaperAdjustments);
   const [applying, setApplying] = useState(false);
+  const rotationSeconds = useAppStore((s) => s.settings?.rotationIntervalSeconds ?? 1800);
+  const updateSettings = useAppStore((s) => s.updateSettings);
 
   if (!photoSource && !selected) return null;
   const title = photoSource ? 'Ian Truong Photography' : selected!.title;
@@ -95,7 +98,15 @@ export const DetailsDrawer: React.FC<{
       {photoSource ? (
         <div className="photo-source-inspector">
           {photoPreview && <Thumb src={photoPreview} alt="Current photo" height={144} contain />}
-          <p className="photo-source-hint">Photo pool, fit, orientation and storage are all in Photography.</p>
+          <div className="settings-field">
+            <span>Change photo every</span>
+            <Dropdown<number> label="Change photo every" value={rotationSeconds}
+              options={ROTATION_INTERVALS.map((r) => [r.seconds, r.label] as const)}
+              onChange={(rotationIntervalSeconds) => {
+                updateSettings({ rotationIntervalSeconds }).then(() => toast.success('Saved'), (err) => toast.error(err));
+              }} />
+          </div>
+          <p className="photo-source-hint">Photo pool, fit, orientation and storage are in Photography.</p>
           <button type="button" className="button" onClick={() => onNavigate('photos')}>Open Photography settings</button>
         </div>
       ) : selected && (

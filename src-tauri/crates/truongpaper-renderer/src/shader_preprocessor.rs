@@ -340,12 +340,53 @@ pub fn apply_fragment_texcoord_compatibility(frag_src: &str) -> String {
         return frag_src.to_string();
     }
 
-    frag_src
+    let replaced = frag_src
         .replace("v_TexCoord + CAST2(", "v_TexCoord.xy + CAST2(")
         .replace("v_TexCoord - CAST2(", "v_TexCoord.xy - CAST2(")
         .replace("v_TexCoord * CAST2(", "v_TexCoord.xy * CAST2(")
         .replace("v_TexCoord + vec2(", "v_TexCoord.xy + vec2(")
-        .replace("v_TexCoord - vec2(", "v_TexCoord.xy - vec2(")
+        .replace("v_TexCoord - vec2(", "v_TexCoord.xy - vec2(");
+    truncate_arithmetic_texcoord(&replaced)
+}
+
+/// HLSL truncates a wide `v_TexCoord` implicitly when it is an operand of vec2 arithmetic
+/// (`(v_TexCoord * 2.0 - 1.0 - center)`); GLSL rejects the mixed widths. Appends `.xy` to every
+/// bare `v_TexCoord` that sits directly next to an arithmetic operator.
+fn truncate_arithmetic_texcoord(src: &str) -> String {
+    const NAME: &str = "v_TexCoord";
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let is_op = |c: char| matches!(c, '*' | '/' | '+' | '-');
+    let mut out = String::with_capacity(src.len() + 16);
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with("varying") || t.starts_with("in ") || t.starts_with("//") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let mut rest = line;
+        let mut consumed = String::new();
+        while let Some(idx) = rest.find(NAME) {
+            let before = &rest[..idx];
+            let after = &rest[idx + NAME.len()..];
+            let word_start = !before.chars().next_back().is_some_and(|c| is_ident(c) || c == '.');
+            let word_end = !after.chars().next().is_some_and(is_ident);
+            let next = after.trim_start().chars().next();
+            let prev = before.trim_end().chars().next_back();
+            // `a - b` and unary minus both count; `a-- ` never occurs in shaders.
+            let arithmetic = next.is_some_and(is_op) || prev.is_some_and(is_op);
+            consumed.push_str(before);
+            consumed.push_str(NAME);
+            if word_start && word_end && next != Some('.') && arithmetic {
+                consumed.push_str(".xy");
+            }
+            rest = after;
+        }
+        consumed.push_str(rest);
+        out.push_str(&consumed);
+        out.push('\n');
+    }
+    out
 }
 
 /// Rule 6: Wallpaper Engine compiles shaders with HLSL-style implicit truncation, so stock
@@ -400,6 +441,121 @@ pub fn apply_truncating_assignment_compatibility(src: &str) -> String {
     out
 }
 
+/// HLSL converts scalars implicitly (`int hit = step(a, b);`, `uint i = x % 32;` with a float
+/// `x`); GLSL (and naga) reject those stores. Wraps the initializer of single-declaration
+/// `int` / `uint` / `float` statements in the matching constructor and turns `a % b` inside
+/// them into `mod(float(a), float(b))`.
+pub fn apply_scalar_conversion_compatibility(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 64);
+    for line in src.lines() {
+        out.push_str(&convert_scalar_decl(line).unwrap_or_else(|| line.to_string()));
+        out.push('\n');
+    }
+    out
+}
+
+fn convert_scalar_decl(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let t = line.trim();
+    let (ty, rest) = ["uint ", "int ", "float "]
+        .iter()
+        .find_map(|p| t.strip_prefix(p).map(|r| (p.trim(), r)))?;
+    let (name, init) = rest.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    if init.starts_with('=') {
+        return None;
+    }
+    let init = init.trim().strip_suffix(';')?.trim();
+    if init.split("//").nth(1).is_some() || init.is_empty() {
+        return None;
+    }
+    let mut depth = 0i32;
+    for c in init.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    // Already an explicit conversion of the whole initializer.
+    let already = init.starts_with(&format!("{ty}(")) && {
+        let mut d = 0i32;
+        let mut whole = true;
+        for (i, c) in init.char_indices() {
+            match c {
+                '(' => d += 1,
+                ')' => {
+                    d -= 1;
+                    if d == 0 && i + 1 != init.len() {
+                        whole = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        whole
+    };
+    if already {
+        return None;
+    }
+    let init = rewrite_modulo(init);
+    Some(format!("{}{ty} {name} = {ty}({init});", &line[..indent_len]))
+}
+
+/// `a % b` (simple operands) -> `mod(float(a), float(b))`.
+fn rewrite_modulo(expr: &str) -> String {
+    let mut s = expr.to_string();
+    // A few passes cover chained uses; each pass rewrites the leftmost `%`.
+    for _ in 0..4 {
+        let Some(pos) = s.find('%') else { break };
+        let (left, right) = (&s[..pos], &s[pos + 1..]);
+        let l = left.trim_end();
+        let lstart = if l.ends_with(')') {
+            let mut d = 0i32;
+            let mut start = 0;
+            for (i, c) in l.char_indices().rev() {
+                match c {
+                    ')' => d += 1,
+                    '(' => {
+                        d -= 1;
+                        if d == 0 {
+                            start = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            start
+        } else {
+            l.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+                .map_or(0, |i| i + 1)
+        };
+        let r = right.trim_start();
+        let rlen = r
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(r.len());
+        if rlen == 0 {
+            break;
+        }
+        s = format!(
+            "{}mod(float({}), float({})){}",
+            &l[..lstart],
+            &l[lstart..],
+            &r[..rlen],
+            &r[rlen..]
+        );
+    }
+    s
+}
+
 #[derive(Debug, Clone)]
 pub struct ReflectedUniformField {
     pub name: String,
@@ -445,6 +601,8 @@ pub fn translate_we_shader_pair(
     let linked_frag = apply_fragment_texcoord_compatibility(raw_frag_preprocessed);
     let linked_vert = apply_truncating_assignment_compatibility(&linked_vert);
     let linked_frag = apply_truncating_assignment_compatibility(&linked_frag);
+    let linked_vert = apply_scalar_conversion_compatibility(&linked_vert);
+    let linked_frag = apply_scalar_conversion_compatibility(&linked_frag);
 
     let (vert_450, frag_450, uniform_fields, ubo_size) =
         upgrade_to_naga_glsl450(&linked_vert, &linked_frag);
@@ -1046,4 +1204,31 @@ pub const WE_BUILTIN_UNIFORMS: &[BuiltinUniform] = &[
 /// Looks up a built-in uniform by exact name.
 pub fn builtin_uniform(name: &str) -> Option<&'static BuiltinUniform> {
     WE_BUILTIN_UNIFORMS.iter().find(|u| u.name == name)
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_declarations_get_explicit_conversions() {
+        let out = apply_scalar_conversion_compatibility(
+            "\tint hit = step(a, b);\n\tuint f = (g + 1) % RES;\n\tfloat x = max(p, q);\nfloat y = float(z);\nint a = 1, b = 2;\n",
+        );
+        assert!(out.contains("int hit = int(step(a, b));"), "{out}");
+        assert!(out.contains("uint f = uint(mod(float((g + 1)), float(RES)));"), "{out}");
+        assert!(out.contains("float x = float(max(p, q));"), "{out}");
+        assert!(out.contains("float y = float(z);\n"), "{out}");
+        assert!(out.contains("int a = 1, b = 2;"), "{out}");
+    }
+
+    #[test]
+    fn wide_texcoord_in_arithmetic_is_truncated() {
+        let out = apply_fragment_texcoord_compatibility(
+            "varying vec4 v_TexCoord;\nvec2 uv = (v_TexCoord * 2.0 - 1.0) / 2.0;\nvec4 c = texSample2D(t, v_TexCoord);\nfloat a = v_TexCoord.z * 2.0;\n",
+        );
+        assert!(out.contains("(v_TexCoord.xy * 2.0 - 1.0)"), "{out}");
+        assert!(out.contains("texSample2D(t, v_TexCoord)"), "{out}");
+        assert!(out.contains("v_TexCoord.z * 2.0"), "{out}");
+    }
 }

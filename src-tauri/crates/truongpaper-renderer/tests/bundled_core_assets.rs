@@ -131,6 +131,7 @@ fn bundled_headers_and_utility_textures_resolve() {
         "common.h",
         "common_blending.h",
         "common_blur.h",
+        "common_composite.h",
         "common_fragment.h",
         "common_perspective.h",
     ] {

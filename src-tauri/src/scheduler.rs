@@ -13,7 +13,9 @@
 //! "Never (Manual Only)": no timer, launch or wake rotation (launch still restores the persisted
 //! wallpaper). Paused monitors (`WallpaperHost::monitor_should_render() == false`, or the desktop
 //! asleep/locked) do not rotate; an overdue timer or a pending wake rotation fires once they are
-//! visible again. Playlist positions live in memory only (docs do not specify persistence).
+//! visible again. Every display keeps its own position and timer; positions are persisted in
+//! the `playlist_positions` table and restored at launch. The runtime loop does cheap atomic
+//! checks each second and only reads the database when something is due or changed.
 
 use crate::commands::monitor::{
     apply_source, first_playlist_index, live_monitors, lock_monitor_apply, show_photo,
@@ -22,7 +24,10 @@ use crate::commands::monitor::{
 use crate::commands::photo::{rotate_photo_next, PhotoServiceState};
 use crate::models::{Playlist, PlaylistItem, PlaylistMode, WallpaperSource};
 use crate::state::{AppState, SETTING_MULTI_MONITOR_MODE};
+use parking_lot::Mutex;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
@@ -32,6 +37,10 @@ pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
 pub const LAUNCH_DELAY: Duration = Duration::from_secs(2);
 /// The live monitor list needs a main-thread round trip; refresh it every N ticks.
 const LIVE_MONITOR_REFRESH_TICKS: u32 = 5;
+/// A paused / hidden monitor is re-checked this often for becoming visible again.
+const NOT_RENDERABLE_RECHECK: Duration = Duration::from_secs(10);
+/// Safety net: a full tick (database read) at least this often, to notice external changes.
+const MAX_IDLE_BETWEEN_FULL_TICKS: Duration = Duration::from_secs(30);
 /// Bound for queued manual notes when no scheduler is draining them (tests, early startup).
 const MAX_PENDING_MANUAL_NOTES: usize = 256;
 
@@ -201,6 +210,14 @@ pub struct RotationScheduler {
     launched: bool,
     wake_generation: u64,
     manual: Vec<ManualNote>,
+    /// Monitors whose next playlist item was requested by the user (hotkey / tray).
+    forced: Vec<String>,
+    /// Last known persisted `monitor -> (playlist, index)`; seeds new monitors at launch.
+    positions: HashMap<String, (String, usize)>,
+    /// Positions that changed since [`Self::take_position_changes`].
+    position_changes: Vec<(String, String, usize)>,
+    /// Earliest instant at which [`Self::plan`] could have work again (`None` = nothing timed).
+    next_wake: Option<Instant>,
 }
 
 impl RotationScheduler {
@@ -211,7 +228,31 @@ impl RotationScheduler {
             launched: false,
             wake_generation,
             manual: Vec::new(),
+            forced: Vec::new(),
+            positions: HashMap::new(),
+            position_changes: Vec::new(),
+            next_wake: None,
         }
+    }
+
+    /// Loads persisted per-display playlist positions (call before the first [`Self::plan`]).
+    pub fn restore_positions(&mut self, positions: HashMap<String, (String, usize)>) {
+        self.positions = positions;
+    }
+
+    /// Positions to persist: `(monitor_id, playlist_id, index)`.
+    pub fn take_position_changes(&mut self) -> Vec<(String, String, usize)> {
+        std::mem::take(&mut self.position_changes)
+    }
+
+    /// When the next timed rotation (or a visibility re-check) is due after the last plan.
+    pub fn next_wake(&self) -> Option<Instant> {
+        self.next_wake
+    }
+
+    /// The user asked for the next item of `monitor_id` now; applied by the next [`Self::plan`].
+    pub fn note_force_next(&mut self, monitor_id: &str) {
+        self.forced.push(monitor_id.to_string());
     }
 
     /// Records a manual rotation; applied by the next [`Self::plan`].
@@ -248,6 +289,7 @@ impl RotationScheduler {
         let launch = !std::mem::replace(&mut self.launched, true);
         let woke = std::mem::replace(&mut self.wake_generation, wake_generation) != wake_generation;
         let manual = std::mem::take(&mut self.manual);
+        let forced = std::mem::take(&mut self.forced);
         for (id, schedule) in &mut self.monitors {
             if !monitors.iter().any(|m| &m.monitor_id == id) {
                 schedule.restore_pending = true;
@@ -262,13 +304,29 @@ impl RotationScheduler {
                 .and_then(first_playlist_index)
                 .unwrap_or(0);
             let is_new = !self.monitors.contains_key(&m.monitor_id);
+            let saved_index = match (&m.source, &m.playlist, self.positions.get(&m.monitor_id)) {
+                (
+                    WallpaperSource::Playlist { playlist_id },
+                    Some(playlist),
+                    Some((saved_id, idx)),
+                ) if saved_id == playlist_id
+                    && playlist
+                        .items
+                        .get(*idx)
+                        .is_some_and(|i| playlist_item_allowed(playlist.mode, i)) =>
+                {
+                    Some(*idx)
+                }
+                _ => None,
+            };
+            let seeded = is_new && saved_index.is_some();
             let s = self
                 .monitors
                 .entry(m.monitor_id.clone())
                 .or_insert_with(|| MonitorSchedule {
                     source: m.source.clone(),
                     last_rotation: now,
-                    playlist_index: first_index,
+                    playlist_index: saved_index.unwrap_or(first_index),
                     wake_pending: false,
                     restore_pending: false,
                 });
@@ -305,7 +363,7 @@ impl RotationScheduler {
             }
 
             if launch || is_new || s.restore_pending {
-                let restore = if s.restore_pending {
+                let restore = if s.restore_pending || seeded {
                     restored_playlist_action(s, m).unwrap_or(RotationAction::Restore)
                 } else {
                     RotationAction::Restore
@@ -324,6 +382,20 @@ impl RotationScheduler {
                     trigger: RotationTrigger::AppLaunch,
                     action,
                 });
+                continue;
+            }
+            if forced.contains(&m.monitor_id) {
+                // User-requested "next": advance now, even while paused or set to "Never".
+                s.last_rotation = now;
+                s.wake_pending = false;
+                if let Some(action) = rotation_action(s, m, false) {
+                    out.push(PlannedRotation {
+                        monitor_id: m.monitor_id.clone(),
+                        source: m.source.clone(),
+                        trigger: RotationTrigger::Manual,
+                        action,
+                    });
+                }
                 continue;
             }
             if m.interval_secs == 0 {
@@ -368,6 +440,34 @@ impl RotationScheduler {
                 }
             }
         }
+
+        let mut next: Option<Instant> = None;
+        for m in monitors {
+            let Some(s) = self.monitors.get(&m.monitor_id) else {
+                continue;
+            };
+            if let WallpaperSource::Playlist { playlist_id } = &m.source {
+                let current = (playlist_id.clone(), s.playlist_index);
+                if m.playlist.is_some() && self.positions.get(&m.monitor_id) != Some(&current) {
+                    self.position_changes.push((
+                        m.monitor_id.clone(),
+                        current.0.clone(),
+                        current.1,
+                    ));
+                    self.positions.insert(m.monitor_id.clone(), current);
+                }
+            }
+            if m.interval_secs == 0 || matches!(m.source, WallpaperSource::Workshop { .. }) {
+                continue;
+            }
+            let due = if !m.renderable || s.wake_pending {
+                now + NOT_RENDERABLE_RECHECK
+            } else {
+                s.last_rotation + Duration::from_secs(m.interval_secs)
+            };
+            next = Some(next.map_or(due, |n| n.min(due)));
+        }
+        self.next_wake = next;
         out
     }
 }
@@ -425,6 +525,30 @@ fn rotation_action(
     }
 }
 
+static REPLAN: AtomicBool = AtomicBool::new(true);
+static PLAYLIST_CACHE: Mutex<Option<Arc<Vec<Playlist>>>> = parking_lot::const_mutex(None);
+
+/// Asks the runtime loop for a full tick on its next second.
+pub fn request_replan() {
+    REPLAN.store(true, Ordering::Relaxed);
+}
+
+/// Drops the cached playlists; call after any write to the `playlists` table.
+pub fn invalidate_playlist_cache() {
+    *PLAYLIST_CACHE.lock() = None;
+    request_replan();
+}
+
+/// Playlists parsed once and kept until [`invalidate_playlist_cache`].
+fn cached_playlists(conn: &rusqlite::Connection) -> Result<Arc<Vec<Playlist>>, String> {
+    if let Some(cached) = PLAYLIST_CACHE.lock().as_ref() {
+        return Ok(cached.clone());
+    }
+    let fresh = Arc::new(crate::db::list_playlists(conn)?);
+    *PLAYLIST_CACHE.lock() = Some(fresh.clone());
+    Ok(fresh)
+}
+
 static MANUAL_NOTES: parking_lot::Mutex<Vec<ManualNote>> = parking_lot::const_mutex(Vec::new());
 
 /// Called by IPC commands after a user-initiated rotation / apply so the scheduler restarts the
@@ -438,6 +562,23 @@ pub fn note_manual_rotation(monitor_id: Option<&str>, restart_playlist: bool) {
         monitor_id: monitor_id.map(str::to_string),
         restart_playlist,
     });
+    request_replan();
+}
+
+static FORCED_NEXT: parking_lot::Mutex<Vec<String>> = parking_lot::const_mutex(Vec::new());
+
+/// Advances the playlist of `monitor_id` on the next scheduler tick (global hotkey / tray Next).
+pub fn request_next(monitor_id: &str) {
+    let mut ids = FORCED_NEXT.lock();
+    if ids.len() >= MAX_PENDING_MANUAL_NOTES {
+        ids.remove(0);
+    }
+    ids.push(monitor_id.to_string());
+    request_replan();
+}
+
+fn take_forced_next() -> Vec<String> {
+    std::mem::take(&mut *FORCED_NEXT.lock())
 }
 
 fn take_manual_notes() -> Vec<ManualNote> {
@@ -454,6 +595,7 @@ pub fn note_monitor_disconnected(monitor_id: &str) {
         ids.remove(0);
     }
     ids.push(monitor_id.to_string());
+    request_replan();
 }
 
 fn take_disconnected() -> Vec<String> {
@@ -470,21 +612,57 @@ pub fn planned_source_is_current(
 }
 
 /// Starts the scheduler task (called once from `setup_app`).
+///
+/// The loop wakes every [`TICK_INTERVAL`] but only touches the database (a "full tick") when
+/// something needs it: the first run, a note / replan request, a wake from sleep, a changed
+/// rotation setting or monitor list, the planned next due time, or the idle safety net.
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(LAUNCH_DELAY).await;
         let mut scheduler = RotationScheduler::new(crate::power::wake_generation());
+        if let Some(state) = app.try_state::<AppState>() {
+            match crate::db::load_playlist_positions(&state.db.lock()) {
+                Ok(p) => scheduler.restore_positions(p),
+                Err(err) => tracing::warn!("rotation scheduler: cannot load positions: {err}"),
+            }
+        }
         let mut live: Vec<String> = Vec::new();
         let mut refresh_in: u32 = 0;
+        let mut last_full = Instant::now();
+        let mut last_gen = crate::power::wake_generation();
+        let mut last_suspended = crate::power::rendering_suspended();
+        let mut last_interval: Option<u64> = None;
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+            let mut needed = false;
             if refresh_in == 0 {
-                live = live_monitors(&app).into_iter().map(|m| m.id).collect();
+                let fresh: Vec<String> = live_monitors(&app).into_iter().map(|m| m.id).collect();
+                needed |= fresh != live;
+                live = fresh;
                 refresh_in = LIVE_MONITOR_REFRESH_TICKS;
             }
             refresh_in -= 1;
+            let now = Instant::now();
+            let generation = crate::power::wake_generation();
+            let suspended = crate::power::rendering_suspended();
+            let settings_interval = app
+                .try_state::<AppState>()
+                .map(|s| s.settings.lock().rotation_interval_seconds);
+            needed |= REPLAN.swap(false, Ordering::Relaxed)
+                || generation != last_gen
+                || suspended != last_suspended
+                || settings_interval != last_interval
+                || scheduler.next_wake().is_some_and(|due| due <= now)
+                || now.duration_since(last_full) >= MAX_IDLE_BETWEEN_FULL_TICKS;
+            if !needed {
+                continue;
+            }
+            last_gen = generation;
+            last_suspended = suspended;
+            last_interval = settings_interval;
+            last_full = now;
             run_tick(&app, &mut scheduler, &live).await;
         }
     });
@@ -501,7 +679,7 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
     let snapshot = {
         let conn = state.db.lock();
         crate::db::monitor_sources(&conn).and_then(|assigned| {
-            let playlists = crate::db::list_playlists(&conn)?;
+            let playlists = cached_playlists(&conn)?;
             let clone = truongpaper_core::get_setting::<String>(&conn, SETTING_MULTI_MONITOR_MODE)
                 .ok()
                 .flatten()
@@ -526,12 +704,24 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
     for id in take_disconnected() {
         scheduler.mark_disconnected(&id);
     }
+    for id in take_forced_next() {
+        scheduler.note_force_next(&id);
+    }
     let plans = scheduler.plan(
         Instant::now(),
         &monitors,
         crate::power::wake_generation(),
         clone_photos,
     );
+    let changes = scheduler.take_position_changes();
+    if !changes.is_empty() {
+        let conn = state.db.lock();
+        for (monitor, playlist, index) in changes {
+            if let Err(err) = crate::db::save_playlist_position(&conn, &monitor, &playlist, index) {
+                tracing::warn!("rotation scheduler: cannot save position of {monitor}: {err}");
+            }
+        }
+    }
     execute(app, &state, &photo, plans, clone_photos).await;
 }
 
@@ -1148,5 +1338,102 @@ mod tests {
             note_manual_rotation(Some("X"), false);
         }
         assert!(take_manual_notes().len() <= MAX_PENDING_MANUAL_NOTES);
+    }
+
+    #[test]
+    fn requested_next_advances_a_playlist_even_when_paused_or_manual_only() {
+        let p = playlist(PlaylistMode::Mixed, vec![ws("a"), ws("b"), ws("c")]);
+        let mut tick = playlist_tick("A", &p);
+        let t0 = Instant::now();
+        let mut s = RotationScheduler::new(0);
+        // The launch tick rotates to item 1.
+        s.plan(t0, std::slice::from_ref(&tick), 0, false);
+        tick.interval_secs = 0;
+        tick.renderable = false;
+        assert!(s
+            .plan(secs(t0, 5), std::slice::from_ref(&tick), 0, false)
+            .is_empty());
+        s.note_force_next("A");
+        let plans = s.plan(secs(t0, 6), std::slice::from_ref(&tick), 0, false);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].trigger, RotationTrigger::Manual);
+        assert!(matches!(
+            plans[0].action,
+            RotationAction::ShowPlaylistItem { index: 2, .. }
+        ));
+        assert!(s
+            .plan(secs(t0, 7), std::slice::from_ref(&tick), 0, false)
+            .is_empty());
+    }
+
+    #[test]
+    fn forced_next_requests_are_bounded() {
+        for _ in 0..(MAX_PENDING_MANUAL_NOTES + 10) {
+            request_next("X");
+        }
+        assert!(take_forced_next().len() <= MAX_PENDING_MANUAL_NOTES);
+    }
+
+    #[test]
+    fn displays_on_one_playlist_rotate_independently() {
+        let p = playlist(PlaylistMode::Mixed, vec![ws("a"), ws("b"), ws("c")]);
+        let t0 = Instant::now();
+        let mut sch = RotationScheduler::new(0);
+        let ticks = [playlist_tick("A", &p), playlist_tick("B", &p)];
+        sch.plan(t0, &ticks, 0, false); // launch rotation moves both to item 1
+        assert_eq!(sch.playlist_index("A"), Some(1));
+        assert_eq!(sch.playlist_index("B"), Some(1));
+        // Only A is advanced by the user.
+        sch.note_force_next("A");
+        sch.plan(secs(t0, 5), &ticks, 0, false);
+        assert_eq!(sch.playlist_index("A"), Some(2));
+        assert_eq!(sch.playlist_index("B"), Some(1));
+        // B's own timer (from t0) fires at 60s; A's was restarted at 5s so it is not due yet.
+        let plans = sch.plan(secs(t0, 61), &ticks, 0, false);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].monitor_id, "B");
+        assert_eq!(sch.playlist_index("A"), Some(2));
+        assert_eq!(sch.playlist_index("B"), Some(2));
+        assert_eq!(sch.next_wake(), Some(secs(t0, 65)));
+    }
+
+    #[test]
+    fn positions_are_reported_and_restored_after_restart() {
+        let p = playlist(PlaylistMode::Mixed, vec![ws("a"), ws("b"), ws("c")]);
+        let t0 = Instant::now();
+        let ticks = [playlist_tick("A", &p)];
+        let mut sch = RotationScheduler::new(0);
+        sch.plan(t0, &ticks, 0, false);
+        sch.note_force_next("A");
+        sch.plan(secs(t0, 1), &ticks, 0, false);
+        let changes = sch.take_position_changes();
+        assert_eq!(changes.last().unwrap(), &("A".into(), "p1".into(), 2));
+        assert!(sch.take_position_changes().is_empty());
+
+        // New process: the saved index seeds the monitor and launch continues from it.
+        let mut again = RotationScheduler::new(0);
+        again.restore_positions(HashMap::from([("A".to_string(), ("p1".to_string(), 1))]));
+        let plans = again.plan(t0, &ticks, 0, false);
+        assert_eq!(plans.len(), 1);
+        assert!(matches!(
+            plans[0].action,
+            RotationAction::ShowPlaylistItem { index: 2, .. }
+        ));
+        // A position saved for another playlist is ignored.
+        let mut other = RotationScheduler::new(0);
+        other.restore_positions(HashMap::from([("A".to_string(), ("zzz".to_string(), 2))]));
+        other.plan(t0, &ticks, 0, false);
+        assert_eq!(other.playlist_index("A"), Some(1));
+    }
+
+    #[test]
+    fn next_wake_is_the_earliest_due_time() {
+        let t0 = Instant::now();
+        let mut sch = RotationScheduler::new(0);
+        sch.plan(t0, &[photo_tick("A", 30), photo_tick("B", 90)], 0, false);
+        assert_eq!(sch.next_wake(), Some(secs(t0, 30)));
+        let mut never = RotationScheduler::new(0);
+        never.plan(t0, &[photo_tick("A", 0)], 0, false);
+        assert_eq!(never.next_wake(), None);
     }
 }

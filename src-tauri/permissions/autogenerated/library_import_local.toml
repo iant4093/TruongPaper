@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-library-import-local"
+description = "Enables the library_import_local command without any pre-configured scope."
+commands.allow = ["library_import_local"]
+
+[[permission]]
+identifier = "deny-library-import-local"
+description = "Denies the library_import_local command without any pre-configured scope."
+commands.deny = ["library_import_local"]

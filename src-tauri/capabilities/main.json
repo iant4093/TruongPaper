@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Default capabilities for TruongPaper Main Studio and Tray Popover windows",
+  "identifier": "main",
+  "description": "Capabilities of the TruongPaper Studio window",
   "windows": [
-    "main",
-    "tray-popover"
+    "main"
   ],
   "permissions": [
     "core:default",
@@ -26,20 +25,11 @@
     "process:allow-restart",
     "shell:default",
     "shell:allow-open",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "bin/DepotDownloader",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    },
     "allow-photo-get-status",
     "allow-photo-fetch-public-catalog",
     "allow-photo-rotate-next",
     "allow-photo-trigger-refill",
+    "allow-photo-retry-now",
     "allow-photo-add-album",
     "allow-photo-toggle-album",
     "allow-photo-remove-album",
@@ -51,15 +41,20 @@
     "allow-photo-clear-cache",
     "allow-photo-reset-history",
     "allow-steam-browse-workshop",
+    "allow-steam-guest-availability",
+    "allow-library-import-local",
     "allow-steam-inspect-url",
     "allow-steam-download-workshop-item",
     "allow-steam-login-qr",
     "allow-steam-login-credentials",
     "allow-steam-submit-2fa-code",
     "allow-steam-logout",
+    "allow-steam-cancel-login",
+    "allow-steam-account",
     "allow-steam-sync-local-folders",
     "allow-library-list-wallpapers",
     "allow-library-delete-wallpaper",
+    "allow-library-set-favorite",
     "allow-monitors-list",
     "allow-monitor-apply-wallpaper",
     "allow-wallpaper-set-lock-screen",
@@ -68,12 +63,16 @@
     "allow-wallpaper-save-preset",
     "allow-wallpaper-apply-preset",
     "allow-playback-set-paused",
+    "allow-monitor-set-volume",
     "allow-playlist-list",
     "allow-playlist-save",
+    "allow-playlist-delete",
     "allow-settings-get",
     "allow-settings-update",
     "allow-update-feed-status",
     "allow-runtime-shutdown-for-update",
+    "allow-backup-export",
+    "allow-backup-import",
     "allow-runtime-get-memory-usage"
   ]
 }

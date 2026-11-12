@@ -20,7 +20,11 @@ import type {
   WallpaperSource,
   WorkshopPreview,
   WorkshopBrowseQuery,
+  BackupImportSummary,
 } from '../types/ipc';
+
+/** Commands added after the §5.1 registry; kept in one block so the registry list stays untouched. */
+type ExtraCommand = 'library_set_favorite' | 'playlist_delete' | 'backup_export' | 'backup_import' | 'photo_retry_now';
 
 type Args = Record<string, unknown>;
 type Emitter = (event: string, payload: unknown) => void;
@@ -161,6 +165,7 @@ function initialWallpapers(): WallpaperItem[] {
       projectJson: scene,
       userProperties: { weather_mode: 1, enable_rain: true, rain_speed: 1.2, schemecolor: '0.14902 0.45098 0.85098', show_clock: true, clock_label: 'Seattle' },
       adjustments: { ...DEFAULT_ADJUSTMENTS },
+      isFavorite: false,
     },
     {
       wallpaperId: 'workshop:1966389027',
@@ -175,6 +180,7 @@ function initialWallpapers(): WallpaperItem[] {
       projectJson: { title: 'Lo-fi Train Window', type: 'video', file: 'train.mp4', tags: ['Video', 'Relaxing'], general: { properties: {} } },
       userProperties: {},
       adjustments: { ...DEFAULT_ADJUSTMENTS, volume: 0.3 },
+      isFavorite: false,
     },
     {
       wallpaperId: 'workshop:2504133121',
@@ -201,6 +207,7 @@ function initialWallpapers(): WallpaperItem[] {
       },
       userProperties: { orb_size: 55, orb_color: '0.2 0.8 1.0' },
       adjustments: { ...DEFAULT_ADJUSTMENTS },
+      isFavorite: false,
     },
     {
       wallpaperId: 'workshop:1100550912',
@@ -215,6 +222,7 @@ function initialWallpapers(): WallpaperItem[] {
       projectJson: { title: 'Desktop Aquarium (EXE)', type: 'application', file: 'aquarium.exe', tags: ['Application'], general: { properties: {} } },
       userProperties: {},
       adjustments: { ...DEFAULT_ADJUSTMENTS },
+      isFavorite: false,
     },
   ];
 }
@@ -278,6 +286,9 @@ export function createMockBackend(
     batteryPolicy: 'pause_animations',
     launchAtLogin: true,
     syncLockScreen: false,
+    multiMonitorMode: 'independent',
+    nextHotkey: 'CmdOrCtrl+Alt+Right',
+    pauseHotkey: 'CmdOrCtrl+Alt+P',
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });
@@ -325,6 +336,9 @@ export function createMockBackend(
   ];
 
   let wallpapers = initialWallpapers();
+  let steamAccount: string | null = null;
+  let cancelSteamLogin: (() => void) | null = null;
+  let finishSteamLogin: (() => void) | null = null;
   let monitors: MonitorInfo[] = [
     {
       monitorId: 'DISPLAY-1',
@@ -338,6 +352,7 @@ export function createMockBackend(
       userPaused: false,
       activeSource: { kind: 'photo_api' },
       activeWallpaperId: null,
+      volume: 1,
     },
     {
       monitorId: 'DISPLAY-2',
@@ -351,6 +366,7 @@ export function createMockBackend(
       userPaused: false,
       activeSource: { kind: 'workshop', wallpaperId: 'workshop:2841928371' },
       activeWallpaperId: 'workshop:2841928371',
+      volume: 0.6,
     },
   ];
   let playlists: Playlist[] = [
@@ -376,6 +392,8 @@ export function createMockBackend(
     blacklistCount,
     isRefilling,
     rateLimitRemaining,
+    offline: false,
+    showingCachedOnly: false,
   });
 
   const updatePhoto = (id: string, patch: Partial<PhotoItem>) => {
@@ -442,7 +460,7 @@ export function createMockBackend(
     return w;
   };
 
-  const handlers: Record<IpcCommand, (args: Args) => unknown> = {
+  const handlers: Record<Exclude<IpcCommand, ExtraCommand>, (args: Args) => unknown> = {
     // --- Photo API & Cache ---
     photo_get_status: () => photoStatus(),
     photo_fetch_public_catalog: () => catalog,
@@ -552,6 +570,12 @@ export function createMockBackend(
       return { items: page === 1 ? items : [...items].reverse(), page, totalPages: items.length ? 3 : 1, totalItems: items.length * 3,
         tagGroups: [{name: 'Type', tags: ['Scene','Video','Web','Application'].map((tag) => ({tag, label: tag}))}, {name:'Genre', tags:['Nature','City','Abstract'].map((tag) => ({tag,label:tag}))}, {name:'Resolution', tags:[{tag:'1920 x 1080',label:'1920 x 1080'}]}, {name:'Miscellaneous', tags:[{tag:'Audio responsive',label:'Audio responsive'}]}, {name:'Age Rating', tags:[{tag:'Everyone',label:'Everyone'}]}] };
     },
+    steam_guest_availability: (args) => {
+      const ids = (args.workshopIds ?? []) as string[];
+      if (ids.length > 30) throw new Error('Check at most 30 wallpapers at a time.');
+      // Browser preview: odd last digit is on GGNetwork, 8 is unreachable, the rest are not.
+      return Object.fromEntries(ids.map((id) => [id, id.endsWith('8') ? 'unknown' : Number(id.slice(-1)) % 2 === 1 ? 'available' : 'unavailable']));
+    },
     steam_inspect_url: (args) => previewFor(parseWorkshopId(args.urlOrId)),
     steam_download_workshop_item: (args) => {
       const workshopId = parseWorkshopId(args.urlOrId);
@@ -576,6 +600,7 @@ export function createMockBackend(
                 projectJson: { title: preview.title, type: 'scene', file: 'scene.json', tags: preview.tags, general: { properties: {} } },
                 userProperties: {},
                 adjustments: { ...DEFAULT_ADJUSTMENTS },
+                isFavorite: false,
               },
             ];
           }
@@ -591,7 +616,8 @@ export function createMockBackend(
     },
     steam_login_qr: () => {
       schedule(() => emitEvent('steam-auth://qr-matrix', { matrix: buildDemoQrMatrix() }), 400);
-      return null;
+      // Like DepotDownloader, wait until the phone approves (never in the preview) or a cancel.
+      return new Promise((resolve) => { cancelSteamLogin = () => resolve(null); });
     },
     steam_login_credentials: (args) => {
       if (!args.username || !args.password) throw new Error('Steam username and password are required');
@@ -599,20 +625,49 @@ export function createMockBackend(
         () => emitEvent('steam-auth://need-2fa', { kind: 'totp', prompt: 'Enter the code from your Steam Mobile Authenticator' }),
         300
       );
-      return null;
+      return new Promise((resolve) => {
+        finishSteamLogin = () => { steamAccount = String(args.username); resolve(steamAccount); };
+      });
     },
     steam_submit_2fa_code: (args) => {
       if (!/^[A-Za-z0-9]{5}$/.test(String(args.code ?? ''))) throw new Error('Invalid Steam Guard code');
+      schedule(() => finishSteamLogin?.(), 200);
       return null;
     },
-    steam_logout: () => null,
+    steam_logout: () => { steamAccount = null; return null; },
+    steam_cancel_login: () => { cancelSteamLogin?.(); cancelSteamLogin = null; return null; },
+    steam_account: () => steamAccount,
     steam_sync_local_folders: () => wallpapers,
     library_list_wallpapers: () => wallpapers,
+    library_import_local: (args) => {
+      const path = String(args.path ?? '');
+      if (!path) throw new Error('Choose a folder or a video file.');
+      const name = path.split(/[\\/]/).pop() ?? 'item';
+      const stem = name.replace(/\.[^.]+$/, '');
+      const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(name);
+      const slug = stem.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'item';
+      const wallpaperId = `local:${slug}-00000000`;
+      const item: WallpaperItem = {
+        wallpaperId,
+        title: stem,
+        type: isVideo ? 'video' : 'scene',
+        previewPath: svgThumb('#0ea5e9', '#0f172a', stem.slice(0, 12)),
+        installDir: `/mock/TruongPaper/local/${slug}-00000000`,
+        bytes: 24 * MB,
+        audioReactive: false,
+        windowsOnly: false,
+        projectJson: { title: stem, type: isVideo ? 'video' : 'scene', file: isVideo ? name : 'scene.json', general: { properties: {} } },
+        userProperties: {},
+        adjustments: { ...DEFAULT_ADJUSTMENTS },
+        isFavorite: false,
+      };
+      wallpapers = [...wallpapers.filter((w) => w.wallpaperId !== wallpaperId), item];
+      return item;
+    },
     library_delete_wallpaper: (args) => {
       wallpapers = wallpapers.filter((w) => w.wallpaperId !== args.wallpaperId);
       return null;
     },
-
     // --- Monitor, Playback & Property Customization ---
     monitors_list: () => monitors,
     monitor_apply_wallpaper: (args) => {
@@ -623,6 +678,7 @@ export function createMockBackend(
         ? { ...m, activeSource: source, activeWallpaperId: wallpaperId } : m);
       const item = wallpaperId ? findWallpaper(wallpaperId) : currentByMonitor[monitorId] ?? null;
       emitEvent('wallpaper://changed', { monitorId, source, currentItem: item, transitionUsed: settings.transitionType });
+      emitEvent('wallpaper://loaded', { monitorId, wallpaperId });
       return null;
     },
     wallpaper_set_lock_screen: () => null,
@@ -667,6 +723,15 @@ export function createMockBackend(
       return null;
     },
 
+    monitor_set_volume: (args) => {
+      const monitorId = String(args.monitorId);
+      const volume = Number(args.volume);
+      if (!Number.isFinite(volume) || volume < 0 || volume > 1) throw new Error('Volume must be between 0 and 1');
+      if (!monitors.some((m) => m.monitorId === monitorId)) throw new Error(`Monitor '${monitorId}' is not connected`);
+      monitors = monitors.map((m) => (m.monitorId === monitorId ? { ...m, volume } : m));
+      return null;
+    },
+
     // --- Playlists, Auto-Updater & Global Settings ---
     playlist_list: () => playlists,
     playlist_save: (args) => {
@@ -685,6 +750,41 @@ export function createMockBackend(
     runtime_get_memory_usage: () => ({ residentBytes: 164 * MB }),
   };
 
+  // --- Favorites, playlist delete, backup & restore, offline retry (browser-preview behaviour) ---
+  const extraHandlers: Record<ExtraCommand, (args: Args) => unknown> = {
+    library_set_favorite: (args) => {
+      const w = findWallpaper(args.wallpaperId);
+      wallpapers = wallpapers.map((x) => (x === w ? { ...x, isFavorite: Boolean(args.favorite) } : x));
+      return null;
+    },
+    playlist_delete: (args) => {
+      if (!playlists.some((p) => p.playlistId === args.playlistId)) throw new Error('Unknown playlist');
+      playlists = playlists.filter((p) => p.playlistId !== args.playlistId);
+      // Displays that played it go back to photos.
+      monitors = monitors.map((m) => m.activeSource.kind === 'playlist' && m.activeSource.playlistId === args.playlistId
+        ? { ...m, activeSource: { kind: 'photo_api' }, activeWallpaperId: null } : m);
+      return null;
+    },
+    backup_export: (args) => {
+      if (!String(args.path ?? '')) throw new Error('Choose where to save the backup.');
+      return null;
+    },
+    backup_import: (args): BackupImportSummary => {
+      if (!String(args.path ?? '')) throw new Error('Choose a backup file.');
+      return {
+        settings: true,
+        playlists: playlists.length,
+        favorites: wallpapers.filter((w) => w.isFavorite).length + favorites.size,
+        wallpapers: wallpapers.length,
+        missingWorkshopIds: String(args.path).includes('complete') ? [] : ['3800000001', '3800000002'],
+      };
+    },
+    photo_retry_now: () => {
+      emitEvent('photo-queue://updated', photoStatus());
+      return null;
+    },
+  };
+
   const handlePlugin = (cmd: string, args: Args): unknown => {
     switch (cmd) {
       case 'plugin:app|version':
@@ -697,8 +797,11 @@ export function createMockBackend(
         if (typeof window !== 'undefined' && typeof args.path === 'string') window.open(args.path, '_blank', 'noopener');
         return null;
       case 'plugin:dialog|open':
-      case 'plugin:dialog|save':
-        return null;
+      case 'plugin:dialog|save': {
+        // Only the backup dialogs return a path in the preview; imports and the rest cancel.
+        const filters = (args.options as { filters?: Array<{ name?: string }> } | undefined)?.filters;
+        return filters?.[0]?.name === 'TruongPaper backup' ? '/mock/truongpaper-backup.json' : null;
+      }
       case 'plugin:window|get_all_windows':
         return ['main', 'tray-popover'];
       case 'plugin:webview|get_all_webviews':
@@ -717,7 +820,7 @@ export function createMockBackend(
   return {
     handle: (cmd, args = {}) => {
       if (cmd.startsWith('plugin:')) return handlePlugin(cmd, args);
-      const handler = (handlers as Record<string, (a: Args) => unknown>)[cmd];
+      const handler = (handlers as Record<string, (a: Args) => unknown>)[cmd] ?? (extraHandlers as Record<string, (a: Args) => unknown>)[cmd];
       if (!handler) throw new Error(`[mockTauri] Unhandled command: ${cmd}`);
       return handler(args);
     },

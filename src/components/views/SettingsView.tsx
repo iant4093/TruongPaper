@@ -1,8 +1,11 @@
 // src/components/views/SettingsView.tsx
 // Settings: performance, power policy, startup, Steam account & signed auto-updates (docs/06 §5).
 import React, { useEffect, useState } from 'react';
-import { Download, LogIn, LogOut, RefreshCw } from 'lucide-react';
+import { Download, LogIn, LogOut, RefreshCw, Upload } from 'lucide-react';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../store/useAppStore';
+import { confirmAction, toast } from '../../store/feedback';
+import { plural } from '../../lib/format';
 import {
   appVersion,
   availableUpdate,
@@ -11,14 +14,14 @@ import {
   onUpdateChange,
   type AvailableUpdate,
 } from '../../services/updates';
-import type { AppSettings } from '../../types/ipc';
+import type { AppSettings, BackupImportSummary } from '../../types/ipc';
 import { SectionTitle, SegmentedControl, ToggleRow, ViewHeader } from '../ui';
 
 const FPS_OPTIONS = [
-  ['30', '30 FPS'],
-  ['60', '60 FPS'],
-  ['120', '120 FPS'],
-  ['display_native', 'Display Native'],
+  ['30', 'Battery saver (30)'],
+  ['60', 'Smooth (60)'],
+  ['120', 'Very smooth (120)'],
+  ['display_native', 'Match display'],
 ] as const;
 
 const QUALITY_OPTIONS = [
@@ -29,19 +32,138 @@ const QUALITY_OPTIONS = [
 ] as const satisfies ReadonlyArray<readonly [AppSettings['qualityPreset'], string]>;
 
 const BATTERY_OPTIONS = [
-  ['continue', 'Keep Playing'],
-  ['pause_animations', 'Pause Animations'],
-  ['switch_to_photo', 'Switch to Photo'],
+  ['continue', 'Keep playing'],
+  ['pause_animations', 'Freeze the picture'],
+  ['switch_to_photo', 'Switch to a photo'],
 ] as const satisfies ReadonlyArray<readonly [AppSettings['batteryPolicy'], string]>;
 
 const parseFps = (v: string): AppSettings['fpsCap'] =>
   v === 'display_native' ? 'display_native' : (Number(v) as 30 | 60 | 120);
 
+/** Two accelerator fields saved together. */
+const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = ({ nextHotkey, pauseHotkey }) => {
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const [next, setNext] = useState(nextHotkey);
+  const [pause, setPause] = useState(pauseHotkey);
+  const [status, setStatus] = useState<{ error: boolean; text: string } | null>(null);
+  useEffect(() => { setNext(nextHotkey); setPause(pauseHotkey); }, [nextHotkey, pauseHotkey]);
+  const dirty = next !== nextHotkey || pause !== pauseHotkey;
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setStatus(null);
+    try {
+      await updateSettings({ nextHotkey: next.trim(), pauseHotkey: pause.trim() });
+      setStatus({ error: false, text: 'Shortcuts saved' });
+      toast.success('Shortcuts saved');
+    } catch (err) {
+      setStatus({ error: true, text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  return (
+    <>
+      <SectionTitle>Keyboard shortcuts</SectionTitle>
+      <form className="card" style={{ padding: 16 }} onSubmit={(e) => void save(e)}>
+        <label className="settings-field">
+          <span>Next wallpaper</span>
+          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+Right" value={next} onChange={(e) => setNext(e.target.value)} />
+        </label>
+        <label className="settings-field">
+          <span>Pause / resume</span>
+          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+P" value={pause} onChange={(e) => setPause(e.target.value)} />
+        </label>
+        <div className="view-subtitle" style={{ marginBottom: 10 }}>
+          Type a combination such as CmdOrCtrl+Alt+Right. Work anywhere, even when TruongPaper is in the background. Leave empty to turn off.
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <button type="submit" className="button" disabled={!dirty}>Save shortcuts</button>
+          {status && <span role={status.error ? 'alert' : 'status'} style={{ fontSize: 12, color: status.error ? '#e3b1b1' : 'var(--text-secondary)' }}>{status.text}</span>}
+        </div>
+      </form>
+    </>
+  );
+};
+
+const BACKUP_FILTER = [{ name: 'TruongPaper backup', extensions: ['json'] }];
+
+/** Save everything to one file, or restore it on this or another computer. */
+const BackupSection: React.FC = () => {
+  const exportBackup = useAppStore((s) => s.exportBackup);
+  const importBackup = useAppStore((s) => s.importBackup);
+  const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
+  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState<BackupImportSummary | null>(null);
+
+  const doExport = async () => {
+    setBusy(true);
+    try {
+      const path = await saveDialog({ defaultPath: 'truongpaper-backup.json', filters: BACKUP_FILTER, title: 'Save backup' });
+      if (!path) return;
+      await exportBackup(path);
+      toast.success('Backup saved');
+    } catch (err) { toast.error(err, 'Could not save the backup'); }
+    finally { setBusy(false); }
+  };
+  const doImport = async () => {
+    setBusy(true);
+    try {
+      const picked = await openDialog({ multiple: false, directory: false, filters: BACKUP_FILTER, title: 'Restore from backup' });
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path) return;
+      if (!await confirmAction('Restore from this backup?', 'Restore', 'Your current settings and playlists are replaced by the ones in the file.')) return;
+      setSummary(await importBackup(path));
+      toast.success('Backup restored');
+    } catch (err) { toast.error(err, 'Could not restore the backup'); }
+    finally { setBusy(false); }
+  };
+  const downloadMissing = async () => {
+    if (!summary) return;
+    let started = 0;
+    let failure: unknown = null;
+    for (const id of summary.missingWorkshopIds) {
+      try { await downloadWorkshopItem(id); started += 1; } catch (err) { failure = err; }
+    }
+    if (started) toast.success(`Started ${plural(started, 'download')}`);
+    if (failure) toast.error(failure, 'Some downloads could not start');
+  };
+
+  return (
+    <>
+      <SectionTitle>Backup & restore</SectionTitle>
+      <div className="card" style={{ padding: 16 }}>
+        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 12 }}>
+          One file with your settings, playlists and favorites. Wallpaper files are not included; missing Workshop items can be downloaded again.
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button type="button" className="button" disabled={busy} onClick={() => void doExport()}><Download size={14} /> Save backup…</button>
+          <button type="button" className="button" disabled={busy} onClick={() => void doImport()}><Upload size={14} /> Restore from backup…</button>
+        </div>
+        {summary && (
+          <div className="backup-summary" role="status">
+            <div>Restored {summary.settings ? 'settings, ' : ''}{plural(summary.playlists, 'playlist')}, {plural(summary.favorites, 'favorite')} and {plural(summary.wallpapers, 'wallpaper')}.</div>
+            {summary.missingWorkshopIds.length > 0 && (
+              <div className="backup-missing">
+                <span>{plural(summary.missingWorkshopIds.length, 'Workshop wallpaper')} {summary.missingWorkshopIds.length === 1 ? 'is' : 'are'} not on this computer.</span>
+                <button type="button" className="button button-primary" onClick={() => void downloadMissing()}>
+                  Download missing ({summary.missingWorkshopIds.length})
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
+};
+
 export const SettingsView: React.FC = () => {
   const settings = useAppStore((s) => s.settings);
-  const updateSettings = useAppStore((s) => s.updateSettings);
+  const store = useAppStore((s) => s.updateSettings);
+  /** Every change says it was saved, or why it was not. */
+  const updateSettings = (partial: Partial<AppSettings>) =>
+    store(partial).then(() => toast.success('Saved'), (err) => toast.error(err, 'Could not save'));
   const openSteamAuthModal = useAppStore((s) => s.openSteamAuthModal);
   const steamLogout = useAppStore((s) => s.steamLogout);
+  const steamAccount = useAppStore((s) => s.steamAccount);
 
   const [version, setVersion] = useState<string | null>(null);
   const [update, setUpdate] = useState<AvailableUpdate | null>(availableUpdate());
@@ -99,13 +221,15 @@ export const SettingsView: React.FC = () => {
 
       <SectionTitle>Performance</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
-        <div style={{ fontSize: 13, marginBottom: 8 }}>Frame rate cap</div>
+        <div style={{ fontSize: 13, marginBottom: 2 }}>Animation smoothness</div>
+        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>Higher looks smoother but uses more power.</div>
         <SegmentedControl
           value={String(settings.fpsCap)}
           options={FPS_OPTIONS}
           onChange={(next) => void updateSettings({ fpsCap: parseFps(next) })}
         />
-        <div style={{ fontSize: 13, margin: '14px 0 8px' }}>Render quality</div>
+        <div style={{ fontSize: 13, margin: '14px 0 2px' }}>Picture quality</div>
+        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>Lower it if wallpapers stutter.</div>
         <SegmentedControl
           value={settings.qualityPreset}
           options={QUALITY_OPTIONS}
@@ -113,7 +237,7 @@ export const SettingsView: React.FC = () => {
         />
       </div>
 
-      <SectionTitle>Smart Pause</SectionTitle>
+      <SectionTitle>Smart pause</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
         <ToggleRow
           label="Pause when a fullscreen app or game is active"
@@ -125,7 +249,8 @@ export const SettingsView: React.FC = () => {
           checked={settings.pauseOnMaximized}
           onChange={(next) => void updateSettings({ pauseOnMaximized: next })}
         />
-        <div style={{ fontSize: 13, marginBottom: 8 }}>On battery / Low Power Mode</div>
+        <div style={{ fontSize: 13, marginBottom: 2 }}>When on battery or in Low Power Mode</div>
+        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>“Freeze the picture” stops animation but keeps the wallpaper visible.</div>
         <SegmentedControl
           value={settings.batteryPolicy}
           options={BATTERY_OPTIONS}
@@ -142,14 +267,26 @@ export const SettingsView: React.FC = () => {
         />
       </div>
 
-      <SectionTitle>Steam Account</SectionTitle>
-      <div className="card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <GlobalShortcuts nextHotkey={settings.nextHotkey} pauseHotkey={settings.pauseHotkey} />
+
+      <BackupSection />
+
+      <SectionTitle>Steam account</SectionTitle>
+      <div className="card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ flex: '1 1 100%', fontSize: 13, color: 'var(--text-secondary)' }}>
+          {steamAccount ? `Signed in as ${steamAccount}.` : 'Not signed in.'}
+        </div>
         <button type="button" className="button" onClick={openSteamAuthModal}>
-          <LogIn size={14} /> Sign in to Steam
+          <LogIn size={14} /> {steamAccount ? 'Switch account' : 'Sign in to Steam'}
         </button>
-        <button type="button" className="button" onClick={() => void steamLogout()}>
-          <LogOut size={14} /> Sign Out & Forget Refresh Token
-        </button>
+        {steamAccount && (
+          <button type="button" className="button" onClick={async () => {
+            if (!await confirmAction('Sign out of Steam?', 'Sign out', 'You will need to sign in again to download Workshop wallpapers.')) return;
+            try { await steamLogout(); toast.success('Signed out of Steam'); } catch (err) { toast.error(err); }
+          }}>
+            <LogOut size={14} /> Sign out
+          </button>
+        )}
       </div>
 
       <SectionTitle>Updates</SectionTitle>

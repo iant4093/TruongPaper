@@ -62,17 +62,22 @@ impl BlendMode {
     /// Parses a material `blending` string. Unknown values map to `Normal` with a warning;
     /// `""` and `"disabled"` map to `Normal` silently.
     pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
+        Self::try_parse(s).unwrap_or_else(|| {
+            tracing::warn!("unknown material blending '{}', using normal", s.trim());
+            BlendMode::Normal
+        })
+    }
+
+    /// Like [`Self::parse`] but `None` for an unknown value (no fallback, no log).
+    pub fn try_parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
             "normal" | "" | "disabled" => BlendMode::Normal,
             "translucent" => BlendMode::Translucent,
             "additive" => BlendMode::Additive,
             "multiply" => BlendMode::Multiply,
             "screen" => BlendMode::Screen,
-            other => {
-                tracing::warn!("unknown material blending '{other}', using normal");
-                BlendMode::Normal
-            }
-        }
+            _ => return None,
+        })
     }
 
     /// `None` = replace (no blending). Color and alpha use the same factors.
@@ -187,6 +192,8 @@ pub struct EffectChainPlan {
     /// Any pass binds `_rt_FullFrameBuffer`.
     pub uses_full_frame_buffer: bool,
     pub warnings: Vec<String>,
+    /// Short user-facing notes about skipped or guessed content (effect names, reasons).
+    pub diagnostics: Vec<String>,
 }
 
 /// `'rgba8888'`/`'rgba_backbuffer'`/`''` -> `Rgba8Unorm`, `'r8'` -> `R8Unorm`,
@@ -226,6 +233,8 @@ fn to_local_value(json_text: &str) -> Value {
 struct Resolver<'a> {
     effect_index: usize,
     fbos: &'a [EffectFboSpec],
+    /// Unknown `_rt_*` names met while resolving textures (guessing them would corrupt the chain).
+    unknown_targets: std::cell::RefCell<Vec<String>>,
 }
 
 impl Resolver<'_> {
@@ -258,6 +267,7 @@ impl Resolver<'_> {
             Some(t) => TextureBinding::Target(t),
             None if name.starts_with("_rt_") => {
                 tracing::warn!("unknown render target '{name}', binding the current source");
+                self.unknown_targets.borrow_mut().push(name.to_string());
                 TextureBinding::Target(current.clone())
             }
             None => TextureBinding::Asset(material_texture_path(name)),
@@ -299,6 +309,7 @@ impl EffectChainPlan {
             }],
             uses_full_frame_buffer: false,
             warnings: Vec::new(),
+            diagnostics: Vec::new(),
         };
         let mut current = RenderTargetId::FboA;
 
@@ -314,6 +325,10 @@ impl EffectChainPlan {
                 Ok(e) => e,
                 Err(e) => {
                     plan.warn(format!("effect {} skipped: {e}", effect_ref.file));
+                    plan.diagnostics.push(format!(
+                        "Effect {} skipped: file missing or invalid",
+                        short_name(&effect_ref.file)
+                    ));
                     continue;
                 }
             };
@@ -332,7 +347,16 @@ impl EffectChainPlan {
             let resolver = Resolver {
                 effect_index,
                 fbos: &effect.fbos,
+                unknown_targets: Default::default(),
             };
+            // Rolled back when the effect needs a render target we cannot identify.
+            let rollback = (
+                plan.steps.len(),
+                current.clone(),
+                plan.uses_full_frame_buffer,
+                plan.fbos.len() - effect.fbos.len(),
+            );
+            let mut bad_target: Option<String> = None;
 
             for (pass_index, pass) in effect.passes.iter().enumerate() {
                 let over = effect_ref.passes.get(pass_index);
@@ -346,11 +370,14 @@ impl EffectChainPlan {
                         .as_deref()
                         .and_then(|s| resolver.target(s, &current))
                         .unwrap_or_else(|| current.clone());
-                    match pass
-                        .target
-                        .as_deref()
-                        .and_then(|t| resolver.target(t, &current))
+                    let copy_target = pass.target.as_deref();
+                    if let Some(t) = copy_target
+                        .filter(|t| !t.trim().is_empty() && resolver.target(t, &current).is_none())
                     {
+                        bad_target = Some(t.to_string());
+                        break;
+                    }
+                    match copy_target.and_then(|t| resolver.target(t, &current)) {
                         Some(target) => plan.steps.push(EffectStep::Copy { source, target }),
                         None => {
                             let target = current.other_ping_pong();
@@ -388,6 +415,11 @@ impl EffectChainPlan {
                     Ok(m) => m,
                     Err(e) => {
                         plan.warn(format!("material {material_path} skipped: {e}"));
+                        plan.diagnostics.push(format!(
+                            "Effect {} pass {pass_index} skipped: material {} unreadable",
+                            short_name(&effect_ref.file),
+                            short_name(&material_path)
+                        ));
                         continue;
                     }
                 };
@@ -423,17 +455,28 @@ impl EffectChainPlan {
                     plan.uses_full_frame_buffer = true;
                 }
 
-                let explicit_target =
-                    pass.target
-                        .as_deref()
-                        .filter(|t| !t.trim().is_empty())
-                        .map(|t| match resolver.target(t, &current) {
-                            Some(id) => id,
-                            None => {
-                                tracing::warn!("unknown pass target '{t}', drawing into ping-pong");
-                                current.other_ping_pong()
-                            }
-                        });
+                if let Some(name) = resolver.unknown_targets.borrow().first() {
+                    bad_target = Some(name.clone());
+                    break;
+                }
+                let explicit_target = match pass.target.as_deref().filter(|t| !t.trim().is_empty())
+                {
+                    Some(t) => match resolver.target(t, &current) {
+                        Some(id) => Some(id),
+                        None => {
+                            bad_target = Some(t.to_string());
+                            break;
+                        }
+                    },
+                    None => None,
+                };
+                if BlendMode::try_parse(&mpass.blending).is_none() {
+                    plan.diagnostics.push(format!(
+                        "Effect {}: unknown blend mode '{}' treated as normal",
+                        short_name(&effect_ref.file),
+                        mpass.blending.trim()
+                    ));
+                }
                 let (target, swaps) = match explicit_target {
                     Some(t) if t != current.other_ping_pong() && t != current => (t, false),
                     _ => (current.other_ping_pong(), true),
@@ -456,6 +499,20 @@ impl EffectChainPlan {
                 if swaps {
                     current = target;
                 }
+            }
+            if let Some(name) = bad_target {
+                plan.steps.truncate(rollback.0);
+                current = rollback.1;
+                plan.uses_full_frame_buffer = rollback.2;
+                plan.fbos.truncate(rollback.3);
+                plan.warn(format!(
+                    "effect {} skipped: unknown render target '{name}'",
+                    effect_ref.file
+                ));
+                plan.diagnostics.push(format!(
+                    "Effect {} skipped: unknown render target '{name}'",
+                    short_name(&effect_ref.file)
+                ));
             }
         }
 
@@ -496,6 +553,17 @@ impl EffectChainPlan {
     /// Every FBO the plan uses (ping-pong first).
     pub fn all_fbos(&self) -> impl Iterator<Item = &FboDesc> {
         self.ping_pong.iter().chain(self.fbos.iter())
+    }
+}
+
+/// Short display name of a VFS path: the file name, or `dir/effect.json` for the generic
+/// effect file name.
+pub fn short_name(path: &str) -> String {
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [] => path.to_string(),
+        [.., dir, file] if file.eq_ignore_ascii_case("effect.json") => format!("{dir}/{file}"),
+        [.., file] => (*file).to_string(),
     }
 }
 

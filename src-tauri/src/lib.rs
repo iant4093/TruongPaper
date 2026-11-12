@@ -1,6 +1,7 @@
 // src-tauri/src/lib.rs
 pub mod audio_bridge;
 pub mod commands;
+pub mod controls;
 pub mod db;
 pub mod desktop_host;
 pub mod host;
@@ -24,8 +25,21 @@ use tauri::Manager;
 /// SQLite file inside `app_data_dir`.
 pub const DB_FILE_NAME: &str = "truongpaper.db";
 
+/// Logs the time since setup started at the end of each startup stage (`RUST_LOG=info`).
+struct StartupClock(std::time::Instant);
+
+impl StartupClock {
+    fn mark(&self, stage: &str) {
+        tracing::info!(
+            "startup: {stage} at +{:.1} ms",
+            self.0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(target_os = "macos")]
+    let clock = StartupClock(std::time::Instant::now());
+    // Closing Studio hides it. The tray keeps running and uses it for Pause and Next.
     if let Some(window) = app.get_webview_window("main") {
         let studio = window.clone();
         window.on_window_event(move |event| {
@@ -38,28 +52,49 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
     let conn = truongpaper_core::open_and_initialize_db(&app_data_dir.join(DB_FILE_NAME))?;
+    clock.mark("database ready");
     let http = reqwest::Client::builder()
         .user_agent(concat!("TruongPaper/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
+    clock.mark("http client ready");
 
     let state = AppState::new(conn, app_data_dir.clone(), http.clone());
+    // Pause and display volumes survive restarts; restore them before any renderer starts.
+    controls::restore_persisted(&state.db.lock(), &state.host);
+    let hotkeys = {
+        let s = state.settings.lock();
+        (s.next_hotkey.clone(), s.pause_hotkey.clone())
+    };
     let photo =
         PhotoServiceState::new(state.db.clone(), app_data_dir, http, state.settings.clone());
     let (settings, host) = (state.settings.clone(), state.host.clone());
     app.manage(state);
     app.manage(photo);
+    controls::listen_selected_monitor(app.handle());
+    clock.mark("state restored");
 
-    tray::setup_system_tray(app.handle())?;
-    power::start(app.handle());
-    smart_pause::spawn(app.handle().clone(), settings.clone(), host.clone());
-    // Live runtimes: Web / Video webview windows + their bridge, then the desktop render thread
-    // (photos and scenes). Both stop on `AppState::shutdown_now`.
+    // Critical path to the first frame: the live runtimes. Web / Video webview windows + their
+    // bridge, then the desktop render thread (photos and scenes). Both stop on
+    // `AppState::shutdown_now`.
     wallpaper_webview::start(app.handle().clone(), host.clone());
-    desktop_host::start(app.handle().clone(), host, settings);
+    desktop_host::start(app.handle().clone(), host.clone(), settings.clone());
+    clock.mark("render threads started");
+
+    // Everything below is not needed for the first frame, so it runs while the render thread
+    // is already setting up wgpu and decoding the first photo. Library scans, Steam sync,
+    // catalog fetches and cache eviction are not started here at all: they only run when the
+    // UI asks for them.
+    tray::setup_system_tray(app.handle())?;
+    if let Err(err) = controls::apply_hotkeys(app.handle(), &hotkeys.0, &hotkeys.1) {
+        tracing::warn!("global hotkeys not registered: {err}");
+    }
+    power::start(app.handle());
+    smart_pause::spawn(app.handle().clone(), settings, host);
     #[cfg(target_os = "windows")]
     commands::lock_screen::start_sync(app.handle());
     scheduler::spawn(app.handle().clone());
+    clock.mark("setup finished");
     Ok(())
 }
 
@@ -93,6 +128,13 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    controls::on_shortcut(app, shortcut, event.state());
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_studio(app);
         }))
@@ -132,6 +174,7 @@ pub fn run() {
             commands::photo::photo_fetch_public_catalog,
             commands::photo::photo_rotate_next,
             commands::photo::photo_trigger_refill,
+            commands::photo::photo_retry_now,
             commands::photo::photo_add_album,
             commands::photo::photo_toggle_album,
             commands::photo::photo_remove_album,
@@ -144,15 +187,20 @@ pub fn run() {
             commands::photo::photo_reset_history,
             // --- Steam Workshop & Wallpaper Engine ---
             commands::steam::steam_browse_workshop,
+            commands::steam::steam_guest_availability,
             commands::steam::steam_inspect_url,
             commands::steam::steam_download_workshop_item,
             commands::steam::steam_login_qr,
             commands::steam::steam_login_credentials,
             commands::steam::steam_submit_2fa_code,
             commands::steam::steam_logout,
+            commands::steam::steam_cancel_login,
+            commands::steam::steam_account,
             commands::steam::steam_sync_local_folders,
             commands::library::library_list_wallpapers,
             commands::library::library_delete_wallpaper,
+            commands::library::library_import_local,
+            commands::library::library_set_favorite,
             // --- Monitor, Playback & Property Customization ---
             commands::monitor::monitors_list,
             commands::monitor::monitor_apply_wallpaper,
@@ -162,14 +210,18 @@ pub fn run() {
             commands::library::wallpaper_save_preset,
             commands::library::wallpaper_apply_preset,
             commands::monitor::playback_set_paused,
+            commands::monitor::monitor_set_volume,
             // --- Playlists, Auto-Updater & Global Settings ---
             commands::playlist::playlist_list,
             commands::playlist::playlist_save,
+            commands::playlist::playlist_delete,
             commands::settings::settings_get,
             commands::settings::settings_update,
             commands::updater::update_feed_status,
             commands::updater::runtime_shutdown_for_update,
             commands::runtime::runtime_get_memory_usage,
+            commands::backup::backup_export,
+            commands::backup::backup_import,
         ])
         .build(context)
         .expect("error while building TruongPaper Tauri application");
@@ -230,7 +282,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 39, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 49, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 
@@ -275,9 +327,30 @@ mod tests {
             .collect();
         assert_eq!(labels, ["main", "tray-popover"]);
 
-        let caps: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        assert_eq!(caps["windows"], serde_json::json!(["main", "tray-popover"]));
+        assert_eq!(
+            capability(include_str!("../capabilities/main.json"))["windows"],
+            serde_json::json!(["main"])
+        );
+        assert_eq!(
+            capability(include_str!("../capabilities/tray.json"))["windows"],
+            serde_json::json!(["tray-popover"])
+        );
+    }
+
+    fn capability(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    /// `allow-<command>` permissions granted by a capability file.
+    fn granted_commands(text: &str) -> BTreeSet<String> {
+        capability(text)["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .filter(|p| p.starts_with("allow-"))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Command names in the `APP_COMMANDS` app ACL manifest of `build.rs`.
@@ -302,21 +375,52 @@ mod tests {
         // grant a permission for nothing.
         assert_eq!(manifest_commands(), registered_commands());
 
-        let caps: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let granted: BTreeSet<String> = caps["permissions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|p| p.as_str())
-            .filter(|p| p.starts_with("allow-"))
-            .map(str::to_string)
-            .collect();
+        let granted = granted_commands(include_str!("../capabilities/main.json"));
         let expected: BTreeSet<String> = registered_commands()
             .iter()
             .map(|c| format!("allow-{}", c.replace('_', "-")))
             .collect();
         assert_eq!(granted, expected);
+    }
+
+    #[test]
+    fn tray_capability_is_a_small_subset_of_studio() {
+        let studio = granted_commands(include_str!("../capabilities/main.json"));
+        let tray_text = include_str!("../capabilities/tray.json");
+        let tray = granted_commands(tray_text);
+        assert!(tray.is_subset(&studio));
+        // What TrayApp / the store call from the popover; anything else must stay Studio-only.
+        let needed: BTreeSet<String> = [
+            "photo_get_status",
+            "photo_rotate_next",
+            "photo_retry_now",
+            "photo_set_favorite",
+            "photo_blacklist_and_skip",
+            "steam_account",
+            "library_list_wallpapers",
+            "monitors_list",
+            "monitor_apply_wallpaper",
+            "playback_set_paused",
+            "playlist_list",
+            "settings_get",
+            "settings_update",
+        ]
+        .iter()
+        .map(|c| format!("allow-{}", c.replace('_', "-")))
+        .collect();
+        assert_eq!(tray, needed);
+        let all = capability(tray_text)["permissions"].to_string();
+        for forbidden in [
+            "dialog:",
+            "updater:",
+            "autostart:",
+            "process:",
+            "allow-close",
+            "allow-minimize",
+            "shell:default",
+        ] {
+            assert!(!all.contains(forbidden), "tray must not grant {forbidden}");
+        }
     }
 
     #[test]

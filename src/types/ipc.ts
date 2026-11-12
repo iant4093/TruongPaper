@@ -58,6 +58,8 @@ export interface PhotoStatus {
   blacklistCount: number;
   isRefilling: boolean;
   rateLimitRemaining: number;
+  offline: boolean;
+  showingCachedOnly: boolean;
 }
 
 export interface ProjectJsonComboOption {
@@ -121,6 +123,16 @@ export interface WallpaperItem {
   projectJson: ProjectJsonSchema;
   userProperties: Record<string, string | number | boolean>;
   adjustments: UniversalAdjustments;
+  /** Starred by the user (`library_set_favorite`). */
+  isFavorite?: boolean;
+}
+
+export interface BackupSummary {
+  settings: boolean;
+  playlists: number;
+  favorites: number;
+  wallpapers: number;
+  missingWorkshopIds: string[];
 }
 
 export interface WallpaperPreset {
@@ -132,6 +144,8 @@ export interface WallpaperPreset {
 }
 
 export type WorkshopDownloadSource = 'steam' | 'ggnetwork';
+export type GuestAvailability = 'available' | 'unavailable' | 'unknown';
+export type GuestAvailabilityMap = Record<string, GuestAvailability>;
 
 export type WorkshopSort = 'trending' | 'most_subscribed' | 'newest' | 'top_rated';
 export interface WorkshopBrowseQuery {
@@ -176,6 +190,8 @@ export interface MonitorInfo {
   userPaused: boolean;
   activeSource: WallpaperSource;
   activeWallpaperId: string | null;
+  /** Per-display output volume 0..1 (multiplies the wallpaper's own volume); omitted = 1. */
+  volume?: number;
 }
 
 export interface PlaybackPauseChanged {
@@ -211,6 +227,11 @@ export interface AppSettings {
   batteryPolicy: 'continue' | 'pause_animations' | 'switch_to_photo';
   launchAtLogin: boolean;
   syncLockScreen: boolean;
+  multiMonitorMode: 'independent' | 'span';
+  /** Global shortcut (Tauri accelerator, e.g. `CmdOrCtrl+Alt+Right`) for Next wallpaper; empty = disabled. */
+  nextHotkey: string;
+  /** Global shortcut for Pause / Resume all displays; empty = disabled. */
+  pauseHotkey: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +245,7 @@ export const IPC_COMMANDS = [
   'photo_fetch_public_catalog',
   'photo_rotate_next',
   'photo_trigger_refill',
+  'photo_retry_now',
   'photo_add_album',
   'photo_toggle_album',
   'photo_remove_album',
@@ -236,15 +258,20 @@ export const IPC_COMMANDS = [
   'photo_reset_history',
   // Steam Workshop & Wallpaper Engine
   'steam_browse_workshop',
+  'steam_guest_availability',
   'steam_inspect_url',
   'steam_download_workshop_item',
   'steam_login_qr',
   'steam_login_credentials',
   'steam_submit_2fa_code',
   'steam_logout',
+  'steam_cancel_login',
+  'steam_account',
   'steam_sync_local_folders',
   'library_list_wallpapers',
+  'library_import_local',
   'library_delete_wallpaper',
+  'library_set_favorite',
   // Monitor, Playback & Property Customization
   'monitors_list',
   'monitor_apply_wallpaper',
@@ -254,19 +281,23 @@ export const IPC_COMMANDS = [
   'wallpaper_save_preset',
   'wallpaper_apply_preset',
   'playback_set_paused',
+  'monitor_set_volume',
   // Playlists, Auto-Updater & Global Settings
   'playlist_list',
   'playlist_save',
+  'playlist_delete',
   'settings_get',
   'settings_update',
   'update_feed_status',
   'runtime_shutdown_for_update',
   'runtime_get_memory_usage',
+  'backup_export',
+  'backup_import',
 ] as const;
 
 export type IpcCommand = (typeof IPC_COMMANDS)[number];
 
-/** Rust → frontend event channels (§5.1) plus the tray menu events emitted by `tray.rs` (§4.1). */
+/** Rust → frontend event channels (§5.1). */
 export const IPC_EVENTS = [
   'wallpaper://changed',
   'photo-queue://updated',
@@ -275,10 +306,11 @@ export const IPC_EVENTS = [
   'steam-auth://qr-matrix',
   'steam-auth://need-2fa',
   'policy://state-changed',
+  'wallpaper://error',
+  'wallpaper://diagnostics',
   'playback://pause-changed',
   'system-power',
-  'tray://next-requested',
-  'tray://toggle-pause-requested',
+  'wallpaper://loaded',
 ] as const;
 
 export type IpcEvent = (typeof IPC_EVENTS)[number];
@@ -295,6 +327,33 @@ export interface WallpaperChangedPayload {
   source: WallpaperSource;
   currentItem: WallpaperItem | PhotoItem | null;
   transitionUsed: TransitionType;
+}
+
+export interface WallpaperErrorPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+  message: string;
+}
+
+/** A wallpaper finished loading on a display (clears that display's error card). */
+export interface WallpaperLoadedPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+}
+
+/** Result of `backup_import`. */
+export interface BackupImportSummary {
+  settings: boolean;
+  playlists: number;
+  favorites: number;
+  wallpapers: number;
+  missingWorkshopIds: string[];
+}
+
+export interface WallpaperDiagnosticsPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+  messages: string[];
 }
 
 export interface SystemPowerPayload {

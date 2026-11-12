@@ -16,7 +16,10 @@
 //! Smart Pause (docs/01 §6.1 items 2 and 3).
 
 use crate::commands::monitor::LiveMonitor;
-use crate::desktop_host::{cursor_transitions, monitor_geometries, CursorPoller, CursorSample};
+use crate::desktop_host::{
+    cursor_transitions, emit_loaded, hotplug_restore_ids, live_monitors_cached, monitor_geometries,
+    CursorPoller, CursorSample,
+};
 use crate::host::{ActiveRuntime, MonitorRuntime, WallpaperHost, WebviewKind};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -36,7 +39,11 @@ pub const AUDIO_PUSH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 /// Bridge tick while a webview wallpaper is playing / while idle.
 const ACTIVE_TICK: Duration = Duration::from_millis(16);
 const IDLE_TICK: Duration = Duration::from_millis(250);
-const GEOMETRY_REFRESH: Duration = Duration::from_secs(2);
+/// Bridge tick while only Video windows (or paused pages) exist: keeps volume edits responsive.
+/// Longest bridge sleep while windows exist but nothing is a live Web page: host changes wake
+/// the bridge immediately, this only covers state without a signal (display sleep).
+const WINDOW_TICK: Duration = Duration::from_secs(1);
+const GEOMETRY_REFRESH: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
 const REVEAL_DURATION: Duration = Duration::from_millis(210);
 #[cfg(target_os = "macos")]
@@ -105,6 +112,46 @@ pub fn plan_pause_updates(
             let paused = !playing(&w.monitor_id);
             (w.paused_sent != Some(paused))
                 .then(|| (w.label.clone(), pause_script(w.kind, paused), paused))
+        })
+        .collect()
+}
+
+/// Volume state of one webview window as tracked by the bridge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAudioState {
+    pub monitor_id: String,
+    pub label: String,
+    pub kind: WebviewKind,
+    pub loaded: bool,
+    pub audio_sent: Option<String>,
+}
+
+/// Script that sets the sound of a webview wallpaper from its effective adjustments (volume
+/// already scaled by the display volume, `muted` set for non-owners).
+pub fn audio_script(
+    kind: WebviewKind,
+    adjustments: &crate::models::UniversalAdjustments,
+) -> String {
+    match kind {
+        WebviewKind::Web => web_volume_script(adjustments.volume, adjustments.muted),
+        WebviewKind::Video => serde_json::to_string(adjustments)
+            .map_err(|e| e.to_string())
+            .and_then(|json| truongpaper_renderer::video_adjustments_js(&json))
+            .unwrap_or_else(|_| web_volume_script(0.0, true)),
+    }
+}
+
+/// `(label, script)` for every loaded window whose desired sound differs from the last one sent.
+pub fn plan_audio_updates(
+    windows: &[WindowAudioState],
+    adjustments: &HashMap<String, crate::models::UniversalAdjustments>,
+) -> Vec<(String, String)> {
+    windows
+        .iter()
+        .filter(|w| w.loaded)
+        .filter_map(|w| {
+            let script = audio_script(w.kind, adjustments.get(&w.monitor_id)?);
+            (w.audio_sent.as_deref() != Some(script.as_str())).then(|| (w.label.clone(), script))
         })
         .collect()
 }
@@ -212,6 +259,8 @@ struct WebWindow {
     loaded: bool,
     preview_ready_at: Instant,
     paused_sent: Option<bool>,
+    /// Last volume / mute script sent to the page (`None` = never sent since load).
+    audio_sent: Option<String>,
     /// Logical rect of the window (its monitor's rect when it was last placed).
     logical: LogicalRect,
     /// CSS pixel size of the page (logical monitor size) for cursor coordinates.
@@ -220,6 +269,26 @@ struct WebWindow {
 }
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
+/// The host, so page-load callbacks can wake the bridge.
+static BRIDGE_HOST: OnceLock<Arc<WallpaperHost>> = OnceLock::new();
+
+fn wake_bridge() {
+    if let Some(host) = BRIDGE_HOST.get() {
+        host.wake();
+    }
+}
+
+/// How long the bridge sleeps between passes: 16 ms only while a Web page is live (cursor and
+/// audio frames have no push signal), otherwise it waits for host changes.
+pub fn bridge_wait(live_pages: bool, has_windows: bool) -> Duration {
+    if live_pages {
+        ACTIVE_TICK
+    } else if has_windows {
+        WINDOW_TICK
+    } else {
+        IDLE_TICK
+    }
+}
 /// `monitor id -> window`.
 static WINDOWS: LazyLock<Mutex<HashMap<String, WebWindow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -281,9 +350,15 @@ pub async fn show(
     if let Some(label) = reuse {
         host.set_webview_vfs(&label, &spec.wallpaper_id, vfs);
         activate(label.clone())?;
+        if let Some(w) = WINDOWS.lock().get_mut(&spec.monitor_id) {
+            // The page keeps its volume, but re-sent scripts may reset it: resend ours.
+            w.audio_sent = None;
+        }
         for js in &spec.on_load_scripts {
             eval(app, &label, js);
         }
+        emit_loaded(app, &spec.monitor_id, Some(spec.wallpaper_id.clone()));
+        wake_bridge();
         return Ok(());
     }
 
@@ -339,6 +414,7 @@ pub async fn show(
                 // The bridge re-sends the pause state for the fresh page.
                 w.paused_sent = None;
             }
+            wake_bridge();
             for js in &load_scripts {
                 if let Err(err) = window.eval(js) {
                     tracing::debug!("initial script on {}: {err}", window.label());
@@ -429,6 +505,7 @@ pub async fn show(
             loaded: loaded.load(Ordering::Acquire),
             preview_ready_at,
             paused_sent: None,
+            audio_sent: None,
             logical: (lx, ly, lw, lh),
             css_size: (lw, lh),
             last_cursor: None,
@@ -453,6 +530,8 @@ pub async fn show(
     }
     #[cfg(not(target_os = "macos"))]
     attach_to_desktop(app, window, physical);
+    emit_loaded(app, &spec.monitor_id, Some(spec.wallpaper_id));
+    wake_bridge();
     Ok(())
 }
 
@@ -602,18 +681,39 @@ pub fn reattach_all() {
     let Some(app) = APP.get() else {
         return;
     };
-    let monitors = crate::commands::monitor::live_monitors(app);
+    let monitors = live_monitors_cached(app);
+    note_display_set(&monitors);
     apply_geometry_updates(app, plan_geometry_updates(&window_rects(), &monitors, true));
+}
+
+/// Monitor ids seen by the last display check.
+static KNOWN_MONITORS: Mutex<Option<Vec<String>>> = parking_lot::const_mutex(None);
+
+/// Tells the scheduler about displays that appeared, came back or vanished since the last check,
+/// so it re-applies their persisted Web / Video source (this module never creates a window on
+/// its own: `plan_geometry_updates` only moves or closes existing ones).
+fn note_display_set(live: &[LiveMonitor]) {
+    if live.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = live.iter().map(|m| m.id.clone()).collect();
+    let previous = KNOWN_MONITORS.lock().replace(ids.clone());
+    if let Some(previous) = previous {
+        for id in hotplug_restore_ids(&previous, &ids) {
+            crate::scheduler::note_monitor_disconnected(&id);
+        }
+    }
 }
 
 /// Moves / closes windows whose monitor changed since the last check (bridge thread; also
 /// covers display changes when no desktop renderer is attached).
 fn follow_display_changes(app: &AppHandle) {
+    let monitors = live_monitors_cached(app);
+    note_display_set(&monitors);
     let rects = window_rects();
     if rects.is_empty() {
         return;
     }
-    let monitors = crate::commands::monitor::live_monitors(app);
     apply_geometry_updates(app, plan_geometry_updates(&rects, &monitors, false));
 }
 
@@ -662,6 +762,7 @@ pub fn eval_for_wallpaper(wallpaper_id: &str, kind: WebviewKind, js: &str) {
 /// Starts the webview bridge thread (also owns the audio-worker demand for scenes).
 pub fn start(app: AppHandle, host: Arc<WallpaperHost>) {
     let _ = APP.set(app.clone());
+    let _ = BRIDGE_HOST.set(Arc::clone(&host));
     let spawned = std::thread::Builder::new()
         .name("truongpaper-webview-bridge".into())
         .spawn(move || bridge_main(app, host));
@@ -685,58 +786,98 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
     let mut geoms = Vec::new();
     let mut geoms_at: Option<Instant> = None;
     let mut display_check_at: Option<Instant> = None;
+    let mut last_epoch = u64::MAX;
+    let mut last_suspended = false;
 
     while !host.is_shutting_down() {
-        // 1. Close windows whose monitor switched to another source.
-        let stale = {
-            let mut stale = Vec::new();
-            WINDOWS.lock().retain(|id, window| {
-                let rt = host.monitor(id);
-                if window_matches_host(window, rt.as_ref())
-                    || keep_outgoing_window(rt.as_ref(), host.live_renderer_attached())
-                {
-                    true
-                } else {
-                    stale.push(window.label.clone());
-                    false
-                }
+        let epoch = host.epoch();
+        let suspended = crate::power::rendering_suspended();
+        // Pause / audio / source bookkeeping only runs when the host changed (or the display
+        // slept); a live Web page below still ticks on its own.
+        let changed = epoch != last_epoch || suspended != last_suspended;
+        last_epoch = epoch;
+        last_suspended = suspended;
+        let mut has_windows = !WINDOWS.lock().is_empty();
+        if changed {
+            // 1. Close windows whose monitor switched to another source.
+            let stale = {
+                let mut stale = Vec::new();
+                WINDOWS.lock().retain(|id, window| {
+                    let rt = host.monitor(id);
+                    if window_matches_host(window, rt.as_ref())
+                        || keep_outgoing_window(rt.as_ref(), host.live_renderer_attached())
+                    {
+                        true
+                    } else {
+                        stale.push(window.label.clone());
+                        false
+                    }
+                });
+                stale
+            };
+            for label in stale {
+                destroy(&app, &label);
+            }
+
+            // 2. Audio loopback worker runs only while an audio-reactive wallpaper plays.
+            crate::audio_bridge::set_demand(if crate::power::rendering_suspended() {
+                None
+            } else {
+                host.audio_demand()
             });
-            stale
-        };
-        for label in stale {
-            destroy(&app, &label);
+
+            // 3. Pause / resume (user pause + Smart Pause).
+            let states: Vec<WindowPauseState> = WINDOWS
+                .lock()
+                .iter()
+                .map(|(id, w)| WindowPauseState {
+                    monitor_id: id.clone(),
+                    label: w.label.clone(),
+                    kind: w.kind,
+                    loaded: w.loaded,
+                    paused_sent: w.paused_sent,
+                })
+                .collect();
+            let playing = |id: &str| !suspended && host.monitor_should_render(id);
+            for (label, js, paused) in plan_pause_updates(&states, playing) {
+                eval(&app, &label, &js);
+                if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
+                    w.paused_sent = Some(paused);
+                }
+            }
+
+            // 3b. Volume: one sound owner per wallpaper, scaled by the display volume.
+            let audio_states: Vec<WindowAudioState> = WINDOWS
+                .lock()
+                .iter()
+                .map(|(id, w)| WindowAudioState {
+                    monitor_id: id.clone(),
+                    label: w.label.clone(),
+                    kind: w.kind,
+                    loaded: w.loaded,
+                    audio_sent: w.audio_sent.clone(),
+                })
+                .collect();
+            has_windows = !audio_states.is_empty();
+            if audio_states.iter().any(|w| w.loaded) {
+                let adjustments = host.webview_audio_adjustments(playing);
+                for (label, script) in plan_audio_updates(&audio_states, &adjustments) {
+                    eval(&app, &label, &script);
+                    if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
+                        w.audio_sent = Some(script);
+                    }
+                }
+            }
         }
 
-        // 1b. Follow display changes (moved / resized / disconnected monitors).
+        // 1b. Follow display changes (moved / resized / disconnected monitors); the monitor
+        // list is shared and cached, so this is a cheap comparison between refreshes.
         if display_check_at.is_none_or(|t| t.elapsed() >= GEOMETRY_REFRESH) {
             follow_display_changes(&app);
             display_check_at = Some(Instant::now());
         }
 
-        // 2. Audio loopback worker runs only while an audio-reactive wallpaper plays.
-        crate::audio_bridge::set_demand(host.audio_demand());
-
-        // 3. Pause / resume (user pause + Smart Pause).
-        let states: Vec<WindowPauseState> = WINDOWS
-            .lock()
-            .iter()
-            .map(|(id, w)| WindowPauseState {
-                monitor_id: id.clone(),
-                label: w.label.clone(),
-                kind: w.kind,
-                loaded: w.loaded,
-                paused_sent: w.paused_sent,
-            })
-            .collect();
-        let suspended = crate::power::rendering_suspended();
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
-        for (label, js, paused) in plan_pause_updates(&states, playing) {
-            eval(&app, &label, &js);
-            if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
-                w.paused_sent = Some(paused);
-            }
-        }
-
         // 4. Audio frames + cursor events for playing Web pages.
         let live: Vec<LiveWebPage> = WINDOWS
             .lock()
@@ -780,11 +921,7 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
             }
         }
 
-        std::thread::sleep(if live.is_empty() {
-            IDLE_TICK
-        } else {
-            ACTIVE_TICK
-        });
+        host.wait_for_change(epoch, bridge_wait(!live.is_empty(), has_windows));
     }
     close_all();
 }
@@ -793,6 +930,14 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
 mod tests {
     use super::*;
     use crate::models::UniversalAdjustments;
+
+    #[test]
+    fn bridge_ticks_fast_only_for_live_web_pages() {
+        assert_eq!(bridge_wait(true, true), ACTIVE_TICK);
+        assert_eq!(bridge_wait(false, true), WINDOW_TICK);
+        assert_eq!(bridge_wait(false, false), IDLE_TICK);
+        assert!(WINDOW_TICK >= Duration::from_secs(1));
+    }
 
     #[test]
     fn labels_are_sanitized() {
@@ -944,6 +1089,7 @@ mod tests {
             loaded: true,
             preview_ready_at: Instant::now(),
             paused_sent: None,
+            audio_sent: None,
             logical: (0.0, 0.0, 100.0, 100.0),
             css_size: (100.0, 100.0),
             last_cursor: None,
@@ -989,5 +1135,53 @@ mod tests {
         host.note_presented("A", generation);
         assert!(!keep_outgoing_window(host.monitor("A").as_ref(), true));
         assert!(!window_matches_host(&window, None));
+    }
+
+    #[test]
+    fn audio_updates_follow_owner_and_volume_changes() {
+        let mut adj = std::collections::HashMap::new();
+        let loud = UniversalAdjustments {
+            volume: 0.5,
+            ..UniversalAdjustments::default()
+        };
+        adj.insert("A".to_string(), loud);
+        adj.insert(
+            "B".to_string(),
+            UniversalAdjustments {
+                muted: true,
+                ..loud
+            },
+        );
+        let state = |id: &str, kind, loaded, sent: Option<String>| WindowAudioState {
+            monitor_id: id.into(),
+            label: format!("wallpaper-{id}"),
+            kind,
+            loaded,
+            audio_sent: sent,
+        };
+        let windows = [
+            state("A", WebviewKind::Web, true, None),
+            state("B", WebviewKind::Web, true, None),
+            state("C", WebviewKind::Web, false, None),
+            state("D", WebviewKind::Web, true, None),
+        ];
+        let plan = plan_audio_updates(&windows, &adj);
+        assert_eq!(
+            plan,
+            vec![
+                ("wallpaper-A".to_string(), web_volume_script(0.5, false)),
+                ("wallpaper-B".to_string(), web_volume_script(0.5, true)),
+            ],
+            "unloaded windows and windows without host state are skipped"
+        );
+        let synced = [
+            state("A", WebviewKind::Web, true, Some(plan[0].1.clone())),
+            state("B", WebviewKind::Web, true, Some(plan[1].1.clone())),
+        ];
+        assert!(plan_audio_updates(&synced, &adj).is_empty());
+        let video = plan_audio_updates(&[state("A", WebviewKind::Video, true, None)], &adj);
+        assert!(video[0]
+            .1
+            .starts_with("window.__truongpaper_apply_video_adjustments("));
     }
 }

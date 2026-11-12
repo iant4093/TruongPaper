@@ -14,12 +14,26 @@ struct AudioBridge {
     read: FrameReader,
     all_paused: Arc<AtomicBool>,
     gain: Arc<AtomicU32>,
-    worker: truongpaper_audio::AudioWorkerHandle,
+    /// Dropping the bridge drops the last handle, which stops and joins the worker.
+    _worker: truongpaper_audio::AudioWorkerHandle,
 }
 
-impl Drop for AudioBridge {
-    fn drop(&mut self) {
-        self.worker.stop();
+/// Requested analyzer rate (`f32::to_bits`), applied to the running worker and to new ones.
+static TICK_HZ: AtomicU32 = AtomicU32::new(0x4270_0000); // 60.0
+
+/// Analyzer tick rate for a render fps cap: `min(60, fps)`, never below 5.
+pub fn analyzer_hz(fps: u32) -> f32 {
+    (fps as f32).clamp(5.0, 60.0)
+}
+
+/// Aligns the analyzer tick with the render frame rate (no-op when unchanged).
+pub fn set_tick_hz(hz: f32) {
+    let bits = hz.to_bits();
+    if TICK_HZ.swap(bits, Ordering::Relaxed) == bits {
+        return;
+    }
+    if let Some(bridge) = BRIDGE.lock().as_ref() {
+        bridge._worker.set_tick_hz(hz);
     }
 }
 
@@ -36,12 +50,13 @@ fn start() -> AudioBridge {
         Arc::clone(&gain),
         Arc::clone(&all_paused),
     );
+    worker.set_tick_hz(f32::from_bits(TICK_HZ.load(Ordering::Relaxed)));
     tracing::info!("system audio loopback worker started");
     AudioBridge {
         read: Box::new(move || latest.load_full()),
         all_paused,
         gain,
-        worker,
+        _worker: worker,
     }
 }
 
@@ -55,19 +70,41 @@ pub fn sensitivity_gain(sensitivity: f32) -> f32 {
 }
 
 /// `Some(sensitivity)` = an audio-reactive wallpaper is playing (starts / resumes the worker);
-/// `None` suspends it.
+/// `None` suspends it: the worker stops, joins and releases the capture device.
+///
+/// The capture device is started and stopped outside the `BRIDGE` mutex, so
+/// [`latest_frame`] never waits on a slow device open or on a worker join.
 pub fn set_demand(demand: Option<f32>) {
-    let mut current = BRIDGE.lock();
     match demand {
         Some(sensitivity) => {
-            let bridge = current.get_or_insert_with(start);
-            bridge
-                .gain
-                .store(sensitivity_gain(sensitivity).to_bits(), Ordering::Relaxed);
-            bridge.all_paused.store(false, Ordering::Relaxed);
+            let gain = sensitivity_gain(sensitivity).to_bits();
+            let running = {
+                let current = BRIDGE.lock();
+                current.as_ref().map(|bridge| {
+                    bridge.gain.store(gain, Ordering::Relaxed);
+                    bridge.all_paused.store(false, Ordering::Relaxed);
+                })
+            };
+            if running.is_some() {
+                return;
+            }
+            let bridge = start();
+            bridge.gain.store(gain, Ordering::Relaxed);
+            let loser = {
+                let mut current = BRIDGE.lock();
+                if current.is_none() {
+                    *current = Some(bridge);
+                    None
+                } else {
+                    Some(bridge)
+                }
+            };
+            // A concurrent caller won the race: stop our duplicate outside the lock.
+            drop(loser);
         }
         None => {
-            current.take();
+            let old = BRIDGE.lock().take();
+            drop(old);
         }
     }
 }
@@ -92,6 +129,17 @@ mod tests {
         assert_eq!(sensitivity_gain(9.0), 5.0);
         assert_eq!(sensitivity_gain(-1.0), 0.0);
         assert_eq!(sensitivity_gain(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn analyzer_follows_the_fps_cap_up_to_sixty() {
+        assert_eq!(analyzer_hz(30), 30.0);
+        assert_eq!(analyzer_hz(144), 60.0);
+        assert_eq!(analyzer_hz(1), 5.0);
+        assert_eq!(
+            truongpaper_audio::tick_period_for_hz(30.0),
+            std::time::Duration::from_secs_f64(1.0 / 30.0)
+        );
     }
 
     #[test]

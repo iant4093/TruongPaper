@@ -25,11 +25,11 @@ use truongpaper_steam::{
     core_assets_bootstrap_args, core_assets_bootstrapped, fetch_workshop_preview,
     find_local_we_core_assets_dir, parse_workshop_url_or_id, password_login_args,
     pubfile_download_args, qr_login_args, run_depot_downloader_sidecar, scan_workshop_directories,
-    write_core_assets_filelist, SidecarEvent, WorkshopPreview, DEFAULT_MAX_DOWNLOADS,
+    validate_password, write_core_assets_filelist, SidecarEvent, WorkshopPreview,
+    DEFAULT_MAX_DOWNLOADS,
 };
 
 const SECRET_STEAM_USERNAME: &str = "steam_username";
-const SECRET_STEAM_REFRESH_TOKEN: &str = "steam_refresh_token";
 /// Sidecar name as declared in `tauri.conf.json` `bundle.externalBin`.
 const SIDECAR_NAME: &str = "DepotDownloader";
 
@@ -40,8 +40,16 @@ pub struct SteamSession {
     downloads: Mutex<HashSet<String>>,
     two_fa_tx: Mutex<Option<(u64, mpsc::Sender<String>)>>,
     tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
+    /// Task ids of sign-in runs, so a closed sign-in window can stop its QR session.
+    logins: Mutex<HashSet<u64>>,
+    /// Whether the old keychain copy of the account name has been looked up this launch.
+    legacy_checked: std::sync::atomic::AtomicBool,
     next_id: AtomicU64,
 }
+
+/// DepotDownloader keeps refreshing the QR code and reconnecting. Stop after this long.
+const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const SIGN_IN_CANCELLED: &str = "Steam sign-in was cancelled.";
 
 struct DownloadGuard<'a> {
     downloads: &'a Mutex<HashSet<String>>,
@@ -81,12 +89,26 @@ impl SteamSession {
         self.tasks.lock().insert(id, handle);
         if let Some(two_fa) = two_fa {
             *self.two_fa_tx.lock() = Some((id, two_fa));
+            self.logins.lock().insert(id);
         }
         id
     }
 
+    /// Stops every running sign-in. Downloads keep running.
+    pub fn cancel_logins(&self) {
+        let ids: Vec<u64> = self.logins.lock().drain().collect();
+        let mut tasks = self.tasks.lock();
+        for id in ids {
+            if let Some(handle) = tasks.remove(&id) {
+                handle.abort();
+            }
+        }
+        *self.two_fa_tx.lock() = None;
+    }
+
     fn unregister(&self, id: u64) {
         self.tasks.lock().remove(&id);
+        self.logins.lock().remove(&id);
         let mut tx = self.two_fa_tx.lock();
         if tx.as_ref().is_some_and(|(owner, _)| *owner == id) {
             *tx = None;
@@ -106,6 +128,7 @@ impl SteamSession {
         for (_, handle) in self.tasks.lock().drain() {
             handle.abort();
         }
+        self.logins.lock().clear();
         *self.two_fa_tx.lock() = None;
     }
 }
@@ -162,9 +185,14 @@ async fn run_sidecar(
     session: &Arc<SteamSession>,
     args: Vec<String>,
     signing_in: bool,
+    password: Option<String>,
     mut on_event: impl FnMut(SidecarEvent) + Send,
 ) -> Result<(), String> {
     let bin = resolve_sidecar()?;
+    if signing_in {
+        // Only one sign-in at a time, so an old QR session cannot reopen the window later.
+        session.cancel_logins();
+    }
     let working_dir = session.working_dir.clone();
     let (two_fa_tx, two_fa_rx) = mpsc::channel::<String>(4);
     let (event_tx, mut event_rx) = mpsc::channel::<SidecarEvent>(64);
@@ -174,6 +202,8 @@ async fn run_sidecar(
             &working_dir,
             &args,
             signing_in.then_some(two_fa_rx),
+            password,
+            signing_in.then_some(SIGN_IN_TIMEOUT + std::time::Duration::from_secs(5)),
             event_tx,
         )
         .await
@@ -198,6 +228,7 @@ async fn run_sidecar(
             Err("Steam ended the sign-in without confirming the session.".into())
         }
         Ok(r) => r,
+        Err(err) if err.is_cancelled() && signing_in => Err(SIGN_IN_CANCELLED.into()),
         Err(err) if err.is_cancelled() => Err("Steam task was cancelled".into()),
         Err(err) => Err(err.to_string()),
     }
@@ -231,10 +262,51 @@ fn emit_auth(app: &AppHandle, ev: &SidecarEvent) {
     }
 }
 
-fn saved_username() -> Result<String, String> {
-    VAULT
-        .get(SECRET_STEAM_USERNAME)?
+fn saved_username(session: &SteamSession) -> Result<String, String> {
+    session
+        .account()
         .ok_or_else(|| "Sign in to Steam first (QR code or username/password)".to_string())
+}
+
+/// The Steam account name is not a secret (DepotDownloader keeps the real sign-in token in
+/// its own folder), so it lives in a plain file. Reading the keychain made macOS ask for the
+/// login password every time a rebuilt, ad-hoc signed app checked who was signed in.
+const ACCOUNT_FILE: &str = "account-name.txt";
+
+impl SteamSession {
+    fn account_path(&self) -> PathBuf {
+        self.working_dir.join(ACCOUNT_FILE)
+    }
+
+    /// Saved account name. Older builds kept it in the keychain; it is moved once.
+    pub fn account(&self) -> Option<String> {
+        if let Ok(name) = std::fs::read_to_string(self.account_path()) {
+            let name = name.trim();
+            return (!name.is_empty()).then(|| name.to_string());
+        }
+        if !self.legacy_checked.swap(true, Ordering::Relaxed) {
+            if let Ok(Some(name)) = VAULT.get(SECRET_STEAM_USERNAME) {
+                let _ = self.set_account(Some(&name));
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    pub fn set_account(&self, name: Option<&str>) -> Result<(), String> {
+        let path = self.account_path();
+        match name.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(name) => {
+                std::fs::create_dir_all(&self.working_dir).map_err(|e| e.to_string())?;
+                std::fs::write(&path, name).map_err(|e| e.to_string())
+            }
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
 }
 
 fn emit_progress(
@@ -260,13 +332,24 @@ fn emit_progress(
 /// Scans `<app_data>/wallpapers/workshop` + local Steam `431960` folders into the library.
 pub async fn sync_library(state: &AppState) -> Result<Vec<WallpaperItem>, String> {
     let root = state.workshop_dir();
-    let found = tokio::task::spawn_blocking(move || scan_workshop_directories(&root))
-        .await
-        .map_err(|e| e.to_string())?;
+    let local_root = crate::commands::library::local_dir(state);
+    let (found, local) = tokio::task::spawn_blocking(move || {
+        (
+            scan_workshop_directories(&root),
+            truongpaper_steam::local_import::scan_local_root(&local_root),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    // Downloads and Steam updates rewrite project.json files: drop the parsed copies.
+    state.library.invalidate_all();
     {
         let conn = state.db.lock();
         for w in &found {
             db::upsert_discovered(&conn, w)?;
+        }
+        for w in &local {
+            crate::commands::library::upsert_local(&conn, w)?;
         }
     }
     list_items(state).await
@@ -295,7 +378,7 @@ async fn bootstrap_core_assets_if_needed(session: Arc<SteamSession>, root: PathB
             return;
         }
     };
-    if let Err(err) = run_sidecar(&session, args, false, |_| {}).await {
+    if let Err(err) = run_sidecar(&session, args, false, None, |_| {}).await {
         tracing::warn!("core assets bootstrap failed: {err}");
     }
 }
@@ -330,7 +413,7 @@ pub async fn steam_download_workshop_item(
     let workshop_id = parse_workshop_url_or_id(&url_or_id).map_err(|e| e.to_string())?;
     let _download = state.steam.track_download(&workshop_id)?;
     let username = match source.unwrap_or(WorkshopDownloadSource::Steam) {
-        WorkshopDownloadSource::Steam => Some(saved_username()?),
+        WorkshopDownloadSource::Steam => Some(saved_username(&state.steam)?),
         WorkshopDownloadSource::GgNetwork => None,
     };
     let title = match fetch_workshop_preview(&state.http, &workshop_id).await {
@@ -349,7 +432,7 @@ pub async fn steam_download_workshop_item(
             let args =
                 pubfile_download_args(&workshop_id, username, &out_dir, DEFAULT_MAX_DOWNLOADS)
                     .map_err(|e| e.to_string())?;
-            run_sidecar(&state.steam, args, false, |ev| match &ev {
+            run_sidecar(&state.steam, args, false, None, |ev| match &ev {
                 SidecarEvent::ProgressPercent(pct) => {
                     emit_progress(&app, &workshop_id, &title, *pct, "downloading", None);
                 }
@@ -396,17 +479,38 @@ pub async fn steam_download_workshop_item(
     }
 }
 
-/// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves the account name on success.
+/// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves and returns the account name.
 #[tauri::command]
-pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let mut account = None;
-    run_sidecar(&state.steam, qr_login_args(), true, |ev| match &ev {
+    let run = run_sidecar(&state.steam, qr_login_args(), true, None, |ev| match &ev {
         SidecarEvent::LoggedInUsername(user) => account = Some(user.clone()),
         other => emit_auth(&app, other),
-    })
-    .await?;
+    });
+    let result = tokio::time::timeout(SIGN_IN_TIMEOUT, run).await;
+    if result.is_err() {
+        state.steam.cancel_logins();
+        return Err(
+            "The QR code expired. Close this window and sign in again for a new code.".into(),
+        );
+    }
+    result.unwrap()?;
     let account = account.ok_or_else(|| "Steam signed in, but the downloader did not report the account name. Try Username & 2FA.".to_string())?;
-    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))
+    state.steam.set_account(Some(&account))?;
+    Ok(account)
+}
+
+/// Stops a QR or password sign-in that the user closed.
+#[tauri::command]
+pub async fn steam_cancel_login(state: State<'_, AppState>) -> Result<(), String> {
+    state.steam.cancel_logins();
+    Ok(())
+}
+
+/// Saved Steam account name, or `None` when signed out.
+#[tauri::command]
+pub async fn steam_account(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.steam.account())
 }
 
 /// `-username -password` login; `steam-auth://need-2fa` is emitted when Steam Guard asks.
@@ -416,17 +520,28 @@ pub async fn steam_login_credentials(
     state: State<'_, AppState>,
     username: String,
     password: String,
-) -> Result<(), String> {
-    let args = password_login_args(&username, &password).map_err(|e| e.to_string())?;
-    drop(password);
-    run_sidecar(&state.steam, args, true, |ev| emit_auth(&app, &ev)).await?;
-    VAULT.put(SECRET_STEAM_USERNAME, Some(username.trim()))
+) -> Result<String, String> {
+    validate_password(&password).map_err(|e| e.to_string())?;
+    let args = password_login_args(&username).map_err(|e| e.to_string())?;
+    let run = run_sidecar(&state.steam, args, true, Some(password), |ev| {
+        emit_auth(&app, &ev)
+    });
+    match tokio::time::timeout(SIGN_IN_TIMEOUT, run).await {
+        Ok(result) => result?,
+        Err(_) => {
+            state.steam.cancel_logins();
+            return Err("Steam sign-in timed out. Try again.".into());
+        }
+    }
+    let account = username.trim().to_string();
+    state.steam.set_account(Some(&account))?;
+    Ok(account)
 }
 
 #[tauri::command]
 pub async fn steam_submit_2fa_code(state: State<'_, AppState>, code: String) -> Result<(), String> {
     let code = code.trim().to_string();
-    if code.is_empty() || code.len() > 32 || code.chars().any(char::is_whitespace) {
+    if !truongpaper_steam::sidecar::is_valid_guard_code(&code) {
         return Err("Invalid Steam Guard code".into());
     }
     let tx = state
@@ -441,8 +556,10 @@ pub async fn steam_submit_2fa_code(state: State<'_, AppState>, code: String) -> 
 #[tauri::command]
 pub async fn steam_logout(state: State<'_, AppState>) -> Result<(), String> {
     state.steam.abort_all();
-    VAULT.put(SECRET_STEAM_USERNAME, None)?;
-    VAULT.put(SECRET_STEAM_REFRESH_TOKEN, None)
+    state.steam.set_account(None)?;
+    // Remove a copy left by older builds without reading it first (a read can prompt).
+    let _ = VAULT.clear_all();
+    Ok(())
 }
 
 #[tauri::command]
@@ -450,6 +567,21 @@ pub async fn steam_sync_local_folders(
     state: State<'_, AppState>,
 ) -> Result<Vec<WallpaperItem>, String> {
     sync_library(&state).await
+}
+
+/// One availability batch at a time, so a fast UI cannot hammer the third-party mirror.
+static AVAILABILITY_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether the third-party GGNetwork mirror can serve each item as a guest. Max 30 ids; results
+/// are cached for ten minutes. `unknown` means GGNetwork could not be reached or answered oddly.
+#[tauri::command]
+pub async fn steam_guest_availability(
+    workshop_ids: Vec<String>,
+) -> Result<HashMap<String, truongpaper_steam::guest_download::GuestAvailability>, String> {
+    let _turn = AVAILABILITY_GATE.lock().await;
+    truongpaper_steam::guest_download::guest_availability(&workshop_ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -490,6 +622,22 @@ mod tests {
         assert!(auth_event_payload(&SidecarEvent::ProgressPercent(3.0)).is_none());
     }
 
+    #[test]
+    fn account_name_lives_in_a_plain_file() {
+        let dir = std::env::temp_dir().join(format!("tp-steam-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = SteamSession::new(dir.clone());
+        // Skip the keychain lookup that only migrates older installs.
+        session.legacy_checked.store(true, Ordering::Relaxed);
+        assert_eq!(session.account(), None);
+        session.set_account(Some(" ian ")).unwrap();
+        assert_eq!(session.account().as_deref(), Some("ian"));
+        session.set_account(None).unwrap();
+        assert_eq!(session.account(), None);
+        session.set_account(None).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn session_tracks_and_aborts_tasks() {
         let session = SteamSession::default();
@@ -511,6 +659,26 @@ mod tests {
         assert!(session.two_fa_sender().is_none());
         session.unregister(id);
         assert_eq!(session.running_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_logins_stops_sign_in_but_not_downloads() {
+        let session = SteamSession::default();
+        let sleep = || {
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            })
+        };
+        let (download, login) = (sleep(), sleep());
+        session.register(download.abort_handle(), None);
+        let (tx, _rx) = mpsc::channel(1);
+        session.register(login.abort_handle(), Some(tx));
+        session.cancel_logins();
+        assert!(login.await.unwrap_err().is_cancelled());
+        assert!(session.two_fa_sender().is_none());
+        assert_eq!(session.running_count(), 1);
+        assert!(!download.is_finished());
+        session.abort_all();
     }
 }
 

@@ -1,25 +1,31 @@
 // src/store/useAppStore.ts
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppSettings,
   FilterMode,
   MonitorInfo,
   PhotoItem,
+  GuestAvailability,
   PhotoStatus,
   PlaybackPauseChanged,
   Playlist,
   PublicCatalogAlbum,
   SavedAlbum,
   UniversalAdjustments,
+  BackupImportSummary,
   WallpaperItem,
   WallpaperChangedPayload,
+  WallpaperLoadedPayload,
+  WallpaperDiagnosticsPayload,
+  WallpaperErrorPayload,
   WallpaperPreset,
   WallpaperSource,
   WorkshopPreview,
   WorkshopDownloadSource,
 } from '../types/ipc';
+import { adjustmentWriteKey, propertyWriteKey, wallpaperWrites } from '../lib/writeQueue';
 
 export interface SteamDownloadProgress {
   workshopId: string;
@@ -34,13 +40,10 @@ export interface Steam2FaPrompt {
   prompt: string;
 }
 
-export interface InitListenerOptions {
-  /**
-   * Handle the tray context-menu events (`tray://next-requested`,
-   * `tray://toggle-pause-requested`). Only ONE window (the main studio window)
-   * should pass `true`, otherwise each action would run once per window.
-   */
-  handleTrayMenuEvents?: boolean;
+/** A wallpaper that failed to load on a display, shown until the next change there. */
+export interface WallpaperLoadError {
+  wallpaperId: string | null;
+  message: string;
 }
 
 export function currentWallpaperForMonitor(
@@ -71,18 +74,37 @@ export interface AppState {
   systemPowerReasons: string[];
   policyStateByMonitor: Record<string, string>;
   presetsByWallpaper: Record<string, WallpaperPreset[]>;
+  /** Load failures keyed by monitorId (`wallpaper://error`). */
+  wallpaperErrors: Record<string, WallpaperLoadError>;
+  /** Scene report messages keyed by wallpaperId (`wallpaper://diagnostics`). */
+  diagnosticsByWallpaper: Record<string, string[]>;
+  /** Last failed property/adjustment write, shown by Studio. */
+  writeError: string | null;
+  dismissWallpaperError: (monitorId: string) => void;
+  dismissWriteError: () => void;
+  /** Report a failed debounced write and re-sync the library from the backend. */
+  recoverFromWriteError: (error: unknown) => Promise<void>;
 
   inspectedWorkshop: WorkshopPreview | null;
+  /** GGNetwork (third-party mirror) availability by Workshop id; absent = not checked yet. */
+  guestAvailability: Record<string, GuestAvailability>;
   downloadsById: Record<string, SteamDownloadProgress>;
   authModalOpen: boolean;
   qrMatrix: boolean[][] | null;
   need2Fa: Steam2FaPrompt | null;
   steamAuthError: string | null;
-
-  initAppListeners: (options?: InitListenerOptions) => Promise<UnlistenFn>;
+  /** Saved Steam account name; null when signed out. */
+  steamAccount: string | null;
+  /** True while a sign-in runs. QR and 2FA events from other runs are ignored. */
+  steamSigningIn: boolean;
+  initAppListeners: () => Promise<UnlistenFn>;
   refreshAll: () => Promise<void>;
+  /** Cheap refresh for the tray popover: only the display list and photo status. */
+  refreshLive: () => Promise<void>;
   rotateNextPhoto: (monitorId?: string) => Promise<void>;
   triggerPhotoRefill: () => Promise<void>;
+  /** Offline mode: try the photo service again right now. */
+  retryPhotoNow: () => Promise<void>;
   fetchPublicCatalog: () => Promise<PublicCatalogAlbum[]>;
   addAlbum: (urlOrSlug: string, displayName?: string) => Promise<SavedAlbum>;
   toggleAlbum: (albumSlug: string, enabled: boolean) => Promise<void>;
@@ -99,7 +121,14 @@ export interface AppState {
   closeWorkshopPreview: () => void;
   downloadWorkshopItem: (urlOrId: string, source?: WorkshopDownloadSource) => Promise<void>;
   syncLocalSteamFolders: () => Promise<void>;
+  loadGuestAvailability: (workshopIds: string[]) => Promise<void>;
+  importLocalWallpaper: (path: string) => Promise<WallpaperItem>;
   deleteWallpaper: (wallpaperId: string) => Promise<void>;
+  setWallpaperFavorite: (wallpaperId: string, favorite: boolean) => Promise<void>;
+  dismissDownload: (workshopId: string) => void;
+  deletePlaylist: (playlistId: string) => Promise<void>;
+  exportBackup: (path: string) => Promise<void>;
+  importBackup: (path: string) => Promise<BackupImportSummary>;
   openSteamAuthModal: () => void;
   closeSteamAuthModal: () => void;
   startSteamQrLogin: () => Promise<void>;
@@ -128,6 +157,11 @@ export interface AppState {
 // `photo_add_album`, so re-adding is idempotent).
 const SAVED_ALBUMS_KEY = 'truongpaper.savedAlbums';
 const PRESETS_KEY = 'truongpaper.presets';
+const SELECTED_MONITOR_KEY = 'truongpaper.selectedMonitor';
+/** Cross-window event keeping Studio and the tray popover on the same display. */
+export const SELECTED_MONITOR_EVENT = 'ui://selected-monitor';
+/** Counts sign-in attempts so a replaced attempt cannot change the sign-in window. */
+let steamLoginRun = 0;
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -145,6 +179,11 @@ function writeJson(key: string, value: unknown): void {
   } catch {
     // Storage full or unavailable: the in-memory store remains authoritative.
   }
+}
+
+function readSelectedMonitor(): string | null {
+  const stored = readJson<string | null>(SELECTED_MONITOR_KEY, null);
+  return typeof stored === 'string' ? stored : null;
 }
 
 const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -167,7 +206,7 @@ export const useAppStore = create<AppState>((set, get) => {
     savedAlbums: readJson<SavedAlbum[]>(SAVED_ALBUMS_KEY, []),
     wallpapers: [],
     monitors: [],
-    selectedMonitorId: null,
+    selectedMonitorId: readSelectedMonitor(),
     selectedWallpaperId: null,
     selectedPhotoSource: false,
     playlists: [],
@@ -175,26 +214,50 @@ export const useAppStore = create<AppState>((set, get) => {
     systemPowerReasons: [],
     policyStateByMonitor: {},
     presetsByWallpaper: readJson<Record<string, WallpaperPreset[]>>(PRESETS_KEY, {}),
+    wallpaperErrors: {},
+    diagnosticsByWallpaper: {},
+    writeError: null,
+    dismissWallpaperError: (monitorId) => set((state) => {
+      const { [monitorId]: _dismissed, ...rest } = state.wallpaperErrors;
+      return { wallpaperErrors: rest };
+    }),
+    dismissWriteError: () => set({ writeError: null }),
+    recoverFromWriteError: async (error) => {
+      set({ writeError: `Could not save the change: ${errorMessage(error)}` });
+      try {
+        const wallpapers = await invoke<WallpaperItem[]>('library_list_wallpapers');
+        set({ wallpapers });
+      } catch {
+        // Keep the optimistic values if the backend cannot be reached either.
+      }
+    },
 
     inspectedWorkshop: null,
+    guestAvailability: {},
     downloadsById: {},
     authModalOpen: false,
     qrMatrix: null,
     need2Fa: null,
     steamAuthError: null,
-
+    steamAccount: null,
+    steamSigningIn: false,
     refreshAll: async () => {
-      const [photoStatus, monitors, wallpapers, settings, playlists] = await Promise.all([
+      const [photoStatus, monitors, wallpapers, settings, playlists, steamAccount] = await Promise.all([
         invoke<PhotoStatus>('photo_get_status'),
         invoke<MonitorInfo[]>('monitors_list'),
         invoke<WallpaperItem[]>('library_list_wallpapers'),
         invoke<AppSettings>('settings_get'),
         invoke<Playlist[]>('playlist_list').catch(() => [] as Playlist[]),
+        invoke<string | null>('steam_account').catch(() => null),
       ]);
       set((state) => ({
+        steamAccount,
         photoStatus,
         monitors,
-        selectedMonitorId: state.selectedMonitorId ?? monitors[0]?.monitorId ?? null,
+        // A display can disappear between refreshes, so drop a stale selection.
+        selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
+          ? state.selectedMonitorId
+          : monitors[0]?.monitorId ?? null,
         wallpapers,
         selectedWallpaperId: wallpapers.some((w) => w.wallpaperId === state.selectedWallpaperId) ? state.selectedWallpaperId : null,
         settings,
@@ -202,7 +265,21 @@ export const useAppStore = create<AppState>((set, get) => {
       }));
     },
 
-    initAppListeners: async (options = {}) => {
+    refreshLive: async () => {
+      const [photoStatus, monitors] = await Promise.all([
+        invoke<PhotoStatus>('photo_get_status'),
+        invoke<MonitorInfo[]>('monitors_list'),
+      ]);
+      set((state) => ({
+        photoStatus,
+        monitors,
+        selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
+          ? state.selectedMonitorId
+          : monitors[0]?.monitorId ?? null,
+      }));
+    },
+
+    initAppListeners: async () => {
       let pendingDisplayUpdates: Array<() => void> | null = [];
       const updateDisplay = (update: () => void) => {
         if (pendingDisplayUpdates) pendingDisplayUpdates.push(update);
@@ -216,6 +293,9 @@ export const useAppStore = create<AppState>((set, get) => {
           const photo = currentItem && 'albumSlug' in currentItem ? currentItem : null;
           updateDisplay(() =>
             set((state) => ({
+              wallpaperErrors: Object.fromEntries(
+                Object.entries(state.wallpaperErrors).filter(([id]) => id !== monitorId),
+              ),
               monitors: state.monitors.map((m) =>
                 m.monitorId === monitorId
                   ? { ...m, activeSource: source, activeWallpaperId: wallpaper?.wallpaperId ?? null }
@@ -235,6 +315,36 @@ export const useAppStore = create<AppState>((set, get) => {
           );
         }),
 
+        listen<WallpaperErrorPayload>('wallpaper://error', ({ payload }) => {
+          set((state) => ({
+            wallpaperErrors: {
+              ...state.wallpaperErrors,
+              [payload.monitorId]: { wallpaperId: payload.wallpaperId, message: payload.message },
+            },
+          }));
+        }),
+        // A wallpaper loaded fine on that display, so its error card is stale.
+        listen<WallpaperLoadedPayload>('wallpaper://loaded', ({ payload }) => {
+          set((state) => state.wallpaperErrors[payload.monitorId]
+            ? { wallpaperErrors: Object.fromEntries(Object.entries(state.wallpaperErrors).filter(([id]) => id !== payload.monitorId)) }
+            : state);
+        }),
+        // Every load reports its own list, so it replaces the previous one (an empty list clears it).
+        listen<WallpaperDiagnosticsPayload>('wallpaper://diagnostics', ({ payload }) => {
+          if (!payload.wallpaperId) return;
+          const wallpaperId = payload.wallpaperId;
+          set((state) => {
+            const { [wallpaperId]: _old, ...rest } = state.diagnosticsByWallpaper;
+            return { diagnosticsByWallpaper: payload.messages.length > 0 ? { ...rest, [wallpaperId]: payload.messages } : rest };
+          });
+        }),
+        // Another window changed the display; apply it without re-emitting (no echo loop).
+        listen<{ monitorId: string }>(SELECTED_MONITOR_EVENT, ({ payload }) => {
+          if (!payload?.monitorId || payload.monitorId === get().selectedMonitorId) return;
+          writeJson(SELECTED_MONITOR_KEY, payload.monitorId);
+          set({ selectedMonitorId: payload.monitorId });
+        }),
+
         listen<PhotoStatus>('photo-queue://updated', (event) => {
           updateDisplay(() => set({ photoStatus: event.payload }));
         }),
@@ -251,6 +361,9 @@ export const useAppStore = create<AppState>((set, get) => {
 
         listen<SteamDownloadProgress>('steam-download://progress', (event) => {
           const prog = event.payload;
+          const previous = get().downloadsById[prog.workshopId];
+          // Whole-percent steps are enough for the bar; skipping the rest avoids re-rendering on every chunk.
+          if (previous && previous.state === prog.state && Math.floor(previous.progressPercent) === Math.floor(prog.progressPercent)) return;
           set((state) => ({
             downloadsById: { ...state.downloadsById, [prog.workshopId]: prog },
           }));
@@ -262,11 +375,12 @@ export const useAppStore = create<AppState>((set, get) => {
         }),
 
         listen<{ matrix: boolean[][] }>('steam-auth://qr-matrix', (event) => {
-          set({ qrMatrix: event.payload.matrix, authModalOpen: true });
+          // Only the running sign-in may show a QR code, and it never reopens a closed window.
+          if (get().steamSigningIn) set({ qrMatrix: event.payload.matrix });
         }),
 
         listen<Steam2FaPrompt>('steam-auth://need-2fa', (event) => {
-          set({ need2Fa: event.payload, authModalOpen: true });
+          if (get().steamSigningIn) set({ need2Fa: event.payload });
         }),
 
         listen<{ monitorId: string; state: string }>('policy://state-changed', (event) => {
@@ -286,17 +400,6 @@ export const useAppStore = create<AppState>((set, get) => {
             : state.systemPowerReasons.filter((r) => r !== reason) }));
         }),
       ];
-
-      if (options.handleTrayMenuEvents) {
-        subscriptions.push(
-          listen('tray://next-requested', () => {
-            void get().rotateNextPhoto(get().selectedMonitorId ?? undefined);
-          }),
-          listen('tray://toggle-pause-requested', () => {
-            void get().setPlaybackPaused(get().monitors.some((monitor) => !monitor.userPaused));
-          })
-        );
-      }
 
       const unlisteners = await Promise.all(subscriptions);
       try {
@@ -322,6 +425,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     triggerPhotoRefill: async () => {
       await invoke('photo_trigger_refill');
+    },
+
+    retryPhotoNow: async () => {
+      await invoke('photo_retry_now');
+      await refreshPhotoStatus();
     },
 
     fetchPublicCatalog: async () => {
@@ -404,6 +512,29 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ wallpapers });
     },
 
+    // --- GGNetwork availability & local import (self-contained) ---
+    loadGuestAvailability: async (workshopIds) => {
+      const known = get().guestAvailability;
+      const wanted = [...new Set(workshopIds)].filter((id) => known[id] !== 'available' && known[id] !== 'unavailable').slice(0, 30);
+      if (wanted.length === 0) return;
+      try {
+        const result = await invoke<Record<string, GuestAvailability>>('steam_guest_availability', { workshopIds: wanted });
+        set((state) => ({ guestAvailability: { ...state.guestAvailability, ...result } }));
+      } catch {
+        // The badge is a hint only; a failed check leaves the item unmarked.
+      }
+    },
+
+    importLocalWallpaper: async (path) => {
+      const item = await invoke<WallpaperItem>('library_import_local', { path });
+      set((state) => ({
+        wallpapers: [...state.wallpapers.filter((w) => w.wallpaperId !== item.wallpaperId), item],
+        selectedWallpaperId: item.wallpaperId,
+        selectedPhotoSource: false,
+      }));
+      return item;
+    },
+
     deleteWallpaper: async (wallpaperId) => {
       await invoke('library_delete_wallpaper', { wallpaperId });
       set((state) => ({
@@ -413,25 +544,74 @@ export const useAppStore = create<AppState>((set, get) => {
       }));
     },
 
+    setWallpaperFavorite: async (wallpaperId, favorite) => {
+      const mark = (value: boolean | undefined) => set((state) => ({
+        wallpapers: state.wallpapers.map((w) => (w.wallpaperId === wallpaperId ? { ...w, isFavorite: value } : w)),
+      }));
+      const before = get().wallpapers.find((w) => w.wallpaperId === wallpaperId)?.isFavorite;
+      mark(favorite);
+      try {
+        await invoke('library_set_favorite', { wallpaperId, favorite });
+      } catch (error) {
+        mark(before);
+        throw error;
+      }
+    },
+
+    dismissDownload: (workshopId) => set((state) => {
+      const { [workshopId]: _gone, ...rest } = state.downloadsById;
+      return { downloadsById: rest };
+    }),
+
+    deletePlaylist: async (playlistId) => {
+      await invoke('playlist_delete', { playlistId });
+      set((state) => ({ playlists: state.playlists.filter((p) => p.playlistId !== playlistId) }));
+      // Displays that played it fall back to something else on the backend.
+      try {
+        const monitors = await invoke<MonitorInfo[]>('monitors_list');
+        set({ monitors });
+      } catch { /* the next refresh will catch up */ }
+    },
+
+    exportBackup: async (path) => {
+      await invoke('backup_export', { path });
+    },
+
+    importBackup: async (path) => {
+      const summary = await invoke<BackupImportSummary>('backup_import', { path });
+      await get().refreshAll();
+      return summary;
+    },
+
     openSteamAuthModal: () => set({ authModalOpen: true, steamAuthError: null }),
-    closeSteamAuthModal: () =>
-      set({ authModalOpen: false, qrMatrix: null, need2Fa: null, steamAuthError: null }),
+    closeSteamAuthModal: () => {
+      const signingIn = get().steamSigningIn;
+      steamLoginRun += 1;
+      set({ authModalOpen: false, qrMatrix: null, need2Fa: null, steamAuthError: null, steamSigningIn: false });
+      // Stop the downloader too, or its refreshed QR codes keep arriving.
+      if (signingIn) void invoke('steam_cancel_login').catch(() => {});
+    },
 
     startSteamQrLogin: async () => {
-      set({ qrMatrix: null, need2Fa: null, authModalOpen: true, steamAuthError: null });
+      const run = ++steamLoginRun;
+      set({ qrMatrix: null, need2Fa: null, authModalOpen: true, steamAuthError: null, steamSigningIn: true });
       try {
-        await invoke('steam_login_qr');
+        const account = await invoke<string>('steam_login_qr');
+        if (run === steamLoginRun) set({ steamAccount: account, steamSigningIn: false, authModalOpen: false, qrMatrix: null });
       } catch (err) {
-        set({ steamAuthError: errorMessage(err) });
+        // A newer sign-in or a closed window replaced this run, so its error is stale.
+        if (run === steamLoginRun) set({ steamAuthError: errorMessage(err), steamSigningIn: false, qrMatrix: null });
       }
     },
 
     submitSteamCredentials: async (username, password) => {
-      set({ need2Fa: null, steamAuthError: null });
+      const run = ++steamLoginRun;
+      set({ need2Fa: null, steamAuthError: null, steamSigningIn: true });
       try {
-        await invoke('steam_login_credentials', { username, password });
+        const account = await invoke<string>('steam_login_credentials', { username, password });
+        if (run === steamLoginRun) set({ steamAccount: account, steamSigningIn: false, authModalOpen: false, need2Fa: null });
       } catch (err) {
-        set({ steamAuthError: errorMessage(err) });
+        if (run === steamLoginRun) set({ steamAuthError: errorMessage(err), steamSigningIn: false, need2Fa: null });
       }
     },
 
@@ -446,9 +626,19 @@ export const useAppStore = create<AppState>((set, get) => {
 
     steamLogout: async () => {
       await invoke('steam_logout');
+      set({ steamAccount: null, steamSigningIn: false });
     },
 
-    selectMonitor: (monitorId) => set({ selectedMonitorId: monitorId }),
+    selectMonitor: (monitorId) => {
+      if (monitorId === get().selectedMonitorId) return;
+      writeJson(SELECTED_MONITOR_KEY, monitorId);
+      set({ selectedMonitorId: monitorId });
+      try {
+        void emit(SELECTED_MONITOR_EVENT, { monitorId }).catch(() => {});
+      } catch {
+        // No Tauri event bridge (plain browser): single window, nothing to sync.
+      }
+    },
     selectWallpaper: (wallpaperId) => set({ selectedWallpaperId: wallpaperId, selectedPhotoSource: false }),
     selectPhotoSource: () => set({ selectedWallpaperId: null, selectedPhotoSource: true }),
 
@@ -465,12 +655,24 @@ export const useAppStore = create<AppState>((set, get) => {
 
     updateWallpaperProperty: async (wallpaperId, propKey, propValue) => {
       get().setLocalWallpaperProperty(wallpaperId, propKey, propValue);
-      await invoke('monitor_update_property', { wallpaperId, propKey, propValue });
+      try {
+        await wallpaperWrites.schedule(propertyWriteKey(wallpaperId, propKey), () =>
+          invoke('monitor_update_property', { wallpaperId, propKey, propValue }));
+      } catch (error) {
+        await get().recoverFromWriteError(error);
+        throw error;
+      }
     },
 
     updateWallpaperAdjustments: async (wallpaperId, adjustments) => {
       get().setLocalWallpaperAdjustments(wallpaperId, adjustments);
-      await invoke('monitor_update_adjustments', { wallpaperId, adjustments });
+      try {
+        await wallpaperWrites.schedule(adjustmentWriteKey(wallpaperId), () =>
+          invoke('monitor_update_adjustments', { wallpaperId, adjustments }));
+      } catch (error) {
+        await get().recoverFromWriteError(error);
+        throw error;
+      }
     },
 
     setLocalWallpaperProperty: (wallpaperId, propKey, propValue) => {

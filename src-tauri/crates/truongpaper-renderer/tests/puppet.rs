@@ -245,7 +245,7 @@ fn parses_extended_mesh_and_blends_its_selected_clips() {
     let built = build(2, &two_bones(), &moving_root_tracks(), None);
     let mut bytes = built.bytes;
     bytes[12..16].copy_from_slice(&0x0180000fu32.to_le_bytes());
-    for vertex in bytes[20..20 + 3 * 80].chunks_exact_mut(80) {
+    for vertex in bytes[20..20 + 3 * 80].as_chunks_mut::<80>().0 {
         vertex[12..72].rotate_right(28);
     }
 
@@ -291,6 +291,30 @@ fn parses_extended_mesh_and_blends_its_selected_clips() {
     assert!(matrices[0]
         .transform_point3(Vec3::ZERO)
         .abs_diff_eq(Vec3::new(3.75, 0.0, 0.0), 1e-6));
+}
+
+#[test]
+fn additive_intro_settles_at_the_idle_reference_pose() {
+    let built = build(1, &two_bones(), &moving_root_tracks(), None);
+    let mesh = parse_mdl(&built.bytes, [0.0, 0.0]).unwrap();
+    let mut skeleton = parse_mdl_skeleton(&built.bytes, &mesh).unwrap();
+    let mut intro = skeleton.animations[0].clone();
+    intro.id = 8;
+    intro.mode = PuppetAnimationMode::Single;
+    intro.bone_frames[0].reverse();
+    skeleton.animations.push(intro);
+
+    let layers = [7, 8].map(|animation| PuppetLayer {
+        animation,
+        blend: 1.0,
+        rate: 1.0,
+        additive: true,
+    });
+    let position =
+        |time| layered_bone_matrices(&skeleton, &layers, time)[0].transform_point3(Vec3::ZERO);
+    assert!(position(0.0).abs_diff_eq(Vec3::new(10.0, 0.0, 0.0), 1e-6));
+    assert!(position(4.0).abs_diff_eq(Vec3::ZERO, 1e-6));
+    assert!(position(4.5).abs_diff_eq(Vec3::new(5.0, 0.0, 0.0), 1e-6));
 }
 
 #[test]
@@ -439,9 +463,8 @@ fn frame_interpolation_and_mirror_mapping() {
     let (a, b, f) = animation_frame_pair(PuppetAnimationMode::Loop, 2.5, 1.0, 3).unwrap();
     assert_eq!((a, b), (2, 0));
     assert!((f - 0.5).abs() < 1e-6);
-    // Wraps past max_time.
-    let (a, b, _) = animation_frame_pair(PuppetAnimationMode::Single, 7.25, 2.0, 4).unwrap();
-    assert_eq!((a, b), (2, 3));
+    let (a, b, f) = animation_frame_pair(PuppetAnimationMode::Single, 7.25, 2.0, 4).unwrap();
+    assert_eq!((a, b, f), (3, 3, 0.0));
     assert!(animation_frame_pair(PuppetAnimationMode::Loop, 1.0, 0.0, 3).is_none());
     assert!(animation_frame_pair(PuppetAnimationMode::Loop, 1.0, 30.0, 0).is_none());
     assert_eq!(PuppetAnimationMode::parse(""), PuppetAnimationMode::Loop);

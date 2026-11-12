@@ -41,19 +41,28 @@ pub fn qr_login_args() -> Vec<String> {
     ]
 }
 
-/// `-app 431960 -username <USER> -password <PASS> -remember-password -no-mobile -manifest-only`
-pub fn password_login_args(username: &str, password: &str) -> Result<Vec<String>> {
-    let username = validate_username(username)?;
+/// Checks a password before it is written to the child's stdin.
+pub fn validate_password(password: &str) -> Result<()> {
     if password.is_empty() {
         bail!("Steam password must not be empty");
     }
+    if password.contains(['\n', '\r']) {
+        bail!("Steam password must not contain line breaks");
+    }
+    Ok(())
+}
+
+/// `-app 431960 -username <USER> -remember-password -no-mobile -manifest-only`
+///
+/// The password is deliberately NOT an argument (it would be visible in `ps`); DepotDownloader
+/// prompts for it on stdin and the sidecar runner answers.
+pub fn password_login_args(username: &str) -> Result<Vec<String>> {
+    let username = validate_username(username)?;
     Ok(vec![
         s("-app"),
         s(WALLPAPER_ENGINE_APP_ID.to_string()),
         s("-username"),
         s(username),
-        s("-password"),
-        s(password),
         s("-remember-password"),
         s("-no-mobile"),
         s("-manifest-only"),
@@ -148,7 +157,7 @@ mod tests {
 
     #[test]
     fn password_args_and_validation() {
-        let a = password_login_args("ian", "pw").unwrap();
+        let a = password_login_args("ian").unwrap();
         assert_eq!(
             a,
             [
@@ -156,17 +165,18 @@ mod tests {
                 "431960",
                 "-username",
                 "ian",
-                "-password",
-                "pw",
                 "-remember-password",
                 "-no-mobile",
                 "-manifest-only"
             ]
         );
-        assert!(password_login_args("", "pw").is_err());
-        assert!(password_login_args("-qr", "pw").is_err());
-        assert!(password_login_args("a b", "pw").is_err());
-        assert!(password_login_args("ian", "").is_err());
+        assert!(password_login_args("").is_err());
+        assert!(password_login_args("-qr").is_err());
+        assert!(password_login_args("a b").is_err());
+        assert!(!a.iter().any(|x| x.contains("pw")));
+        assert!(validate_password("").is_err());
+        assert!(validate_password("a\nb").is_err());
+        assert!(validate_password("pw").is_ok());
     }
 
     #[test]

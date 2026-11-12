@@ -10,9 +10,10 @@ use crate::qr::{is_qr_line, parse_ascii_qr_to_matrix, QR_HEADER};
 use serde::Serialize;
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 /// Events emitted to the UI layer (`steam-auth://qr-matrix`, `steam-auth://need-2fa`, ...).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -26,8 +27,33 @@ pub enum SidecarEvent {
     Completed,
 }
 
-/// Marker present in every `DepotDownloader` interactive prompt.
-const PROMPT_MARKER: &str = "Please enter";
+/// Exact phrases of `ConsoleAuthenticator` prompts in DepotDownloader 3.4.0.
+const TOTP_MARKER: &str = "2 factor auth code";
+const EMAIL_MARKER: &str = "authentication code sent to your email";
+/// Prefix/suffix of the password prompt written to stdout (no trailing newline).
+const PASSWORD_PROMPT_START: &str = "Enter account password for \"";
+const PASSWORD_PROMPT_END: &str = "\":";
+/// Longest stdout fragment without a newline that is kept while scanning for a prompt.
+const MAX_PENDING_LINE: usize = 64 * 1024;
+/// Hard cap on how long a sign-in run may take (the child is killed afterwards).
+pub const SIGN_IN_RUN_TIMEOUT: Duration = Duration::from_secs(185);
+
+/// Steam Guard codes are short alphanumeric strings (5 chars for TOTP/email).
+pub fn is_valid_guard_code(code: &str) -> bool {
+    (4..=10).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Returns the byte offset just past a complete password prompt in `buf`, if present.
+pub fn find_password_prompt_end(buf: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(buf);
+    // `from_utf8_lossy` can change lengths only around invalid bytes; the prompt is ASCII, so
+    // map back through the byte offsets of the original when the text is valid.
+    let start = text.find(PASSWORD_PROMPT_START)?;
+    let rel = text[start + PASSWORD_PROMPT_START.len()..].find(PASSWORD_PROMPT_END)?;
+    let end = start + PASSWORD_PROMPT_START.len() + rel + PASSWORD_PROMPT_END.len();
+    (std::str::from_utf8(buf).is_ok()).then_some(end)
+}
+
 /// Max bytes of stderr retained between chunks for split-prompt detection.
 const SCAN_WINDOW: usize = 1024;
 
@@ -41,16 +67,16 @@ pub struct TwoFaPrompt {
 
 /// Detects a `DepotDownloader` 2FA prompt in a raw stderr byte buffer.
 pub fn detect_2fa_prompt(buf: &[u8]) -> Option<TwoFaPrompt> {
-    let text = String::from_utf8_lossy(buf);
-    let idx = text.find(PROMPT_MARKER)?;
-    // Keep the "STEAM GUARD!" prefix when present.
-    let start = text[..idx].rfind("STEAM GUARD").unwrap_or(idx);
-    let prompt = text[start..].trim().to_string();
-    let kind = if prompt.to_ascii_lowercase().contains("email") {
-        "email"
+    let text = String::from_utf8_lossy(buf).into_owned();
+    let lower = text.to_ascii_lowercase();
+    let (idx, kind) = if let Some(i) = lower.find(EMAIL_MARKER) {
+        (i, "email")
     } else {
-        "totp"
+        (lower.find(TOTP_MARKER)?, "totp")
     };
+    // Keep the "STEAM GUARD!" prefix when present.
+    let start = lower[..idx].rfind("steam guard").unwrap_or(idx);
+    let prompt = text[start..].trim().to_string();
     Some(TwoFaPrompt { kind, prompt })
 }
 
@@ -185,30 +211,86 @@ fn download_failure(output: &str) -> Option<&'static str> {
     }
 }
 
-/// Reads `stdout` line by line and forwards parsed events.
-pub async fn pump_stdout<R: AsyncRead + Unpin>(
-    stdout: R,
+async fn handle_stdout_line(
+    line: &str,
+    parser: &mut StdoutParser,
+    failure: &mut Option<&'static str>,
     event_tx: &mpsc::Sender<SidecarEvent>,
-) -> std::io::Result<Option<&'static str>> {
-    let mut lines = BufReader::new(stdout).lines();
+) {
+    *failure = failure.or_else(|| download_failure(line));
+    // The license list arrives after the account is logged in. A bare
+    // "Done!" can also mean the transport connected, especially on retry.
+    if failure.is_none()
+        && line
+            .trim()
+            .strip_prefix("Got ")
+            .and_then(|line| line.strip_suffix(" licenses for account!"))
+            .is_some_and(|count| count.parse::<u32>().is_ok())
+    {
+        let _ = event_tx.send(SidecarEvent::Authenticated).await;
+    }
+    for ev in parser.feed_line(line) {
+        let _ = event_tx.send(ev).await;
+    }
+}
+
+/// Reads `stdout` in raw chunks and forwards parsed events. The account password prompt has no
+/// trailing newline, so it is detected on the unterminated tail; when `password` is given it is
+/// answered once on `stdin` (and never logged or echoed into events).
+pub async fn pump_stdout<R, W>(
+    mut stdout: R,
+    event_tx: &mpsc::Sender<SidecarEvent>,
+    password: Option<&str>,
+    stdin: &Mutex<W>,
+) -> std::io::Result<Option<&'static str>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut parser = StdoutParser::new();
     let mut failure = None;
-    while let Some(line) = lines.next_line().await? {
-        failure = failure.or_else(|| download_failure(&line));
-        // The license list arrives after the account is logged in. A bare
-        // "Done!" can also mean the transport connected, especially on retry.
-        if failure.is_none()
-            && line
-                .trim()
-                .strip_prefix("Got ")
-                .and_then(|line| line.strip_suffix(" licenses for account!"))
-                .is_some_and(|count| count.parse::<u32>().is_ok())
-        {
-            let _ = event_tx.send(SidecarEvent::Authenticated).await;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut password_sent = false;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = stdout.read(&mut buf).await?;
+        if n == 0 {
+            break;
         }
-        for ev in parser.feed_line(&line) {
-            let _ = event_tx.send(ev).await;
+        pending.extend_from_slice(&buf[..n]);
+        if !password_sent {
+            if let (Some(pw), Some(end)) = (password, find_password_prompt_end(&pending)) {
+                let mut line = Vec::with_capacity(pw.len() + 1);
+                line.extend_from_slice(pw.as_bytes());
+                line.push(b'\n');
+                {
+                    let mut w = stdin.lock().await;
+                    let _ = w.write_all(&line).await;
+                    let _ = w.flush().await;
+                }
+                line.fill(0);
+                password_sent = true;
+                pending.drain(..end);
+            }
         }
+        while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = pending.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&raw);
+            handle_stdout_line(
+                line.trim_end_matches('\n'),
+                &mut parser,
+                &mut failure,
+                event_tx,
+            )
+            .await;
+        }
+        if pending.len() > MAX_PENDING_LINE {
+            pending.clear();
+        }
+    }
+    if !pending.is_empty() {
+        let line = String::from_utf8_lossy(&pending).into_owned();
+        handle_stdout_line(&line, &mut parser, &mut failure, event_tx).await;
     }
     for ev in parser.finish() {
         let _ = event_tx.send(ev).await;
@@ -220,7 +302,7 @@ pub async fn pump_stdout<R: AsyncRead + Unpin>(
 /// `two_fa_rx`, and writes `"<code>\n"` to `stdin`.
 pub async fn pump_stderr<R, W>(
     mut stderr: R,
-    stdin: &mut W,
+    stdin: &Mutex<W>,
     two_fa_rx: &mut mpsc::Receiver<String>,
     event_tx: &mpsc::Sender<SidecarEvent>,
 ) -> Option<&'static str>
@@ -260,9 +342,14 @@ where
         };
         match code {
             Some(code) => {
-                let line = format!("{}\n", code.trim());
-                let _ = stdin.write_all(line.as_bytes()).await;
-                let _ = stdin.flush().await;
+                let code = code.trim();
+                if !is_valid_guard_code(code) {
+                    continue;
+                }
+                let line = format!("{code}\n");
+                let mut w = stdin.lock().await;
+                let _ = w.write_all(line.as_bytes()).await;
+                let _ = w.flush().await;
             }
             None => break,
         }
@@ -274,7 +361,8 @@ where
 pub async fn drive_streams<O, E, I>(
     stdout: O,
     stderr: E,
-    mut stdin: I,
+    stdin: I,
+    password: Option<&str>,
     two_fa_rx: &mut mpsc::Receiver<String>,
     event_tx: &mpsc::Sender<SidecarEvent>,
 ) -> std::io::Result<Option<&'static str>>
@@ -283,19 +371,26 @@ where
     E: AsyncRead + Unpin,
     I: AsyncWrite + Unpin,
 {
+    let stdin = Mutex::new(stdin);
     let (out, err) = tokio::join!(
-        pump_stdout(stdout, event_tx),
-        pump_stderr(stderr, &mut stdin, two_fa_rx, event_tx)
+        pump_stdout(stdout, event_tx, password, &stdin),
+        pump_stderr(stderr, &stdin, two_fa_rx, event_tx)
     );
     Ok(out?.or(err))
 }
 
 /// Spawns `sidecar_bin` with `args`, streams events, and errors on a non-zero exit.
+///
+/// `password` is answered on stdin when DepotDownloader asks for it, so it never appears in the
+/// process arguments. With `timeout`, the run is aborted. The child is killed and reaped on
+/// every exit path.
 pub async fn run_depot_downloader_sidecar(
     sidecar_bin: &Path,
     working_dir: &Path,
     args: &[String],
     two_fa_rx: Option<mpsc::Receiver<String>>,
+    password: Option<String>,
+    timeout: Option<Duration>,
     event_tx: mpsc::Sender<SidecarEvent>,
 ) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(working_dir).await?;
@@ -315,25 +410,51 @@ pub async fn run_depot_downloader_sidecar(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let mut child = cmd.spawn()?;
-    let stdin = child.stdin.take();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("sidecar stdout was not piped"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("sidecar stderr was not piped"))?;
-
-    let failure = if let (Some(stdin), Some(mut codes)) = (stdin, two_fa_rx) {
-        drive_streams(stdout, stderr, stdin, &mut codes, &event_tx).await?
-    } else {
-        let (unused, mut codes) = mpsc::channel(1);
-        drop(unused);
-        drive_streams(stdout, stderr, tokio::io::sink(), &mut codes, &event_tx).await?
+    let streams = async {
+        let stdin = child.stdin.take();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("sidecar stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("sidecar stderr was not piped"))?;
+        let pw = password.as_deref();
+        let driven = if let (Some(stdin), Some(mut codes)) = (stdin, two_fa_rx) {
+            drive_streams(stdout, stderr, stdin, pw, &mut codes, &event_tx).await
+        } else {
+            let (unused, mut codes) = mpsc::channel(1);
+            drop(unused);
+            drive_streams(stdout, stderr, tokio::io::sink(), pw, &mut codes, &event_tx).await
+        };
+        driven.map_err(anyhow::Error::from)
     };
+    let outcome = match timeout {
+        Some(limit) => tokio::time::timeout(limit, streams)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("Steam sign-in timed out. Try again."))),
+        None => streams.await,
+    };
+    drop(password);
 
-    let status = child.wait().await?;
+    let failure = match outcome {
+        Ok(failure) => failure,
+        Err(err) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(err);
+        }
+    };
+    // Pipes are closed; give the process a moment to exit, then make sure it is gone.
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            child.wait().await?
+        }
+    };
+    let _ = child.kill().await;
     if let Some(failure) = failure {
         anyhow::bail!("{failure}");
     }
@@ -348,10 +469,14 @@ pub async fn run_depot_downloader_sidecar(
 mod tests {
     use super::*;
 
+    fn sink() -> Mutex<tokio::io::Sink> {
+        Mutex::new(tokio::io::sink())
+    }
+
     const TOTP: &str =
-        "STEAM GUARD! Please enter your 2-factor auth code from your authenticator app: ";
+        "STEAM GUARD! Please enter your 2 factor auth code from your authenticator app: ";
     const EMAIL: &str =
-        "STEAM GUARD! Please enter the auth code sent to the email at i***@example.com: ";
+        "STEAM GUARD! Please enter the authentication code sent to your email address: ";
 
     #[test]
     fn detects_totp_prompt_without_newline() {
@@ -370,6 +495,7 @@ mod tests {
     #[test]
     fn ignores_unrelated_stderr() {
         assert_eq!(detect_2fa_prompt(b"warning: something happened\n"), None);
+        assert_eq!(detect_2fa_prompt(b"Please enter your username: "), None);
         assert_eq!(detect_2fa_prompt(b""), None);
         assert_eq!(detect_2fa_prompt(&[0xff, 0xfe, 0x00]), None);
     }
@@ -434,7 +560,7 @@ mod tests {
     async fn qr_is_delivered_while_stdout_stays_open_waiting_for_scan() {
         let (mut producer, reader) = tokio::io::duplex(1024);
         let (events, mut received) = mpsc::channel(8);
-        let pump = tokio::spawn(async move { pump_stdout(reader, &events).await });
+        let pump = tokio::spawn(async move { pump_stdout(reader, &events, None, &sink()).await });
         // Same double-width full-block framing as QRCoder.GetLineByLineGraphic(1).
         producer
             .write_all(format!("{QR_HEADER}:\n        \n  ████  \n  ████  \n        \n").as_bytes())
@@ -463,11 +589,11 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let (code_tx, mut code_rx) = mpsc::channel(1);
         code_tx.send(" 123456 ".to_string()).await.unwrap();
-        let mut stdin: Vec<u8> = Vec::new();
+        let stdin = Mutex::new(Vec::<u8>::new());
 
-        pump_stderr(TOTP.as_bytes(), &mut stdin, &mut code_rx, &event_tx).await;
+        pump_stderr(TOTP.as_bytes(), &stdin, &mut code_rx, &event_tx).await;
 
-        assert_eq!(stdin, b"123456\n");
+        assert_eq!(*stdin.lock().await, b"123456\n");
         match event_rx.recv().await.unwrap() {
             SidecarEvent::Need2Fa { kind, .. } => assert_eq!(kind, "totp"),
             other => panic!("unexpected event {other:?}"),
@@ -478,16 +604,16 @@ mod tests {
     async fn pump_stderr_stops_when_stderr_closes_while_waiting_for_code() {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let (_code_tx, mut code_rx) = mpsc::channel::<String>(1); // sender kept alive, never used
-        let mut stdin: Vec<u8> = Vec::new();
-        pump_stderr(EMAIL.as_bytes(), &mut stdin, &mut code_rx, &event_tx).await;
-        assert!(stdin.is_empty());
+        let stdin = Mutex::new(Vec::<u8>::new());
+        pump_stderr(EMAIL.as_bytes(), &stdin, &mut code_rx, &event_tx).await;
+        assert!(stdin.lock().await.is_empty());
     }
 
     #[tokio::test]
     async fn confirms_login_after_the_license_list_and_reports_missing_access() {
         let (events, mut received) = mpsc::channel(8);
         let stdout = "Connecting to Steam3... Done!\n Done!\nGot 12 licenses for account!\nApp 431960 (Wallpaper Engine) is not available from this account.\n";
-        let failure = pump_stdout(stdout.as_bytes(), &events)
+        let failure = pump_stdout(stdout.as_bytes(), &events, None, &sink())
             .await
             .unwrap()
             .unwrap();
@@ -501,7 +627,7 @@ mod tests {
         let (events, mut received) = mpsc::channel(8);
         let stdout =
             "Failed to save account settings: private-path\nGot 12 licenses for account!\n";
-        let failure = pump_stdout(stdout.as_bytes(), &events)
+        let failure = pump_stdout(stdout.as_bytes(), &events, None, &sink())
             .await
             .unwrap()
             .unwrap();
@@ -518,7 +644,7 @@ mod tests {
         let stdout = " 10.00% x\n 20.50% y\n".as_bytes();
         let sink: Vec<u8> = Vec::new();
 
-        drive_streams(stdout, TOTP.as_bytes(), sink, &mut code_rx, &event_tx)
+        drive_streams(stdout, TOTP.as_bytes(), sink, None, &mut code_rx, &event_tx)
             .await
             .unwrap();
         drop(event_tx);
@@ -532,6 +658,71 @@ mod tests {
         assert!(got
             .iter()
             .any(|e| matches!(e, SidecarEvent::Need2Fa { kind: "totp", .. })));
+    }
+
+    #[test]
+    fn guard_codes_are_validated() {
+        assert!(is_valid_guard_code("AB12C"));
+        assert!(is_valid_guard_code("123456"));
+        assert!(!is_valid_guard_code("123"));
+        assert!(!is_valid_guard_code("12345678901"));
+        assert!(!is_valid_guard_code("12 45"));
+        assert!(!is_valid_guard_code("12\n45"));
+        assert!(!is_valid_guard_code(""));
+    }
+
+    #[test]
+    fn password_prompt_is_found_without_newline() {
+        let p = b"Connecting...\nEnter account password for \"ian\": ";
+        assert!(find_password_prompt_end(p).is_some());
+        assert!(find_password_prompt_end(b"Enter account password for \"ia").is_none());
+        assert!(find_password_prompt_end(b"nothing").is_none());
+    }
+
+    #[tokio::test]
+    async fn password_prompt_is_answered_on_stdin_across_split_chunks() {
+        let (mut producer, reader) = tokio::io::duplex(64);
+        let (events, _rx) = mpsc::channel(8);
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let pump = async { pump_stdout(reader, &events, Some("hunter2"), &stdin).await };
+        let feed = async {
+            producer
+                .write_all(b"Logging in\nEnter account pass")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            producer.write_all(b"word for \"ian\": ").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            producer
+                .write_all(b"Got 3 licenses for account!\n")
+                .await
+                .unwrap();
+            drop(producer);
+        };
+        let (res, ()) = tokio::join!(pump, feed);
+        // The prompt was consumed, so it is not misreported as a missing session.
+        assert_eq!(res.unwrap(), None);
+        assert_eq!(*stdin.lock().await, b"hunter2\n");
+    }
+
+    #[tokio::test]
+    async fn password_prompt_without_password_is_a_sign_in_again_failure() {
+        let (events, _rx) = mpsc::channel(8);
+        let out = b"Enter account password for \"ian\": ";
+        let failure = pump_stdout(&out[..], &events, None, &sink()).await.unwrap();
+        assert!(failure.unwrap().contains("Sign in to Steam again"));
+    }
+
+    #[tokio::test]
+    async fn password_is_sent_only_once() {
+        let (events, _rx) = mpsc::channel(8);
+        let stdin = Mutex::new(Vec::<u8>::new());
+        let out = b"Enter account password for \"ian\": \nEnter account password for \"ian\": ";
+        let failure = pump_stdout(&out[..], &events, Some("pw"), &stdin)
+            .await
+            .unwrap();
+        assert_eq!(*stdin.lock().await, b"pw\n");
+        assert!(failure.is_some());
     }
 
     #[test]

@@ -205,7 +205,7 @@ impl CursorEventKind {
 }
 
 /// Layer state as left behind by scripts (read back by the renderer each frame).
-#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub struct LayerState {
     pub name: String,
     pub origin: [f32; 3],
@@ -215,6 +215,9 @@ pub struct LayerState {
     pub color: [f32; 3],
     pub alpha: f32,
     pub visible: bool,
+    /// `thisLayer.text` (text layers; empty for other layers).
+    #[serde(default)]
+    pub text: String,
 }
 
 pub fn create_sandboxed_runtime() -> rquickjs::Result<(Runtime, Context)> {
@@ -366,6 +369,7 @@ impl SceneScriptEngine {
                     color: new Vec3(1, 1, 1),
                     alpha: {},
                     visible: {},
+                    text: '',
                     getEffect() {{ return {{ visible: true }}; }}
                 }};",
                 js_num(origin[0]),
@@ -398,6 +402,7 @@ impl SceneScriptEngine {
                         origin: v3(l.origin), scale: v3(l.scale), angles: v3(l.angles),
                         size: [l.size.x, l.size.y], color: v3(l.color),
                         alpha: Number(l.alpha), visible: !!l.visible,
+                        text: l.text == null ? '' : String(l.text),
                     }});
                 }})()",
                 name = js_str(layer_name)
@@ -420,6 +425,7 @@ impl SceneScriptEngine {
                         origin: v3(l.origin), scale: v3(l.scale), angles: v3(l.angles),
                         size: [f(l.size?.x), f(l.size?.y)], color: v3(l.color),
                         alpha: f(l.alpha), visible: !!l.visible,
+                        text: l.text == null ? '' : String(l.text),
                     })));
                 })()",
             )?;
@@ -440,7 +446,7 @@ impl SceneScriptEngine {
             .iter()
             .map(|s| {
                 format!(
-                    "[{},{},{},{},[{},{}],{},{},{}]",
+                    "[{},{},{},{},[{},{}],{},{},{},{}]",
                     js_str(&s.name),
                     v3(s.origin),
                     v3(s.scale),
@@ -449,7 +455,8 @@ impl SceneScriptEngine {
                     js_num(s.size[1]),
                     v3(s.color),
                     js_num(s.alpha),
-                    s.visible
+                    s.visible,
+                    js_str(&s.text)
                 )
             })
             .collect();
@@ -459,13 +466,14 @@ impl SceneScriptEngine {
                 format!(
                     "(function() {{
                         const v3 = (a) => new Vec3(a[0], a[1], a[2]);
-                        for (const [name, o, s, a, sz, c, alpha, vis] of [{rows}]) {{
+                        for (const [name, o, s, a, sz, c, alpha, vis, text] of [{rows}]) {{
                             const l = globalThis.__layers[name];
                             if (!l) continue;
                             l.origin = v3(o); l.scale = v3(s); l.angles = v3(a); l.color = v3(c);
                             l.size = new Vec2(sz[0], sz[1]);
                             l.alpha = alpha;
                             l.visible = vis;
+                            l.text = text;
                         }}
                     }})()",
                     rows = rows.join(","),
@@ -977,6 +985,28 @@ mod tests {
         step(&e);
         let b = &e.layer_states().unwrap()[1];
         assert_eq!((b.alpha, b.origin[0]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn layer_text_round_trips_and_scripts_can_set_it() {
+        let e = engine();
+        e.register_layer("clock", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        assert_eq!(e.layer_states().unwrap()[0].text, "");
+        let mut s = e.layer_states().unwrap()[0].clone();
+        s.text = "12:\"34\"".into();
+        e.sync_layer_states(&[s.clone()]).unwrap();
+        assert_eq!(e.layer_state("clock").unwrap().unwrap().text, s.text);
+
+        e.register_property_script(
+            "t",
+            "clock",
+            "export function update(v) { thisLayer.text = 'tick ' + 7; return v; }",
+            "0",
+        )
+        .unwrap();
+        step(&e);
+        assert_eq!(e.layer_states().unwrap()[0].text, "tick 7");
     }
 
     #[test]

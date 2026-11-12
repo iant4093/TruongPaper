@@ -15,7 +15,7 @@ use crate::models::{
     IpcTransitionType, WallpaperChangedPayload, WallpaperSource, EVENT_PHOTO_QUEUE_UPDATED,
     EVENT_WALLPAPER_CHANGED,
 };
-use crate::state::{AppState, SETTING_MULTI_MONITOR_MODE, SETTING_SKIP_MISMATCHED_ORIENTATION};
+use crate::state::{AppState, SETTING_SKIP_MISMATCHED_ORIENTATION};
 use parking_lot::Mutex;
 use reqwest::Client;
 use rusqlite::Connection;
@@ -85,10 +85,14 @@ impl PhotoServiceState {
     pub fn status(&self) -> Result<PhotoStatus, String> {
         let (mode, filter, max_cache_bytes, _) = self.load_active_filter(None)?;
         let conn = self.db.lock();
+        let unused_queue = list_unused_queue(&conn, &self.app_data_dir, &filter).map_err(e)?;
+        let offline = self.limiter.is_offline();
         Ok(PhotoStatus {
             filter_mode: mode,
             featured_only: filter.featured_only,
-            unused_queue: list_unused_queue(&conn, &self.app_data_dir, &filter).map_err(e)?,
+            showing_cached_only: offline && unused_queue.is_empty(),
+            offline,
+            unused_queue,
             favorite_photos: list_favorite_photos(&conn, &self.app_data_dir).map_err(e)?,
             current_photo_by_monitor: current_photo_by_monitor(&conn, &self.app_data_dir)
                 .map_err(e)?,
@@ -146,14 +150,28 @@ impl PhotoServiceState {
         pool: RotationPhotoPool,
     ) -> Result<Option<PhotoItem>, String> {
         loop {
-            let item = pick_cached_rotation_photo(
-                &self.db.lock(),
-                &self.app_data_dir,
-                filter,
-                displayed,
-                pool,
-            )
-            .map_err(e)?;
+            let item = {
+                let conn = self.db.lock();
+                // Favorites / PreviouslyShown keep the last N shown photos out of the pick so
+                // the same few never alternate; if that leaves nothing, retry without it.
+                let mut excluded = displayed.to_vec();
+                let recent = recent_shown_exclusions(&conn, filter, pool).map_err(e)?;
+                excluded.extend(recent.iter().cloned());
+                let mut item =
+                    pick_cached_rotation_photo(&conn, &self.app_data_dir, filter, &excluded, pool)
+                        .map_err(e)?;
+                if item.is_none() && !recent.is_empty() {
+                    item = pick_cached_rotation_photo(
+                        &conn,
+                        &self.app_data_dir,
+                        filter,
+                        displayed,
+                        pool,
+                    )
+                    .map_err(e)?;
+                }
+                item
+            };
             let Some(mut item) = item else {
                 return Ok(None);
             };
@@ -190,7 +208,35 @@ impl PhotoServiceState {
         displayed: &[String],
         prefer_favorite: bool,
     ) -> Result<Option<PhotoItem>, String> {
+        self.rotation_candidate_with(filter, displayed, prefer_favorite, false)
+    }
+
+    /// `offline_fallback` serves already-shown cached photos (then favorites) regardless of
+    /// the auto-reset setting, so Next keeps working without a network.
+    fn rotation_candidate_with(
+        &self,
+        filter: &PhotoFilter,
+        displayed: &[String],
+        prefer_favorite: bool,
+        offline_fallback: bool,
+    ) -> Result<Option<PhotoItem>, String> {
         use RotationPhotoPool::{Favorites, PreviouslyShown, Unused};
+        if offline_fallback {
+            for pool in [
+                prefer_favorite.then_some(Favorites),
+                Some(Unused),
+                Some(PreviouslyShown),
+                Some(Favorites),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(item) = self.pop(filter, displayed, pool)? {
+                    return Ok(Some(item));
+                }
+            }
+            return Ok(None);
+        }
         let fallback = if filter.auto_reset_history_on_exhaustion {
             Some(PreviouslyShown)
         } else if !prefer_favorite {
@@ -425,7 +471,7 @@ pub(crate) async fn rotate_photo_next(
             unchanged && photo_rotation_allowed(&source, monitor_id.is_some(), photo_runtime)
         })
         .collect();
-    rotate_photo_targets(app, state, monitor_id, targets, false).await
+    rotate_photo_targets(app, state, targets, false).await
 }
 
 /// Only called by `show_photo` while its caller holds this monitor's apply lock.
@@ -437,14 +483,7 @@ pub(crate) async fn rotate_photo_for_locked_monitor(
 ) -> Result<PhotoItem, String> {
     let live = live_monitor_orientations(app);
     let targets = select_rotation_targets(&live, &HashMap::new(), Some(monitor_id));
-    rotate_photo_targets(
-        app,
-        state,
-        Some(monitor_id.to_string()),
-        targets,
-        mix_favorites,
-    )
-    .await
+    rotate_photo_targets(app, state, targets, mix_favorites).await
 }
 
 fn photo_rotation_allowed(source: &WallpaperSource, explicit: bool, photo_runtime: bool) -> bool {
@@ -455,7 +494,6 @@ fn photo_rotation_allowed(source: &WallpaperSource, explicit: bool, photo_runtim
 async fn rotate_photo_targets(
     app: &AppHandle,
     state: &PhotoServiceState,
-    monitor_id: Option<String>,
     target_monitors: Vec<(String, bool)>,
     mix_favorites: bool,
 ) -> Result<PhotoItem, String> {
@@ -465,110 +503,61 @@ async fn rotate_photo_targets(
     let (_, mut base_filter, max_cache_bytes, mut displayed_ids) =
         state.load_active_filter(None)?;
     let host = app.try_state::<AppState>().map(|s| Arc::clone(&s.host));
-    let (skip_mismatched, multi_monitor_mode) = {
+    // Every display draws its own photo; "span" is a presentation mode handled by the renderer
+    // (the source display's runtime is stretched), so there is no clone branch here.
+    let skip_mismatched: bool = {
         let conn = state.db.lock();
-        let skip: bool = get_setting(&conn, SETTING_SKIP_MISMATCHED_ORIENTATION)
+        get_setting(&conn, SETTING_SKIP_MISMATCHED_ORIENTATION)
             .map_err(e)?
-            .unwrap_or(true);
-        let mode: String = get_setting(&conn, SETTING_MULTI_MONITOR_MODE)
-            .map_err(e)?
-            .unwrap_or_else(|| "independent".to_string());
-        (skip, mode)
+            .unwrap_or(true)
     };
-
-    let orientations = target_monitors
-        .iter()
-        .map(|(_, portrait)| display_orientation(*portrait));
-    let can_clone = !skip_mismatched
-        || orientations
-            .clone()
-            .all(|orientation| orientation == display_orientation(target_monitors[0].1));
     let mut last_applied_item: Option<PhotoItem> = None;
     let mut refill_needed = false;
 
-    if multi_monitor_mode == "clone" && monitor_id.is_none() && can_clone {
+    for (mid, is_portrait) in &target_monitors {
         base_filter.required_orientation =
-            skip_mismatched.then(|| display_orientation(target_monitors[0].1).as_str().into());
-        let mut item =
-            photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids, false).await?;
+            skip_mismatched.then(|| display_orientation(*is_portrait).as_str().into());
+
+        // Keep the API queue first for manual Next and occasionally mix in a favorite
+        // for automatic rotation. A low queue still triggers a background refill.
+        let prefer_favorite = mix_favorites && rand::random::<u8>() < 64;
+        let mut item = photo_for_rotation(
+            state,
+            &base_filter,
+            max_cache_bytes,
+            &displayed_ids,
+            prefer_favorite,
+        )
+        .await?;
+
         let mut attempts = 0;
-        let (chosen, decoded) = loop {
-            let chosen = item.ok_or_else(no_other_photo_ready)?;
-            match prepare_photo(host.as_ref(), &chosen).await {
-                Ok(decoded) => break (chosen, decoded),
+        while let Some(chosen) = item.take() {
+            let decoded = match prepare_photo(host.as_ref(), &chosen).await {
+                Ok(decoded) => decoded,
                 Err(err) => {
                     // Not recorded as shown: the desktop never displayed it. Evicted so the
                     // next rotation does not pick it again.
-                    tracing::warn!("{err}; skipping");
+                    tracing::warn!("{err}; skipping for {mid}");
                     drop_undecodable_photo(state, &chosen).await;
-                    attempts += 1;
-                    if attempts >= MAX_DECODE_ATTEMPTS {
-                        return Err(err);
-                    }
                     displayed_ids.push(chosen.id.clone());
-                    item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
+                    attempts += 1;
+                    if attempts < MAX_DECODE_ATTEMPTS {
+                        item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
+                    }
+                    continue;
                 }
-            }
-        };
-        {
-            let mut conn = state.db.lock();
-            mark_photo_shown(&mut conn, &chosen.id).map_err(e)?;
-            for (mid, _) in &target_monitors {
+            };
+            {
+                let mut conn = state.db.lock();
+                mark_photo_shown(&mut conn, &chosen.id).map_err(e)?;
                 assign_photo_to_monitor(&conn, mid, &chosen.id).map_err(e)?;
             }
+            displayed_ids.push(chosen.id.clone());
+            state.show_prepared(app, mid, &chosen, decoded)?;
+            last_applied_item = Some(chosen);
         }
-        for (mid, _) in &target_monitors {
-            state.show_prepared(app, mid, &chosen, decoded.clone())?;
-        }
-        last_applied_item = Some(chosen);
-        refill_needed =
+        refill_needed |=
             needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
-    } else {
-        for (mid, is_portrait) in &target_monitors {
-            base_filter.required_orientation =
-                skip_mismatched.then(|| display_orientation(*is_portrait).as_str().into());
-
-            // Keep the API queue first for manual Next and occasionally mix in a favorite
-            // for automatic rotation. A low queue still triggers a background refill.
-            let prefer_favorite = mix_favorites && rand::random::<u8>() < 64;
-            let mut item = photo_for_rotation(
-                state,
-                &base_filter,
-                max_cache_bytes,
-                &displayed_ids,
-                prefer_favorite,
-            )
-            .await?;
-
-            let mut attempts = 0;
-            while let Some(chosen) = item.take() {
-                let decoded = match prepare_photo(host.as_ref(), &chosen).await {
-                    Ok(decoded) => decoded,
-                    Err(err) => {
-                        // Not recorded as shown: the desktop never displayed it. Evicted so the
-                        // next rotation does not pick it again.
-                        tracing::warn!("{err}; skipping for {mid}");
-                        drop_undecodable_photo(state, &chosen).await;
-                        displayed_ids.push(chosen.id.clone());
-                        attempts += 1;
-                        if attempts < MAX_DECODE_ATTEMPTS {
-                            item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
-                        }
-                        continue;
-                    }
-                };
-                {
-                    let mut conn = state.db.lock();
-                    mark_photo_shown(&mut conn, &chosen.id).map_err(e)?;
-                    assign_photo_to_monitor(&conn, mid, &chosen.id).map_err(e)?;
-                }
-                displayed_ids.push(chosen.id.clone());
-                state.show_prepared(app, mid, &chosen, decoded)?;
-                last_applied_item = Some(chosen);
-            }
-            refill_needed |=
-                needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
-        }
     }
 
     state.emit_status(app);
@@ -602,8 +591,19 @@ async fn photo_for_rotation(
     if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
         return Ok(Some(item));
     }
-    let _ = state.refill(filter, max_cache_bytes, displayed_ids).await;
-    state.rotation_candidate(filter, displayed_ids, prefer_favorite)
+    let outcome = state.refill(filter, max_cache_bytes, displayed_ids).await;
+    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
+        return Ok(Some(item));
+    }
+    // A network failure (this refill, or one still cooling down) must not strand the user on
+    // one photo: fall back to anything cached, whatever the auto-reset setting says.
+    let offline = matches!(outcome, Ok(RefillOutcome::Offline))
+        || outcome.as_ref().err().is_some_and(|err| err.is_network())
+        || state.limiter.is_offline();
+    if offline {
+        return state.rotation_candidate_with(filter, displayed_ids, prefer_favorite, true);
+    }
+    Ok(None)
 }
 
 /// 4. `photo_trigger_refill`
@@ -612,6 +612,16 @@ pub async fn photo_trigger_refill(
     app: AppHandle,
     state: State<'_, PhotoServiceState>,
 ) -> Result<(), String> {
+    trigger_refill(&app, &state).await
+}
+
+/// `photo_retry_now`: ends the offline / throttling backoff and refills right away.
+#[tauri::command]
+pub async fn photo_retry_now(
+    app: AppHandle,
+    state: State<'_, PhotoServiceState>,
+) -> Result<(), String> {
+    state.limiter.clear_backoff();
     trigger_refill(&app, &state).await
 }
 
@@ -1003,6 +1013,8 @@ mod tests {
             "blacklistCount",
             "isRefilling",
             "rateLimitRemaining",
+            "offline",
+            "showingCachedOnly",
         ] {
             assert!(json.get(key).is_some(), "PhotoStatus missing {key}");
         }
@@ -1151,6 +1163,132 @@ mod tests {
         assert_eq!(pick(&filter, &displayed, false).as_deref(), Some("cached"));
         filter.auto_reset_history_on_exhaustion = false;
         assert_eq!(pick(&filter, &displayed, false), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Seeds `n` shown favorite photos (`f00`..) with strictly increasing `last_shown_at`.
+    fn seed_shown_favorites(state: &PhotoServiceState, dir: &Path, n: usize, favorite: bool) {
+        for i in 0..n {
+            let id = format!("f{i:02}");
+            let rel_path = format!("{id}.png");
+            std::fs::write(dir.join(&rel_path), TINY_PNG).unwrap();
+            let mut conn = state.db.lock();
+            upsert_cached_photo(
+                &conn,
+                &NewCachedPhoto {
+                    id: id.clone(),
+                    rel_path,
+                    album_slug: "album".into(),
+                    album_url: "https://example.com/album".into(),
+                    featured: false,
+                    fallback_used: false,
+                    width: 1,
+                    height: 1,
+                    bytes: TINY_PNG.len() as u64,
+                    downloaded_at: i as i64,
+                },
+            )
+            .unwrap();
+            mark_photo_shown(&mut conn, &id).unwrap();
+            set_favorite(&conn, &id, favorite).unwrap();
+            drop(conn);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn temp_state(tag: &str) -> (PhotoServiceState, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("truongpaper-photo-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = service();
+        state.app_data_dir = dir.clone();
+        (state, dir)
+    }
+
+    #[test]
+    fn favorites_do_not_repeat_within_the_recent_window() {
+        let (state, dir) = temp_state("recent-window");
+        seed_shown_favorites(&state, &dir, 5, true);
+        let filter = PhotoFilter::default();
+        // Rotate 12 times through 5 favorites, showing each pick like the real flow.
+        let mut shown: Vec<String> = Vec::new();
+        let mut displayed: Vec<String> = Vec::new();
+        for _ in 0..12 {
+            let item = state
+                .rotation_candidate(&filter, &displayed, true)
+                .unwrap()
+                .expect("a favorite is always available");
+            mark_photo_shown(&mut state.db.lock(), &item.id).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            displayed = vec![item.id.clone()];
+            shown.push(item.id);
+        }
+        // Pool of 5 -> window of 4: no id repeats within any 5 consecutive picks.
+        for w in shown.windows(5) {
+            let mut ids = w.to_vec();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), 5, "repeat inside window: {shown:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn small_pools_still_rotate() {
+        let (state, dir) = temp_state("small-pool");
+        seed_shown_favorites(&state, &dir, 2, true);
+        let filter = PhotoFilter::default();
+        let mut displayed = vec!["f01".to_string()];
+        let mut picks = Vec::new();
+        for _ in 0..4 {
+            let item = state
+                .rotation_candidate(&filter, &displayed, true)
+                .unwrap()
+                .expect("two favorites keep rotating");
+            mark_photo_shown(&mut state.db.lock(), &item.id).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            displayed = vec![item.id.clone()];
+            picks.push(item.id);
+        }
+        assert_eq!(picks, ["f00", "f01", "f00", "f01"]);
+        // A single favorite that is on screen is still served rather than emptying the pool.
+        let (single, dir1) = temp_state("single-pool");
+        seed_shown_favorites(&single, &dir1, 1, true);
+        assert!(single
+            .rotation_candidate(&filter, &[], true)
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(dir1).unwrap();
+    }
+
+    #[test]
+    fn offline_next_falls_back_to_cached_photos_even_without_auto_reset() {
+        let (state, dir) = temp_state("offline-fallback");
+        seed_shown_favorites(&state, &dir, 3, false);
+        let filter = PhotoFilter {
+            auto_reset_history_on_exhaustion: false,
+            ..Default::default()
+        };
+        let displayed = vec!["f02".to_string()];
+        assert!(state
+            .rotation_candidate(&filter, &displayed, false)
+            .unwrap()
+            .is_none());
+        let item = state
+            .rotation_candidate_with(&filter, &displayed, false, true)
+            .unwrap()
+            .expect("offline fallback serves a previously shown photo");
+        assert_eq!(item.id, "f00");
+
+        // Status reports offline + cached-only once a network error was recorded.
+        assert!(!state.status().unwrap().offline);
+        state.limiter.note_network_error();
+        let status = state.status().unwrap();
+        assert!(status.offline && status.showing_cached_only);
+        state.limiter.note_success();
+        assert!(!state.status().unwrap().offline);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -12,6 +12,10 @@ import type { WorkshopBrowsePage } from '../src/types/ipc';
 const item = { workshopId: '1234567890', title: 'Test mountain', author: 'Artist', subscribers: 2000, rating: 4, tags: ['Scene'], previewUrl: '', description: '', fileSizeBytes: 1, timeUpdated: 0 };
 const page: WorkshopBrowsePage = { items: [item], page: 1, totalPages: 3, totalItems: 90, tagGroups: [{name:'Type',tags:[{tag:'Scene',label:'Scene'}]}] };
 const initial = useAppStore.getState();
+const expectLastBrowse = (args: unknown) => {
+  const browses = invokeMock.mock.calls.filter(([cmd]) => cmd === 'steam_browse_workshop');
+  expect(browses[browses.length - 1]).toEqual(['steam_browse_workshop', args]);
+};
 beforeEach(() => {
   useAppStore.setState(initial, true);
   invokeMock.mockReset();
@@ -21,15 +25,16 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 it('browses, filters, and pages without a login or download', async () => {
   render(<WorkshopBrowser />);
   await screen.findByRole('button', {name:'Preview Test mountain'});
-  expect(invokeMock.mock.calls.every(([cmd]) => cmd === 'steam_browse_workshop')).toBe(true);
+  expect(invokeMock.mock.calls.every(([cmd]) => cmd === 'steam_browse_workshop' || cmd === 'steam_guest_availability')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
   fireEvent.click(screen.getByRole('combobox', { name: 'Workshop type' }));
   await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Scene' })); });
-  expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop', {query:expect.objectContaining({page:1,tags:['Scene']})});
+  expectLastBrowse({query:expect.objectContaining({page:1,tags:['Scene']})});
   await act(async () => { fireEvent.click(screen.getByLabelText('Next Workshop page')); });
-  expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop', {query:expect.objectContaining({page:2})});
+  expectLastBrowse({query:expect.objectContaining({page:2})});
   fireEvent.click(screen.getByRole('combobox', { name: 'Workshop sort' }));
   await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Newest' })); });
-  expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop', {query:expect.objectContaining({page:1,sort:'newest'})});
+  expectLastBrowse({query:expect.objectContaining({page:1,sort:'newest'})});
 });
 it('previews a result and downloads only after the explicit button', async () => {
   render(<><WorkshopBrowser /><WorkshopPreviewModal /></>);
@@ -43,7 +48,10 @@ it('previews a result and downloads only after the explicit button', async () =>
 });
 it('keeps a GGNetwork availability error in the preview', async () => {
   useAppStore.setState({ inspectedWorkshop: item });
-  invokeMock.mockRejectedValueOnce(new Error('GGNetwork requires its own account for this wallpaper.'));
+  invokeMock.mockImplementation(async (cmd: string) => {
+    if (cmd === 'steam_download_workshop_item') throw new Error('GGNetwork requires its own account for this wallpaper.');
+    return {};
+  });
   render(<WorkshopPreviewModal />);
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Download via GGNetwork' }));
@@ -60,7 +68,7 @@ it('supports a direct Workshop link inside Discover and keyword search', async (
   await screen.findByRole('button', {name:'Preview Test mountain'});
   fireEvent.change(input,{target:{value:'mountain'}});
   await act(async () => {fireEvent.submit(input.closest('form')!);});
-  expect(invokeMock).toHaveBeenLastCalledWith('steam_browse_workshop',{query:expect.objectContaining({search:'mountain',page:1})});
+  expectLastBrowse({query:expect.objectContaining({search:'mountain',page:1})});
   fireEvent.change(input,{target:{value:'https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890'}});
   await act(async () => {fireEvent.submit(input.closest('form')!);});
   expect(invokeMock).toHaveBeenLastCalledWith('steam_inspect_url',{urlOrId:'1234567890'});
@@ -104,4 +112,25 @@ it('shows actual process RAM separately from disk cache and stops sampling after
   view.unmount();
   await vi.advanceTimersByTimeAsync(6000);
   expect(invokeMock).toHaveBeenCalledTimes(2);
+});
+
+it('badges items GGNetwork has and disables its button when the mirror lacks the item', async () => {
+  invokeMock.mockImplementation(async (cmd: string) => cmd === 'steam_browse_workshop' ? page
+    : cmd === 'steam_guest_availability' ? { '1234567890': 'unavailable' } : cmd === 'steam_inspect_url' ? item : {});
+  render(<><WorkshopBrowser /><WorkshopPreviewModal /></>);
+  const result = await screen.findByRole('button', {name:'Preview Test mountain'});
+  expect(invokeMock).toHaveBeenCalledWith('steam_guest_availability', { workshopIds: ['1234567890'] });
+  expect(screen.queryByText('GGNetwork')).toBeNull();
+  await act(async () => { fireEvent.click(result); });
+  const button = await screen.findByRole('button', {name:'Not on GGNetwork'});
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText(/third-party mirror/)).toBeTruthy();
+});
+
+it('shows a GGNetwork badge on available results', async () => {
+  invokeMock.mockImplementation(async (cmd: string) => cmd === 'steam_browse_workshop' ? page
+    : cmd === 'steam_guest_availability' ? { '1234567890': 'available' } : {});
+  render(<WorkshopBrowser />);
+  await screen.findByRole('button', {name:'Preview Test mountain'});
+  expect(await screen.findByText('GGNetwork')).toBeTruthy();
 });

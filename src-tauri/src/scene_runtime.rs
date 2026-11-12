@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use truongpaper_audio::{effective_volume, SoundLayerPlan, SoundPlaybackMode};
-use truongpaper_renderer::{CameraState, SceneGraph, ScriptProperty};
+use truongpaper_renderer::{CameraState, DiagnosticsLog, SceneGraph, ScriptProperty};
 use truongpaper_scenescript::{CursorEventKind, LayerState, SceneScriptEngine};
 use truongpaper_we_formats::scene_schema::{resolve_bound_bool, resolve_bound_value};
 use truongpaper_we_formats::WeVirtualFileSystem;
@@ -68,6 +68,7 @@ fn initial_value_expr(prop: Option<ScriptProperty>, raw: &str) -> String {
             .ok()
             .filter(|n| n.is_finite())
             .map_or_else(|| "0".to_string(), |n| format!("{n}")),
+        Some(ScriptProperty::Text) => js_string(),
         Some(ScriptProperty::Visible) => {
             let visible = match raw.trim_matches('"') {
                 "false" => false,
@@ -128,6 +129,8 @@ pub struct SceneRuntime {
     elapsed: f32,
     paused: bool,
     time_of_day: Option<f32>,
+    /// Notes merged in by the host (e.g. [`truongpaper_renderer::SceneRenderer::diagnostics`]).
+    extra_diagnostics: DiagnosticsLog,
 }
 
 impl std::fmt::Debug for SceneRuntime {
@@ -184,6 +187,7 @@ impl SceneRuntime {
             elapsed: 0.0,
             paused: false,
             time_of_day: None,
+            extra_diagnostics: DiagnosticsLog::default(),
         };
 
         for (_, key) in &rt.script_layers {
@@ -273,6 +277,27 @@ impl SceneRuntime {
         self.time_of_day = time_of_day
             .filter(|t| t.is_finite())
             .map(|t| t.clamp(0.0, 1.0));
+    }
+
+    /// Short human-readable notes about content that is skipped or approximated in this scene
+    /// (unsupported layers, scripts that failed to compile, plus anything added with
+    /// [`Self::add_diagnostics`], such as the renderer's skipped effect passes). Deduplicated
+    /// and capped at 50 entries.
+    pub fn diagnostics(&self) -> Vec<String> {
+        let mut log = self.graph.diagnostics.clone();
+        for slot in &self.skipped_slots {
+            log.push(format!(
+                "SceneScript {slot} skipped: failed to compile or start"
+            ));
+        }
+        log.extend(self.extra_diagnostics.to_vec());
+        log.to_vec()
+    }
+
+    /// Merges externally produced notes (e.g. `SceneRenderer::diagnostics()`) into
+    /// [`Self::diagnostics`].
+    pub fn add_diagnostics<I: IntoIterator<Item = String>>(&mut self, notes: I) {
+        self.extra_diagnostics.extend(notes);
     }
 
     /// Slot keys whose scripts compiled and initialized.
@@ -436,6 +461,10 @@ impl SceneRuntime {
                 color: l.color.to_array(),
                 alpha: l.alpha,
                 visible: l.visible,
+                text: match &l.kind {
+                    truongpaper_renderer::SceneLayerKind::Text { text, .. } => text.clone(),
+                    _ => String::new(),
+                },
             },
             None => LayerState {
                 name: key.to_string(),
@@ -446,6 +475,7 @@ impl SceneRuntime {
                 color: [1.0; 3],
                 alpha: 1.0,
                 visible: true,
+                text: String::new(),
             },
         }
     }
@@ -487,6 +517,7 @@ impl SceneRuntime {
             ) {
                 applied += 1;
             }
+            self.graph.apply_layer_text(&s.name, &s.text);
             self.synced.insert(s.name.clone(), s);
         }
         Ok(applied)
@@ -708,6 +739,56 @@ mod tests {
         rt.apply_user_properties(r#"{"fade": 0.3}"#).unwrap();
         step(&mut rt);
         assert!((layer(&rt, "A").alpha - 0.3).abs() < 1e-6);
+    }
+
+    fn text_of(rt: &SceneRuntime, name: &str) -> String {
+        match &layer(rt, name).kind {
+            truongpaper_renderer::SceneLayerKind::Text { text, .. } => text.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_scripts_drive_layer_text_each_frame() {
+        let t = TempDir::new("text");
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } }, "objects": [
+                { "name": "Clock", "size": "100 20",
+                  "text": { "script": "let n = 0;\nexport function update(v) { n += 1; return 'tick ' + n; }", "value": "init" } },
+                { "name": "Other", "text": "x",
+                  "visible": { "script": "export function update(v) { thisScene.getLayer('Other').text = 'set by script'; return v; }", "value": true } }
+            ] }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
+        assert_eq!(text_of(&rt, "Clock"), "init");
+        step(&mut rt);
+        assert_eq!(text_of(&rt, "Clock"), "tick 1");
+        assert_eq!(text_of(&rt, "Other"), "set by script");
+        step(&mut rt);
+        assert_eq!(text_of(&rt, "Clock"), "tick 2");
+    }
+
+    #[test]
+    fn diagnostics_report_skipped_content_and_merge_external_notes() {
+        let t = scene_dir("diag");
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        let d = rt.diagnostics();
+        assert!(
+            d.iter()
+                .any(|m| m.contains("Broken/scale") && m.contains("skipped")),
+            "{d:?}"
+        );
+        rt.add_diagnostics(["Effect waterwaves.json skipped: shader failed to compile".into()]);
+        rt.add_diagnostics(["Effect waterwaves.json skipped: shader failed to compile".into()]);
+        let d = rt.diagnostics();
+        assert_eq!(
+            d.iter().filter(|m| m.contains("waterwaves")).count(),
+            1,
+            "deduplicated"
+        );
+        rt.add_diagnostics((0..80).map(|i| format!("note {i}")));
+        assert_eq!(rt.diagnostics().len(), 50);
     }
 
     #[test]

@@ -923,12 +923,6 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = main_win.set_focus();
                 }
             }
-            "next_wallpaper" => {
-                let _ = app.emit("tray://next-requested", ());
-            }
-            "toggle_pause" => {
-                let _ = app.emit("tray://toggle-pause-requested", ());
-            }
             "quit" => {
                 app.exit(0);
             }
@@ -2063,6 +2057,7 @@ invoke<PhotoStatus>('photo_get_status');
 invoke<PublicCatalogAlbum[]>('photo_fetch_public_catalog');
 invoke<PhotoItem>('photo_rotate_next', { monitorId?: string });
 invoke<void>('photo_trigger_refill');
+invoke<void>('photo_retry_now'); // clears the offline / throttle backoff, then refills
 invoke<SavedAlbum>('photo_add_album', { urlOrSlug: string, displayName?: string });
 invoke<void>('photo_toggle_album', { albumSlug: string, enabled: boolean });
 invoke<void>('photo_remove_album', { albumSlug: string });
@@ -2077,14 +2072,19 @@ invoke<void>('photo_reset_history', { albumSlug?: string });
 // --- Steam Workshop & Wallpaper Engine Commands ---
 invoke<WorkshopBrowsePage>('steam_browse_workshop', { query: WorkshopBrowseQuery }); // Guest public catalog: search, sort, page, days, tags
 invoke<WorkshopPreview>('steam_inspect_url', { urlOrId: string });
+invoke<GuestAvailabilityMap>('steam_guest_availability', { workshopIds: string[] }); // GuestAvailabilityMap = Record<workshopId, 'available' | 'unavailable' | 'unknown'>: which items the third-party GGNetwork mirror can serve (max 30 ids, cached 10 min)
 invoke<string>('steam_download_workshop_item', { urlOrId: string, source?: 'steam' | 'ggnetwork' });
-invoke<void>('steam_login_qr');
-invoke<void>('steam_login_credentials', { username: string, password: string });
+invoke<string>('steam_login_qr'); // Resolves with the account name after the phone approves; times out after 3 minutes
+invoke<string>('steam_login_credentials', { username: string, password: string });
 invoke<void>('steam_submit_2fa_code', { code: string });
+invoke<void>('steam_cancel_login'); // Stops a running sign-in when the window closes
+invoke<string | null>('steam_account'); // Saved account name, or null when signed out
 invoke<void>('steam_logout');
 invoke<WallpaperItem[]>('steam_sync_local_folders');
 invoke<WallpaperItem[]>('library_list_wallpapers');
+invoke<WallpaperItem>('library_import_local', { path: string }); // Copies a Wallpaper Engine item folder (project.json) or a .mp4/.webm/.mov/.mkv file into the library as `local:<slug>`; max 4 GB, no symlinks
 invoke<void>('library_delete_wallpaper', { wallpaperId: string });
+invoke<void>('library_set_favorite', { wallpaperId: string, favorite: boolean }); // WallpaperItem.isFavorite
 
 // --- Monitor, Playback & Property Customization Commands ---
 invoke<MonitorInfo[]>('monitors_list');
@@ -2095,15 +2095,19 @@ invoke<void>('monitor_update_adjustments', { wallpaperId: string, adjustments: U
 invoke<WallpaperPreset>('wallpaper_save_preset', { wallpaperId: string, presetName: string });
 invoke<void>('wallpaper_apply_preset', { wallpaperId: string, presetId: string });
 invoke<void>('playback_set_paused', { monitorId?: string, paused: boolean });
+invoke<void>('monitor_set_volume', { monitorId: string, volume: number }); // 0..1, multiplies the wallpaper volume; only the sound owner of a wallpaper is audible
 
 // --- Playlists, Auto-Updater & Global Settings Commands ---
 invoke<Playlist[]>('playlist_list');
-invoke<Playlist>('playlist_save', { playlist: Playlist });
+invoke<Playlist>('playlist_save', { playlist: Playlist }); // empty playlistId creates a new playlist
+invoke<void>('playlist_delete', { playlistId: string }); // displays using it fall back to photo_api
 invoke<AppSettings>('settings_get');
 invoke<void>('settings_update', { settings: Partial<AppSettings> });
 invoke<string>('update_feed_status');
 invoke<void>('runtime_shutdown_for_update');
 invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: number }, main process RAM only
+invoke<BackupSummary>('backup_export', { path: string }); // one JSON file, no secrets / Steam account data
+invoke<BackupSummary>('backup_import', { path: string }); // validates format/version, <= 10 MB; BackupSummary { settings: boolean, playlists: number, favorites: number, wallpapers: number, missingWorkshopIds: string[] }
 ```
 
 #### Rust $\to$ Frontend Event Channels (`app.emit(...)`)
@@ -2114,6 +2118,9 @@ invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: numb
 - `steam-auth://qr-matrix`: `{ matrix: boolean[][] }`
 - `steam-auth://need-2fa`: `{ kind: 'totp' | 'email', prompt: string }`
 - `policy://state-changed`: `{ monitorId: string, state: 'playing' | 'paused_fullscreen' | 'paused_maximized' | 'paused_battery' | 'paused_display_sleep' }`
+- `wallpaper://error`: `{ monitorId: string, wallpaperId: string | null, message: string }` (a wallpaper could not load).
+- `wallpaper://diagnostics`: `{ monitorId: string, wallpaperId: string | null, messages: string[] }` (scene report).
+- `wallpaper://loaded`: `{ monitorId: string, wallpaperId: string | null }` (a wallpaper finished loading; clears that display's error card).
 - `playback://pause-changed`: `{ monitorId: string | null, paused: boolean }` (manual pause; null means all displays).
 - `system-power`: `{ kind: 'pause' | 'resume', reason: 'sleep' | 'display' | 'lock' }`
 

@@ -62,6 +62,8 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri -> target
@@ -80,6 +82,16 @@ jobs:
         # Sidecars must exist before tauri-build validates the bundle configuration.
         working-directory: .
         run: node scripts/bundle-depotdownloader.mjs
+
+      - name: Rust format and lint
+        if: matrix.os == 'macos-latest'
+        working-directory: src-tauri
+        # Pinned so a new stable release cannot add lints that fail unrelated changes.
+        # Raise it on purpose after running clippy with the new version locally.
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal -c clippy,rustfmt
+          cargo +1.94.0 fmt --all -- --check
+          cargo +1.94.0 clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Rust tests
         working-directory: src-tauri

@@ -1,23 +1,32 @@
 import { Dropdown } from './components/Dropdown';
-import React, { useEffect, useState } from 'react';
-import { Check, Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal, X } from 'lucide-react';
-import { PresetBar } from './components/PresetBar';
-import { PhotoSourceInspector } from './components/PhotoSourceInspector';
-import { PropertyInspector } from './components/PropertyInspector';
-import { SteamAuthModal } from './components/SteamAuthModal';
-import { WindowControls } from './components/WindowControls';
-import { WorkshopPreviewModal } from './components/WorkshopPreviewModal';
-import { AllWallpapersView } from './components/views/AllWallpapersView';
-import { MonitorsView } from './components/views/MonitorsView';
-import { PhotosApiView } from './components/views/PhotosApiView';
-import { PlaylistsView } from './components/views/PlaylistsView';
-import { SettingsView } from './components/views/SettingsView';
-import { SteamWorkshopView } from './components/views/SteamWorkshopView';
-import { Thumb } from './components/ui';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Settings as SettingsIcon } from 'lucide-react';
+import { DetailsDrawer } from './components/DetailsDrawer';
+import { FeedbackHost } from './components/Feedback';
+import { PlaybackBar } from './components/PlaybackBar';
 import { ResourceUsage } from './components/ResourceUsage';
-import { currentWallpaperForMonitor, useAppStore } from './store/useAppStore';
-import { photoPreviewSrc } from './lib/format';
-import type { WallpaperSource } from './types/ipc';
+import { WindowControls } from './components/WindowControls';
+import { AllWallpapersView } from './components/views/AllWallpapersView';
+import { useAppStore } from './store/useAppStore';
+import { toast } from './store/feedback';
+
+// Everything except the Library is split out, so the first screen loads (and parses) less code.
+const lazyView = <K extends string>(load: () => Promise<Record<K, React.ComponentType<any>>>, name: K) =>
+  lazy(() => load().then((m) => ({ default: m[name] })));
+const loaders = {
+  photos: () => import('./components/views/PhotosApiView'),
+  workshop: () => import('./components/views/SteamWorkshopView'),
+  playlists: () => import('./components/views/PlaylistsView'),
+  monitors: () => import('./components/views/MonitorsView'),
+  settings: () => import('./components/views/SettingsView'),
+};
+const PhotosApiView = lazyView(loaders.photos, 'PhotosApiView');
+const SteamWorkshopView = lazyView(loaders.workshop, 'SteamWorkshopView');
+const PlaylistsView = lazyView(loaders.playlists, 'PlaylistsView');
+const MonitorsView = lazyView(loaders.monitors, 'MonitorsView');
+const SettingsView = lazyView(loaders.settings, 'SettingsView');
+const SteamAuthModal = lazyView(() => import('./components/SteamAuthModal'), 'SteamAuthModal');
+const WorkshopPreviewModal = lazyView(() => import('./components/WorkshopPreviewModal'), 'WorkshopPreviewModal');
 
 export type StudioTab = 'all' | 'photos' | 'workshop' | 'playlists' | 'monitors' | 'settings';
 export const STUDIO_TABS = [
@@ -28,168 +37,155 @@ export const STUDIO_TABS = [
   ['monitors', 'Displays', Monitor],
   ['settings', 'Settings', SettingsIcon],
 ] as const;
-const VIEWS: Record<Exclude<StudioTab, 'all'>, React.FC> = {
-  photos: PhotosApiView, workshop: SteamWorkshopView,
-  playlists: PlaylistsView, monitors: MonitorsView, settings: SettingsView,
-};
 const nativeMacTitlebar = /Mac/.test(navigator.platform);
+
+/** True from the first time `flag` is true: keeps a lazily loaded modal mounted after it closes. */
+function useEverTrue(flag: boolean) {
+  const [seen, setSeen] = useState(flag);
+  useEffect(() => { if (flag) setSeen(true); }, [flag]);
+  return seen || flag;
+}
 
 export const App: React.FC = () => {
   const initAppListeners = useAppStore((s) => s.initAppListeners);
-  const photoStatus = useAppStore((s) => s.photoStatus);
-  const wallpapers = useAppStore((s) => s.wallpapers);
-  const monitors = useAppStore((s) => s.monitors);
+  // A primitive key keeps this from re-rendering on unrelated display changes (pause, volume, ...).
+  const monitorKey = useAppStore((s) => s.monitors.map((m) => `${m.monitorId}\u0000${m.name}`).join('\u0001'));
+  const monitors = useMemo(
+    () => (monitorKey ? monitorKey.split('\u0001').map((entry) => entry.split('\u0000') as [string, string]) : []),
+    [monitorKey],
+  );
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
-  const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
-  const selectedPhotoSource = useAppStore((s) => s.selectedPhotoSource);
-  const selectPhotoSource = useAppStore((s) => s.selectPhotoSource);
-  const systemPowerReasons = useAppStore((s) => s.systemPowerReasons);
-  const policyStateByMonitor = useAppStore((s) => s.policyStateByMonitor);
-  const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
-  const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
   const selectMonitor = useAppStore((s) => s.selectMonitor);
-  const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
-  const setLocalWallpaperProperty = useAppStore((s) => s.setLocalWallpaperProperty);
-  const setLocalWallpaperAdjustments = useAppStore((s) => s.setLocalWallpaperAdjustments);
+  const writeError = useAppStore((s) => s.writeError);
+  const dismissWriteError = useAppStore((s) => s.dismissWriteError);
+  const photoSourceSelected = useAppStore((s) => s.selectedPhotoSource);
+  const wallpaperSelected = useAppStore((s) => s.wallpapers.some((w) => w.wallpaperId === s.selectedWallpaperId));
+  const cachedBytes = useAppStore((s) => s.photoStatus?.cachedBytes ?? 0);
+  const authOpen = useEverTrue(useAppStore((s) => s.authModalOpen));
+  const previewOpen = useEverTrue(useAppStore((s) => !!s.inspectedWorkshop));
   const [activeTab, setActiveTab] = useState<StudioTab>('all');
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [applyingDetails, setApplyingDetails] = useState(false);
-  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let cleanup: (() => void) | undefined;
-    initAppListeners({ handleTrayMenuEvents: true })
+    initAppListeners()
       .then((fn) => { if (cancelled) fn(); else cleanup = fn; })
       .catch((err) => setLoadError(String(err)));
     return () => { cancelled = true; cleanup?.(); };
   }, [initAppListeners]);
 
+  // Warm the other views once the first screen is up, so switching tabs is instant.
   useEffect(() => {
-    if (selectedWallpaperId) setDetailsOpen(true);
-  }, [selectedWallpaperId]);
+    const timer = window.setTimeout(() => { Object.values(loaders).forEach((load) => void load()); }, 1500);
+    return () => window.clearTimeout(timer);
+  }, []);
 
-  useEffect(() => { setDetailsError(null); }, [selectedWallpaperId, selectedPhotoSource, selectedMonitorId]);
+  // A failed debounced write is reported once, as a message.
+  useEffect(() => {
+    if (!writeError) return;
+    toast.error(writeError);
+    dismissWriteError();
+  }, [writeError, dismissWriteError]);
 
-  const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0];
-  const isPaused = activeMonitor?.userPaused ?? false;
-  const { wallpaper: activeWallpaper, photo: currentPhoto } =
-    currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
-  const selectedWallpaper = wallpapers.find((w) => w.wallpaperId === selectedWallpaperId);
-  const detailsTitle = selectedPhotoSource ? 'Ian Truong Photography' : selectedWallpaper?.title;
-  const detailsSource: WallpaperSource | undefined = selectedPhotoSource ? { kind: 'photo_api' }
-    : selectedWallpaper ? { kind: 'workshop', wallpaperId: selectedWallpaper.wallpaperId } : undefined;
-  const detailsCurrent = detailsSource?.kind === 'photo_api'
-    ? activeMonitor?.activeSource.kind === 'photo_api'
-    : activeMonitor?.activeSource.kind === 'workshop' && activeMonitor.activeSource.wallpaperId === selectedWallpaperId;
-  const canInspect = (selectedPhotoSource && activeTab === 'all') ||
-    (!!selectedWallpaper && (activeTab === 'all' || activeTab === 'workshop'));
+  // The control that opened the drawer gets focus back when it closes.
+  const openerRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const closeDetails = useCallback(() => {
+    setDetailsOpen(false);
+    const opener = openerRef.current;
+    if (opener?.isConnected) opener.focus();
+  }, []);
+  const openDetails = useCallback(() => setDetailsOpen(true), []);
+
+  const canInspect = (photoSourceSelected && activeTab === 'all') ||
+    (wallpaperSelected && (activeTab === 'all' || activeTab === 'workshop'));
   const showInspector = detailsOpen && canInspect;
-  const ActiveView = activeTab === 'all' ? null : VIEWS[activeTab];
-  const activeLabel = STUDIO_TABS.find(([key]) => key === activeTab)?.[1];
-  const autoPaused = systemPowerReasons.length > 0 || (activeMonitor && policyStateByMonitor[activeMonitor.monitorId] && policyStateByMonitor[activeMonitor.monitorId] !== 'playing');
-  const playingLabel = isPaused ? 'Paused' : autoPaused ? 'Auto-paused' : 'Playing';
-  const currentTitle = activeWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
-  const currentPreview = activeWallpaper?.previewPath ?? photoPreviewSrc(currentPhoto);
-  const canRotate = activeMonitor?.activeSource.kind === 'photo_api' || !!currentPhoto;
-  const [actionError, setActionError] = useState<string | null>(null);
-  const runAction = async (action: () => Promise<void>) => {
-    setActionError(null);
-    try { await action(); } catch (err) { setActionError(String(err)); }
-  };
-  const applyDetails = async () => {
-    if (!activeMonitor || !detailsSource || detailsCurrent || applyingDetails) return;
-    setApplyingDetails(true);
-    setDetailsError(null);
-    try { await applyMonitorSource(activeMonitor.monitorId, detailsSource); }
-    catch (err) { setDetailsError(String(err)); }
-    finally { setApplyingDetails(false); }
-  };
+  const wasInspectorOpen = useRef(false);
+  useEffect(() => {
+    if (showInspector && !wasInspectorOpen.current) closeButtonRef.current?.focus();
+    wasInspectorOpen.current = showInspector;
+  }, [showInspector]);
+  useEffect(() => {
+    if (!showInspector) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) closeDetails();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [showInspector, closeDetails]);
+
+  const activeId = monitors.find(([id]) => id === selectedMonitorId)?.[0] ?? monitors[0]?.[0] ?? '';
+  const navigate = (tab: StudioTab) => { setActiveTab(tab); };
+
+  const view = (() => {
+    switch (activeTab) {
+      case 'all': return <AllWallpapersView onOpenDetails={openDetails} onNavigate={navigate} />;
+      case 'photos': return <PhotosApiView />;
+      case 'workshop': return <SteamWorkshopView onOpenDetails={openDetails} />;
+      case 'playlists': return <PlaylistsView />;
+      case 'monitors': return <MonitorsView />;
+      case 'settings': return <SettingsView />;
+    }
+  })();
+
+  const navButton = ([key, label, Icon]: (typeof STUDIO_TABS)[number]) => (
+    <button key={key} type="button" aria-current={activeTab === key ? 'page' : undefined} title={label}
+      className={`nav-item ${activeTab === key ? 'is-active' : ''}`} onClick={() => setActiveTab(key)}>
+      <Icon size={16} strokeWidth={1.6} /><span>{label}</span>
+    </button>
+  );
 
   return (
     <div className={`app-window-frame studio-shell${nativeMacTitlebar ? ' native-titlebar' : ''}`}>
-      <SteamAuthModal />
-      <WorkshopPreviewModal />
+      <Suspense fallback={null}>
+        {authOpen && <SteamAuthModal />}
+        {previewOpen && <WorkshopPreviewModal />}
+      </Suspense>
+      <FeedbackHost />
       <aside className="app-sidebar">
         <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && <WindowControls />}</div>
         <div className="app-brand" data-tauri-drag-region><img src="/app-icon.png" width={23} height={23} alt="" /><span>TruongPaper</span></div>
         <nav aria-label="Studio views" className="sidebar-nav">
-          <div className="sidebar-label">Workspace</div>
-          {STUDIO_TABS.filter(([key]) => key !== 'settings').map(([key, label, Icon]) => (
-            <button key={key} type="button" aria-current={activeTab === key ? 'page' : undefined}
-              aria-label={label} className={`nav-item ${activeTab === key ? 'is-active' : ''}`} onClick={() => setActiveTab(key)}>
-              <Icon size={16} strokeWidth={1.6} /><span>{label}</span>
-              {key === 'all' && <span className="nav-count">{wallpapers.length + 1}</span>}
-            </button>
-          ))}
+          {STUDIO_TABS.filter(([key]) => key !== 'settings').map(navButton)}
           <div className="sidebar-spacer" />
-          <ResourceUsage cachedBytes={photoStatus?.cachedBytes ?? 0} />
-          <button type="button" className={`nav-item ${activeTab === 'settings' ? 'is-active' : ''}`}
-            aria-current={activeTab === 'settings' ? 'page' : undefined} onClick={() => setActiveTab('settings')}>
-            <SettingsIcon size={16} strokeWidth={1.6} /><span>Settings</span>
-          </button>
+          <ResourceUsage cachedBytes={cachedBytes} />
+          {navButton(STUDIO_TABS[STUDIO_TABS.length - 1])}
         </nav>
       </aside>
 
       <div className="workspace">
         <header className="workspace-titlebar" data-tauri-drag-region>
-          <div className="breadcrumb" data-tauri-drag-region><span>Workspace</span><span className="breadcrumb-separator">/</span><span>{activeLabel}</span></div>
           <div className="workspace-controls">
             <Monitor size={14} aria-hidden="true" />
-            <Dropdown className="display-select" label="Active display" value={activeMonitor?.monitorId ?? ''}
-              options={monitors.map((monitor) => [monitor.monitorId, monitor.name])}
+            <span className="workspace-label">Display:</span>
+            <Dropdown className="display-select" label="Active display" value={activeId} options={monitors}
               onChange={selectMonitor} placeholder="No displays connected" />
-            {canInspect && <button type="button" className={`icon-button ${detailsOpen ? 'is-active' : ''}`} aria-label="Toggle wallpaper details" aria-pressed={detailsOpen} onClick={() => setDetailsOpen(!detailsOpen)}><SlidersHorizontal size={16} /></button>}
           </div>
+          {canInspect && (
+            <button type="button" className={`button details-toggle ${detailsOpen ? 'is-active' : ''}`} aria-pressed={detailsOpen}
+              onClick={(event) => { openerRef.current = event.currentTarget; setDetailsOpen(!detailsOpen); }}>
+              {detailsOpen ? 'Hide details' : 'Details'}
+            </button>
+          )}
         </header>
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
-          <main className="content-viewport">
-            {(loadError || actionError) && <div role="alert" className="error-banner">{loadError ?? actionError}</div>}
+          <main className="content-viewport" onClickCapture={(event) => {
+            const opener = (event.target as Element).closest?.('.wallpaper-details-button, .wallpaper-select');
+            if (opener instanceof HTMLElement) openerRef.current = opener;
+          }}>
+            {loadError && <div role="alert" className="error-banner">{loadError}</div>}
             <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}>
-              {ActiveView ? <ActiveView /> : (
-                <AllWallpapersView onSelectPhotoSource={() => { selectPhotoSource(); setDetailsOpen(true); }} />
-              )}
+              <Suspense fallback={<div className="view-loading" role="status">Loading…</div>}>{view}</Suspense>
             </div>
           </main>
+          {showInspector && <div className="inspector-scrim" aria-hidden="true" onClick={closeDetails} />}
           <div className="inspector-slot" inert={!showInspector} aria-hidden={!showInspector}>
-            {(selectedPhotoSource || selectedWallpaper) && (
-              <aside className="inspector-drawer" aria-label="Wallpaper details">
-                <div className="inspector-heading">
-                  <span>Wallpaper details</span>
-                  <button type="button" className="icon-button" aria-label="Close wallpaper details" onClick={() => setDetailsOpen(false)}><X size={16} /></button>
-                </div>
-                <div className="inspector-selection">
-                  <h3>{detailsTitle}</h3>
-                  {detailsCurrent ? (
-                    <span className="inspector-current"><Check size={14} /> Current on this display</span>
-                  ) : (
-                    <button type="button" className="button button-primary" disabled={!activeMonitor || applyingDetails} onClick={() => void applyDetails()}>
-                      {applyingDetails ? 'Applying…' : 'Apply wallpaper'}
-                    </button>
-                  )}
-                  {detailsError && <div role="alert" className="error-banner">{detailsError}</div>}
-                </div>
-                {selectedPhotoSource ? <PhotoSourceInspector monitor={activeMonitor} /> : selectedWallpaper && (
-                  <>
-                    <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
-                    <PresetBar key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId} />
-                    <PropertyInspector key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId}
-                      project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} presets={[]}
-                      onPropertyChange={(k, v) => setLocalWallpaperProperty(selectedWallpaper.wallpaperId, k, v)}
-                      onAdjustmentChange={(next) => setLocalWallpaperAdjustments(selectedWallpaper.wallpaperId, next)} />
-                  </>
-                )}
-              </aside>
-            )}
+            <DetailsDrawer closeRef={closeButtonRef} onClose={closeDetails} onNavigate={(tab) => { closeDetails(); navigate(tab); }} />
           </div>
         </div>
-        <footer className="playback-bar">
-          <div className="now-playing-image"><Thumb src={currentPreview} alt={currentTitle} height={36} /></div>
-          <div className="now-playing-copy"><div className="now-playing-title">{currentTitle}</div><div className="now-playing-meta">{playingLabel}{activeMonitor ? ` on ${activeMonitor.name}` : ''}</div></div>
-          <button type="button" className="button playback-control" disabled={!activeMonitor} onClick={() => void runAction(() => setPlaybackPaused(!isPaused, activeMonitor?.monitorId))}>{isPaused ? <Play size={14} /> : <Pause size={14} />}{isPaused ? 'Resume' : 'Pause'}</button>
-          <button type="button" className="button playback-control" disabled={!canRotate} title={canRotate ? 'Show the next photo' : 'Select Photography on this display to rotate photos'} onClick={() => void runAction(() => rotateNextPhoto(activeMonitor?.monitorId))}>Next<SkipForward size={14} /></button>
-        </footer>
+        <PlaybackBar />
       </div>
     </div>
   );

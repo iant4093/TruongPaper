@@ -144,7 +144,7 @@ fn blur_uniforms_layout_matches_wgsl() {
 
 #[test]
 fn compositor_uniforms_layout_matches_wgsl() {
-    assert_eq!(size_of::<CompositorUniforms>(), 64);
+    assert_eq!(size_of::<CompositorUniforms>(), 80);
     assert_eq!(size_of::<CompositorUniforms>() % 16, 0);
     let (m, _) = parse_and_validate(COMPOSITOR_WGSL);
     let (span, members) = struct_layout(&m, "CompositorUniforms");
@@ -176,6 +176,10 @@ fn compositor_uniforms_layout_matches_wgsl() {
             off!(hue_shift),
             off!(time),
             off!(_pad),
+            off!(span_offset_x),
+            off!(span_offset_y),
+            off!(span_scale_x),
+            off!(span_scale_y),
         ]
     );
 }
@@ -189,7 +193,16 @@ fn compositor_uniform_defaults_are_neutral() {
         (u.brightness, u.contrast, u.saturation, u.hue_shift),
         (0.0, 1.0, 1.0, 0.0)
     );
-    assert_eq!(bytemuck::bytes_of(&u).len(), 64);
+    assert_eq!(bytemuck::bytes_of(&u).len(), 80);
+    assert_eq!(
+        (
+            u.span_offset_x,
+            u.span_offset_y,
+            u.span_scale_x,
+            u.span_scale_y
+        ),
+        (0.0, 0.0, 1.0, 1.0)
+    );
 }
 
 #[test]
@@ -462,4 +475,36 @@ fn load_rgba_image_downscales_and_rejects_bad_files() {
     std::fs::write(&garbage, b"not an image").unwrap();
     assert!(load_rgba_image(&garbage, 64).is_err());
     assert!(load_rgba_image(&dir.0.join("missing.png"), 64).is_err());
+}
+
+#[test]
+fn photo_decode_target_covers_the_display_with_headroom() {
+    // 6000x4000 on a 3840x2160 display: scale to cover 4800x2700 -> 4800x3200.
+    assert_eq!(
+        photo_display_target((6000, 4000), (3840, 2160)),
+        (4800, 3200)
+    );
+    // Small photos are never upscaled.
+    assert_eq!(photo_display_target((1200, 800), (3840, 2160)), (1200, 800));
+    // Portrait photo on a landscape display: width drives the cover scale.
+    let (w, h) = photo_display_target((3000, 6000), (1920, 1080));
+    assert_eq!(w, 2400);
+    assert_eq!(h, 4800);
+    // Never above the texture limit.
+    let (w, h) = photo_display_target((20000, 2000), (16000, 100));
+    assert!(w.max(h) <= MAX_PHOTO_TEXTURE_DIMENSION);
+}
+
+#[test]
+fn downscale_for_display_resizes_large_images_and_keeps_small_ones() {
+    let big = std::sync::Arc::new(RgbaImageData {
+        width: 400,
+        height: 200,
+        pixels: vec![200; 400 * 200 * 4],
+    });
+    let small = downscale_for_display(big.clone(), (100, 50));
+    assert_eq!((small.width, small.height), (126, 63));
+    assert_eq!(small.pixels.len(), 126 * 63 * 4);
+    let same = downscale_for_display(big.clone(), (4000, 2000));
+    assert!(std::sync::Arc::ptr_eq(&same, &big));
 }

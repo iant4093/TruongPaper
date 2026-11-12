@@ -3,8 +3,8 @@ mod common;
 use common::TempDir;
 use glam::{Mat4, Vec2, Vec3};
 use truongpaper_renderer::{
-    build_pass_matrices, camera_shake_offset, CameraRuntime, CameraState, SceneGraph,
-    SceneLayerKind, SceneProjection,
+    build_pass_matrices, camera_shake_offset, CameraRuntime, CameraState, HAlign, SceneGraph,
+    SceneLayerKind, SceneProjection, VAlign,
 };
 use truongpaper_we_formats::WeVirtualFileSystem;
 
@@ -335,13 +335,64 @@ fn layer_kind_detection_and_missing_assets() {
         .warnings
         .iter()
         .any(|w| w.contains("'MissingTex' skipped")));
-    assert_eq!(
-        g.warnings
-            .iter()
-            .filter(|w| w.contains("not drawn"))
-            .count(),
-        1
+    assert!(!g.warnings.iter().any(|w| w.contains("not drawn")));
+    let diag = g.diagnostics.as_slice();
+    assert!(
+        diag.iter().any(|d| d.contains("'Missing' skipped")),
+        "{diag:?}"
     );
+}
+
+#[test]
+fn text_layers_carry_style_and_accept_script_text() {
+    let t = TempDir::new("sg-text");
+    let mut g = load(
+        &t,
+        r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } }, "objects": [
+            { "name": "Clock", "size": "400 100", "text": { "script": "export function update(v) { return v; }", "value": "00:00" },
+              "pointsize": 48, "font": "fonts/a.ttf", "horizontalalign": "right",
+              "verticalalign": "top", "padding": 6 },
+            { "name": "Plain", "text": "Hi" }
+        ] }"#,
+        None,
+    );
+    match &g.layers[0].kind {
+        SceneLayerKind::Text { text, style } => {
+            assert_eq!(text, "00:00");
+            assert_eq!(style.pointsize, 48.0);
+            assert_eq!(style.font.as_deref(), Some("fonts/a.ttf"));
+            assert_eq!(style.halign, HAlign::Right);
+            assert_eq!(style.valign, VAlign::Top);
+            assert_eq!(style.padding, 6.0);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(g.layers[0].transform.size, Vec2::new(400.0, 100.0));
+    match &g.layers[1].kind {
+        SceneLayerKind::Text { style, .. } => {
+            assert_eq!(style.halign, HAlign::Center);
+            assert_eq!(style.valign, VAlign::Center);
+        }
+        other => panic!("{other:?}"),
+    }
+    let slots = g.property_scripts();
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].slot_key, "Clock/text");
+    assert_eq!(slots[0].initial_value, "00:00");
+
+    assert!(g.apply_script_output("Clock/text", "12:34"));
+    assert!(g.apply_layer_text("Plain", "Bye"));
+    assert!(
+        !g.apply_layer_text("Plain", "Bye"),
+        "unchanged text reports false"
+    );
+    assert!(!g.apply_script_output("Missing/text", "x"));
+    match (&g.layers[0].kind, &g.layers[1].kind) {
+        (SceneLayerKind::Text { text: a, .. }, SceneLayerKind::Text { text: b, .. }) => {
+            assert_eq!((a.as_str(), b.as_str()), ("12:34", "Bye"));
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

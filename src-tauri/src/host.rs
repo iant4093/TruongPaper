@@ -8,11 +8,12 @@
 //! (`SceneRuntime` is not `Send`, so it only ever exists on the render thread).
 
 use crate::models::{UniversalAdjustments, WallpaperSource};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use truongpaper_platform::MonitorPlaybackPolicy;
 use truongpaper_renderer::{CompositorUniforms, RgbaImageData, WallpaperRuntimeKind};
 use truongpaper_we_formats::WeVirtualFileSystem;
@@ -150,6 +151,8 @@ pub struct MonitorRuntime {
     pub adjustments: UniversalAdjustments,
     /// `project.json` declares audio processing (drives the system-audio loopback worker).
     pub audio_reactive: bool,
+    /// Per-display output volume `0..=1`; multiplies `adjustments.volume`.
+    pub monitor_volume: f32,
 }
 
 impl Default for MonitorRuntime {
@@ -165,11 +168,19 @@ impl Default for MonitorRuntime {
             presented_generation: 0,
             adjustments: UniversalAdjustments::default(),
             audio_reactive: false,
+            monitor_volume: 1.0,
         }
     }
 }
 
 impl MonitorRuntime {
+    /// `adjustments` with the volume scaled by the display volume (what is actually played).
+    pub fn effective_adjustments(&self) -> UniversalAdjustments {
+        let mut adjustments = self.adjustments;
+        adjustments.volume = (adjustments.volume * self.monitor_volume).clamp(0.0, 1.0);
+        adjustments
+    }
+
     /// Should the render loop advance frames for this monitor?
     pub fn should_render(&self) -> bool {
         !self.user_paused && !self.policy.is_paused()
@@ -192,18 +203,89 @@ pub struct WallpaperHost {
     pending_photos: Mutex<HashMap<String, (u64, Arc<RgbaImageData>)>>,
     render_events: Mutex<Vec<RenderEvent>>,
     shutting_down: AtomicBool,
+    /// Bumped on every state change the render loop or the webview bridge must react to; they
+    /// sleep on `wake_cv` instead of polling.
+    epoch: AtomicU64,
+    wake_lock: Mutex<()>,
+    wake_cv: Condvar,
+    /// Span mode source monitor while the renderer spans (`None` otherwise); see [`span_route`].
+    span_source: Mutex<Option<String>>,
     #[cfg(target_os = "windows")]
     applications:
         Mutex<HashMap<String, truongpaper_platform::application::ApplicationWallpaperProcess>>,
 }
 
+/// Where a photo / scene apply for `target` must land while span mode is active: the span
+/// source monitor (the only one whose runtime the renderer draws on every display). Web / Video /
+/// Application wallpapers stay per display (`None` = apply to `target` as asked).
+pub fn span_route(
+    span_source: Option<&str>,
+    target: &str,
+    target_is_native: bool,
+    incoming_is_gpu: bool,
+) -> Option<String> {
+    let source = span_source?;
+    (source != target && incoming_is_gpu && !target_is_native).then(|| source.to_string())
+}
+
 impl WallpaperHost {
-    pub fn note_presented(&self, monitor_id: &str, generation: u64) {
+    /// Marks a state change: wakes the render loop and the webview bridge.
+    fn bump(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        // Taking the lock orders the increment before a waiter's re-check (no lost wake-up).
+        drop(self.wake_lock.lock());
+        self.wake_cv.notify_all();
+    }
+
+    /// Current change counter; pass it to [`Self::wait_for_change`].
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    /// Blocks until the change counter differs from `seen`, shutdown, or `timeout`. Returns the
+    /// current counter.
+    pub fn wait_for_change(&self, seen: u64, timeout: Duration) -> u64 {
+        let mut guard = self.wake_lock.lock();
+        if self.epoch() == seen && !self.is_shutting_down() {
+            let _ = self.wake_cv.wait_for(&mut guard, timeout);
+        }
+        self.epoch()
+    }
+
+    /// Called by the renderer each loop: the span source monitor while span mode is active.
+    pub fn set_span_source(&self, source: Option<String>) {
+        *self.span_source.lock() = source;
+    }
+
+    /// The monitor an apply for `target` should be recorded on (see [`span_route`]).
+    pub fn route_apply(&self, target: &str, incoming_is_gpu: bool) -> String {
+        let source = self.span_source.lock().clone();
+        let native = self.monitors.lock().get(target).is_some_and(|rt| {
+            matches!(
+                rt.active,
+                ActiveRuntime::Webview { .. } | ActiveRuntime::Application { .. }
+            )
+        });
+        span_route(source.as_deref(), target, native, incoming_is_gpu)
+            .unwrap_or_else(|| target.to_string())
+    }
+
+    /// Records that `generation` of `monitor_id` reached the screen. `true` the first time it is
+    /// recorded for that generation (the caller emits `wallpaper://loaded` then).
+    pub fn note_presented(&self, monitor_id: &str, generation: u64) -> bool {
         if let Some(runtime) = self.monitors.lock().get_mut(monitor_id) {
-            if runtime.generation == generation {
+            if runtime.generation == generation && runtime.presented_generation != generation {
                 runtime.presented_generation = generation;
+                return true;
             }
         }
+        false
+    }
+
+    /// Wakes the render loop and the webview bridge (e.g. a background decode finished or a
+    /// wallpaper page finished loading).
+    pub fn wake(&self) {
+        self.bump();
     }
     pub fn new() -> Self {
         Self::default()
@@ -263,6 +345,12 @@ impl WallpaperHost {
         audio_reactive: bool,
         decoded: Option<Arc<RgbaImageData>>,
     ) -> (ActiveRuntime, u64) {
+        let gpu = matches!(
+            active,
+            ActiveRuntime::Photo { .. } | ActiveRuntime::Scene(_)
+        );
+        let routed = self.route_apply(monitor_id, gpu);
+        let monitor_id = routed.as_str();
         let generation = self.next_generation.fetch_add(1, Ordering::AcqRel) + 1;
         {
             // The image is stored before the new generation becomes visible to the render thread.
@@ -295,6 +383,8 @@ impl WallpaperHost {
                 self.webview_vfs.write().remove(label);
             }
         }
+        drop(monitors);
+        self.bump();
         (previous, generation)
     }
 
@@ -343,6 +433,16 @@ impl WallpaperHost {
         out
     }
 
+    /// Drops runtime state (and pending photos) of monitors not in `connected`, so an unplugged
+    /// display no longer counts towards `audio_demand` or other aggregate queries.
+    pub fn retain_monitors(&self, connected: &[String]) {
+        self.monitors.lock().retain(|id, _| connected.contains(id));
+        self.pending_photos
+            .lock()
+            .retain(|id, _| connected.contains(id));
+        self.bump();
+    }
+
     /// Monitors currently showing `wallpaper_id`.
     pub fn monitors_showing(&self, wallpaper_id: &str) -> Vec<(String, MonitorRuntime)> {
         self.monitors_snapshot()
@@ -364,6 +464,7 @@ impl WallpaperHost {
                 rt.uniforms = uniforms;
             }
         }
+        self.bump();
     }
 
     /// Whether any playing monitor shows an audio-reactive scene or Web wallpaper, and the
@@ -384,6 +485,8 @@ impl WallpaperHost {
                 events.remove(0);
             }
             events.push(event);
+            drop(events);
+            self.bump();
         }
     }
 
@@ -487,17 +590,22 @@ impl WallpaperHost {
         wallpaper_id: Option<String>,
         uniforms: CompositorUniforms,
     ) {
+        let routed = self.route_apply(monitor_id, true);
+        let monitor_id = routed.as_str();
         let global = *self.global_paused.lock();
-        let mut monitors = self.monitors.lock();
-        let rt = monitors
-            .entry(monitor_id.to_string())
-            .or_insert_with(|| MonitorRuntime {
-                user_paused: global,
-                ..MonitorRuntime::default()
-            });
-        rt.source = source;
-        rt.wallpaper_id = wallpaper_id;
-        rt.uniforms = uniforms;
+        {
+            let mut monitors = self.monitors.lock();
+            let rt = monitors
+                .entry(monitor_id.to_string())
+                .or_insert_with(|| MonitorRuntime {
+                    user_paused: global,
+                    ..MonitorRuntime::default()
+                });
+            rt.source = source;
+            rt.wallpaper_id = wallpaper_id;
+            rt.uniforms = uniforms;
+        }
+        self.bump();
     }
 
     /// Settings changes affect already-visible photos as well as the next source apply.
@@ -512,6 +620,7 @@ impl WallpaperHost {
                 rt.uniforms = rt.adjustments.compositor_uniforms(transition);
             }
         }
+        self.bump();
     }
 
     /// Updates compositor uniforms on every monitor currently showing `wallpaper_id`.
@@ -521,30 +630,98 @@ impl WallpaperHost {
                 rt.uniforms = uniforms;
             }
         }
+        self.bump();
     }
 
     /// `monitor_id = None` pauses/resumes every monitor (and future ones).
     pub fn set_user_paused(&self, monitor_id: Option<&str>, paused: bool) {
-        let mut monitors = self.monitors.lock();
-        match monitor_id {
-            Some(id) => {
-                monitors.entry(id.to_string()).or_default().user_paused = paused;
-            }
-            None => {
-                *self.global_paused.lock() = paused;
-                for rt in monitors.values_mut() {
-                    rt.user_paused = paused;
+        {
+            let mut monitors = self.monitors.lock();
+            match monitor_id {
+                Some(id) => {
+                    monitors.entry(id.to_string()).or_default().user_paused = paused;
+                }
+                None => {
+                    *self.global_paused.lock() = paused;
+                    for rt in monitors.values_mut() {
+                        rt.user_paused = paused;
+                    }
                 }
             }
         }
+        self.bump();
     }
 
-    pub fn set_policy(&self, monitor_id: &str, policy: MonitorPlaybackPolicy) {
+    /// Sets the per-display volume (`0..=1`, callers validate).
+    pub fn set_monitor_volume(&self, monitor_id: &str, volume: f32) {
+        let global = *self.global_paused.lock();
         self.monitors
             .lock()
             .entry(monitor_id.to_string())
-            .or_default()
+            .or_insert_with(|| MonitorRuntime {
+                user_paused: global,
+                ..MonitorRuntime::default()
+            })
+            .monitor_volume = volume;
+        self.bump();
+    }
+
+    pub fn monitor_volume(&self, monitor_id: &str) -> f32 {
+        self.monitors
+            .lock()
+            .get(monitor_id)
+            .map_or(1.0, |rt| rt.monitor_volume)
+    }
+
+    /// Adjustments to play on every monitor showing a Web / Video wallpaper: the same wallpaper
+    /// on several displays is heard once (see [`crate::desktop_host::sound_owners`]); the other
+    /// copies are muted. The owner's volume is scaled by its display volume.
+    pub fn webview_audio_adjustments(
+        &self,
+        playing: impl Fn(&str) -> bool,
+    ) -> HashMap<String, UniversalAdjustments> {
+        let snapshot: Vec<(String, MonitorRuntime)> = self
+            .monitors_snapshot()
+            .into_iter()
+            .filter(|(_, rt)| matches!(rt.active, ActiveRuntime::Webview { .. }))
+            .collect();
+        let keys: Vec<Option<(String, bool)>> = snapshot
+            .iter()
+            .map(|(id, rt)| {
+                let ActiveRuntime::Webview { kind, .. } = &rt.active else {
+                    return None;
+                };
+                let key = match &rt.wallpaper_id {
+                    Some(wallpaper) => format!("{kind:?}|{wallpaper}"),
+                    None => format!("{kind:?}#{id}"),
+                };
+                Some((key, playing(id)))
+            })
+            .collect();
+        let owners = crate::desktop_host::sound_owners(&keys);
+        snapshot
+            .into_iter()
+            .zip(owners)
+            .map(|((id, rt), owner)| {
+                let mut adjustments = rt.effective_adjustments();
+                adjustments.muted |= !owner;
+                (id, adjustments)
+            })
+            .collect()
+    }
+
+    pub fn set_policy(&self, monitor_id: &str, policy: MonitorPlaybackPolicy) {
+        // A display seen for the first time here must still honor "pause all".
+        let global = *self.global_paused.lock();
+        self.monitors
+            .lock()
+            .entry(monitor_id.to_string())
+            .or_insert_with(|| MonitorRuntime {
+                user_paused: global,
+                ..MonitorRuntime::default()
+            })
             .policy = policy;
+        self.bump();
     }
 
     pub fn monitor(&self, monitor_id: &str) -> Option<MonitorRuntime> {
@@ -571,6 +748,7 @@ impl WallpaperHost {
     /// and tells the render thread / webview manager to stop (update relaunch / app exit).
     pub fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.bump();
         *self.active_vfs.write() = None;
         self.webview_vfs.write().clear();
         self.monitors.lock().clear();
@@ -655,6 +833,9 @@ mod tests {
             CompositorUniforms::default(),
         );
         assert!(host.monitor("B").unwrap().user_paused);
+        // So do displays first reported by Smart Pause.
+        host.set_policy("C", MonitorPlaybackPolicy::Playing);
+        assert!(!host.monitor("C").unwrap().should_render());
         host.set_user_paused(Some("A"), false);
         assert!(host.monitor("A").unwrap().should_render());
         host.set_policy("A", MonitorPlaybackPolicy::PausedFullscreen);
@@ -711,6 +892,46 @@ mod tests {
             content_revision: 0,
             user_properties_json: "{}".into(),
         })
+    }
+
+    #[test]
+    fn span_routes_photo_and_scene_applies_to_the_source_monitor() {
+        assert_eq!(span_route(None, "B", false, true), None);
+        assert_eq!(span_route(Some("A"), "B", false, true), Some("A".into()));
+        assert_eq!(span_route(Some("A"), "A", false, true), None);
+        // Web / Video / Application stay on their display.
+        assert_eq!(span_route(Some("A"), "B", false, false), None);
+        assert_eq!(span_route(Some("A"), "B", true, true), None);
+    }
+
+    #[test]
+    fn apply_on_a_secondary_display_lands_on_the_span_source() {
+        let host = WallpaperHost::new();
+        host.set_span_source(Some("A".into()));
+        let generation = host.set_photo("B", PathBuf::from("/tmp/p.jpg"), None);
+        assert!(host.monitor("B").is_none());
+        assert_eq!(host.monitor("A").unwrap().generation, generation);
+        host.set_span_source(None);
+        host.set_photo("B", PathBuf::from("/tmp/p.jpg"), None);
+        assert!(host.monitor("B").is_some());
+    }
+
+    #[test]
+    fn state_changes_wake_waiters_and_presented_is_reported_once() {
+        let host = Arc::new(WallpaperHost::new());
+        let seen = host.epoch();
+        let waiter = {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || host.wait_for_change(seen, Duration::from_secs(5)))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let generation = host.set_photo("A", PathBuf::from("/tmp/p.jpg"), None);
+        assert_ne!(waiter.join().unwrap(), seen);
+        // Unchanged: times out with the same epoch.
+        let now = host.epoch();
+        assert_eq!(host.wait_for_change(now, Duration::from_millis(20)), now);
+        assert!(host.note_presented("A", generation));
+        assert!(!host.note_presented("A", generation));
     }
 
     #[test]
@@ -924,5 +1145,97 @@ mod tests {
         assert_eq!(rt.uniforms.zoom, 1.5);
         assert_eq!(host.monitors_showing("w").len(), 1);
         assert!(host.monitors_showing("x").is_empty());
+    }
+
+    #[test]
+    fn retain_monitors_prunes_unplugged_displays_from_audio_demand() {
+        let host = WallpaperHost::new();
+        let adj = UniversalAdjustments::default();
+        host.set_runtime("A", scene(), adj, true);
+        host.set_runtime("B", scene(), adj, true);
+        host.set_policy("A", MonitorPlaybackPolicy::PausedMaximized);
+        assert!(host.audio_demand().is_some(), "B keeps capture running");
+        host.retain_monitors(&["A".to_string()]);
+        assert!(host.monitor("B").is_none());
+        assert!(host.monitor("A").is_some());
+        assert_eq!(
+            host.audio_demand(),
+            None,
+            "unplugged B no longer demands audio"
+        );
+    }
+
+    fn webview(kind: WebviewKind, monitor: &str) -> ActiveRuntime {
+        ActiveRuntime::Webview {
+            kind,
+            label: format!("wallpaper-{monitor}"),
+            preview_path: None,
+        }
+    }
+
+    #[test]
+    fn monitor_volume_scales_the_wallpaper_volume() {
+        let host = WallpaperHost::new();
+        let adj = UniversalAdjustments {
+            volume: 0.8,
+            ..UniversalAdjustments::default()
+        };
+        host.set_runtime("A", scene(), adj, false);
+        assert_eq!(host.monitor_volume("A"), 1.0);
+        host.set_monitor_volume("A", 0.5);
+        let rt = host.monitor("A").unwrap();
+        assert!((rt.effective_adjustments().volume - 0.4).abs() < 1e-6);
+        assert_eq!(rt.adjustments.volume, 0.8, "stored volume is untouched");
+        // A new wallpaper on the display keeps the display volume.
+        host.set_runtime("A", scene(), adj, false);
+        assert_eq!(host.monitor_volume("A"), 0.5);
+        // A display volume set before its first wallpaper honors "pause all".
+        host.set_user_paused(None, true);
+        host.set_monitor_volume("B", 0.2);
+        assert!(host.monitor("B").unwrap().user_paused);
+    }
+
+    #[test]
+    fn same_webview_wallpaper_on_two_displays_is_heard_once() {
+        let host = WallpaperHost::new();
+        let adj = UniversalAdjustments {
+            volume: 0.6,
+            ..UniversalAdjustments::default()
+        };
+        for id in ["A", "B"] {
+            host.set_source(
+                id,
+                crate::models::WallpaperSource::Workshop {
+                    wallpaper_id: "w1".into(),
+                },
+                Some("w1".into()),
+                Default::default(),
+            );
+            host.set_runtime(id, webview(WebviewKind::Web, id), adj, false);
+        }
+        host.set_source(
+            "C",
+            crate::models::WallpaperSource::Workshop {
+                wallpaper_id: "w2".into(),
+            },
+            Some("w2".into()),
+            Default::default(),
+        );
+        host.set_runtime("C", webview(WebviewKind::Video, "C"), adj, false);
+        host.set_monitor_volume("A", 0.5);
+        let all = |_: &str| true;
+        let levels = host.webview_audio_adjustments(all);
+        assert!(!levels["A"].muted);
+        assert!((levels["A"].volume - 0.3).abs() < 1e-6);
+        assert!(levels["B"].muted, "second copy is silent");
+        assert!(!levels["C"].muted, "a different wallpaper keeps its sound");
+        // The owner moves to a playing display when the first one is paused.
+        let levels = host.webview_audio_adjustments(|id| id != "A");
+        assert!(levels["A"].muted);
+        assert!(!levels["B"].muted);
+        // When every copy is paused the first display keeps ownership.
+        let levels = host.webview_audio_adjustments(|_| false);
+        assert!(!levels["A"].muted);
+        assert!(levels["B"].muted);
     }
 }

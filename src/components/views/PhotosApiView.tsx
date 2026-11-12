@@ -13,18 +13,21 @@ import {
   RefreshCw,
   SkipForward,
   Trash2,
+  Monitor as MonitorIcon,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { confirmAction, toast } from '../../store/feedback';
 import { parseImportLink } from '../../lib/importLinks';
-import { GB, MB, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
-import type { PhotoItem } from '../../types/ipc';
+import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, plural } from '../../lib/format';
+import type { FitMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
+import { Dropdown } from '../Dropdown';
 
 const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
 
 const photoDims = (p: PhotoItem) =>
-  p.width && p.height ? `${p.width} × ${p.height}` : 'Full Resolution';
+  p.width && p.height ? `${p.width} × ${p.height}` : 'Full resolution';
 
 const photoAlbumName = (photo: PhotoItem) => photo.albumSlug.replace(/-/g, ' ');
 
@@ -65,6 +68,8 @@ export const PhotosApiView: React.FC = () => {
   const resetPhotoHistory = useAppStore((s) => s.resetPhotoHistory);
   const triggerPhotoRefill = useAppStore((s) => s.triggerPhotoRefill);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
+  const retryPhotoNow = useAppStore((s) => s.retryPhotoNow);
 
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -72,8 +77,8 @@ export const PhotosApiView: React.FC = () => {
   const [albumMsg, setAlbumMsg] = useState<string | null>(null);
   const [cacheDraft, setCacheDraft] = useState<number | null>(null);
   const [photoActionPending, setPhotoActionPending] = useState(false);
-  const [photoActionError, setPhotoActionError] = useState<string | null>(null);
   const favoritesSection = useRef<HTMLElement>(null);
+  const catalogSection = useRef<HTMLDivElement>(null);
 
   const mode = photoStatus?.filterMode ?? 'all';
   const featuredOnly = photoStatus?.featuredOnly ?? false;
@@ -86,13 +91,13 @@ export const PhotosApiView: React.FC = () => {
   const queue = offlinePhotosForDisplay(photoStatus, activeMonitor, settings?.skipMismatchedOrientation ?? true);
   const favorites = photoStatus?.favoritePhotos ?? [];
 
-  const runPhotoAction = async (action: () => Promise<void>) => {
+  const runPhotoAction = async (action: () => Promise<void>, done?: string) => {
     setPhotoActionPending(true);
-    setPhotoActionError(null);
     try {
       await action();
+      if (done) toast.success(done);
     } catch (error) {
-      setPhotoActionError(error instanceof Error ? error.message : String(error));
+      toast.error(error);
     } finally {
       setPhotoActionPending(false);
     }
@@ -112,12 +117,29 @@ export const PhotosApiView: React.FC = () => {
     setCatalogOpen(next);
     if (next) {
       setCatalogError(null);
+      requestAnimationFrame(() => catalogSection.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }));
       try {
         await fetchPublicCatalog();
       } catch (err) {
         setCatalogError(err instanceof Error ? err.message : String(err));
       }
     }
+  };
+
+  const useHere = () => {
+    if (!activeMonitorId) return;
+    void runPhotoAction(() => applyMonitorSource(activeMonitorId, { kind: 'photo_api' }), `Photos are now on ${activeMonitor?.name ?? 'this display'}`);
+  };
+  const onPhotos = activeMonitor?.activeSource.kind === 'photo_api';
+  const hide = (photo: PhotoItem) =>
+    runPhotoAction(() => blacklistAndSkipPhoto(photo.id), 'Photo hidden. “Show all photos again” in Storage brings hidden photos back.');
+  const clearCache = async () => {
+    if (!await confirmAction(`Clear ${formatBytes(cached)} of cached photos?`, 'Clear cache', 'They will be downloaded again when needed. Favorites stay.')) return;
+    await runPhotoAction(clearPhotoCache, 'Cache cleared');
+  };
+  const removeSavedAlbum = async (slug: string, name: string) => {
+    if (!await confirmAction(`Remove the album “${name}”?`, 'Remove album', 'Its photos will no longer be used.')) return;
+    await runPhotoAction(() => removeAlbum(slug), `Removed ${name}`);
   };
 
   const submitAlbum = async (e: React.FormEvent) => {
@@ -129,7 +151,8 @@ export const PhotosApiView: React.FC = () => {
     }
     try {
       const saved = await addAlbum(parsed.albumSlug);
-      setAlbumMsg(`Saved "${saved.displayName}"`);
+      setAlbumMsg(null);
+      toast.success(`Saved “${saved.displayName}”`);
       setAlbumInput('');
     } catch (err) {
       setAlbumMsg(err instanceof Error ? err.message : String(err));
@@ -147,14 +170,67 @@ export const PhotosApiView: React.FC = () => {
         actions={
           <>
             <button type="button" className="button" onClick={() => favoritesSection.current?.scrollIntoView({ block: 'start' })}>
-              <Heart size={14} /> Favorites
+              <Heart size={14} /> Jump to favorites
             </button>
             <button type="button" className="button" onClick={() => void openCatalog()}>
-              <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Browse albums'}
+              <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Add albums from catalog'}
             </button>
           </>
         }
       />
+      {photoStatus?.offline && (
+        <div role="status" className="offline-notice">
+          <span>{OFFLINE_NOTICE}</span>
+          <button type="button" className="button" onClick={() => void runPhotoAction(retryPhotoNow)}>Retry now</button>
+        </div>
+      )}
+
+      {/* Current wallpaper comes first: it is what this page is for. */}
+      <SectionTitle>Current wallpaper</SectionTitle>
+      {!onPhotos && activeMonitorId && (
+        <div className="card photo-use-here">
+          <MonitorIcon size={16} aria-hidden="true" />
+          <span>{activeMonitor?.name} is not showing photos right now.</span>
+          <button type="button" className="button button-primary" disabled={photoActionPending} onClick={useHere}>Use photos on this display</button>
+        </div>
+      )}
+      {currentPhoto ? (
+        <div className="card photo-current">
+          <Thumb src={photoPreviewSrc(currentPhoto)} alt={photoAlbumName(currentPhoto)} height={260} contain lazy />
+          <div className="photo-current-details">
+            <PhotoBadges photo={currentPhoto} />
+            <div className="photo-meta">
+              {photoDims(currentPhoto)} · {formatBytes(currentPhoto.bytes)}
+            </div>
+            <div className="photo-actions">
+              <button type="button" className="button" disabled={!activeMonitorId || photoActionPending}
+                onClick={() => void runPhotoAction(() => rotateNextPhoto(activeMonitorId))}>
+                <SkipForward size={14} /> Next photo
+              </button>
+              <button
+                type="button"
+                className="button"
+                aria-pressed={currentPhoto.isFavorite}
+                disabled={photoActionPending}
+                onClick={() => void runPhotoAction(() => setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite))}
+              >
+                <Heart size={14} fill={currentPhoto.isFavorite ? 'currentColor' : 'none'} />
+                {currentPhoto.isFavorite ? 'Favorited' : 'Add to favorites'}
+              </button>
+              <button type="button" className="button" disabled={photoActionPending}
+                onClick={() => void hide(currentPhoto)}>
+                <EyeOff size={14} /> Hide photo
+              </button>
+              <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
+                <ExternalLink size={14} /> View album
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="view-subtitle">No photo is displayed on this display yet.</div>
+      )}
+
 
       {/* Filter Controls Card */}
       <div className="card" style={{ padding: 16 }}>
@@ -174,6 +250,13 @@ export const PhotosApiView: React.FC = () => {
             />
           </div>
         )}
+        <div className="settings-field" style={{ marginTop: 12 }}>
+          <span>Photo fit</span>
+          <Dropdown<FitMode> label="Photo fit" value={settings?.defaultFitMode ?? 'fill'}
+            options={(Object.keys(FIT_MODE_LABEL) as FitMode[]).map((k) => [k, FIT_MODE_LABEL[k]] as const)}
+            onChange={(defaultFitMode) => void runPhotoAction(() => updateSettings({ defaultFitMode }), 'Saved')} />
+          <span className="view-subtitle">{FIT_MODE_HINT[settings?.defaultFitMode ?? 'fill']}</span>
+        </div>
         <div style={{ marginTop: 12 }}>
           <ToggleRow
             label="Match photo orientation to display"
@@ -194,8 +277,9 @@ export const PhotosApiView: React.FC = () => {
             exit={{ opacity: 0, height: 0 }}
             style={{ overflow: 'hidden' }}
           >
-            <SectionTitle>Official Album Catalog</SectionTitle>
-            {catalogError && <div style={{ fontSize: 12, color: '#fca5a5', marginBottom: 8 }}>{catalogError}</div>}
+            <div ref={catalogSection} />
+            <SectionTitle>Album catalog</SectionTitle>
+            {catalogError && <div style={{ fontSize: 12, color: 'var(--danger-text)', marginBottom: 8 }}>{catalogError}</div>}
             <div style={cardGrid}>
               {publicCatalog.map((album) => (
                 <div key={album.albumId} className="card" style={{ padding: 12 }}>
@@ -244,82 +328,26 @@ export const PhotosApiView: React.FC = () => {
         {savedAlbums.map((album) => (
           <div key={album.albumSlug} className="card" style={{ padding: 12 }}>
             <Thumb src={album.coverThumbnailUrl} alt={album.displayName} height={90} />
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, fontSize: 13, fontWeight: 600 }}>
-              <input
-                type="checkbox"
-                checked={album.isEnabled}
-                onChange={(e) => void toggleAlbum(album.albumSlug, e.target.checked)}
-              />
-              {album.displayName}
+            <div className="album-title">{album.displayName}</div>
+            {album.imageCount !== undefined && <div className="view-subtitle" style={{ marginTop: 2 }}>{plural(album.imageCount, 'photo')}</div>}
+            <label className="album-switch">
+              <input type="checkbox" className="toggle-switch" aria-label={`Use ${album.displayName}`} checked={album.isEnabled}
+                onChange={(e) => void runPhotoAction(() => toggleAlbum(album.albumSlug, e.target.checked))} />
+              <span>{album.isEnabled ? 'On' : 'Off'}</span>
             </label>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-              {album.albumSlug}
-              {album.imageCount !== undefined ? ` • ${album.imageCount} photos` : ''}
-            </div>
-            <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-              <button
-                type="button"
-                className="button"
-                style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                onClick={() => void openExternal(album.albumUrl)}
-              >
-                <ExternalLink size={12} /> Open on Website
+            <div className="album-actions">
+              <button type="button" className="icon-button" title="Open on the website" aria-label={`Open ${album.displayName} on the website`}
+                onClick={() => void openExternal(album.albumUrl)}>
+                <ExternalLink size={14} />
               </button>
-              <button
-                type="button"
-                className="button"
-                aria-label={`Remove ${album.displayName}`}
-                style={{ fontSize: 11, padding: '6px 10px' }}
-                onClick={() => void removeAlbum(album.albumSlug)}
-              >
-                <Trash2 size={12} />
+              <button type="button" className="button button-quiet" aria-label={`Remove ${album.displayName}`}
+                onClick={() => void removeSavedAlbum(album.albumSlug, album.displayName)}>
+                <Trash2 size={13} /> Remove…
               </button>
             </div>
           </div>
         ))}
       </div> : <p className="saved-album-hint">No saved albums yet. Add a link above or browse the catalog.</p>}
-
-      {/* Current wallpaper Photo Card */}
-      <SectionTitle>Current wallpaper</SectionTitle>
-      {photoActionError && <div role="alert" className="error-banner">{photoActionError}</div>}
-      {currentPhoto ? (
-        <div className="card photo-current">
-          <Thumb src={photoPreviewSrc(currentPhoto)} alt={photoAlbumName(currentPhoto)} height={260} contain lazy />
-          <div className="photo-current-details">
-            <PhotoBadges photo={currentPhoto} />
-            <div className="photo-meta">
-              {photoDims(currentPhoto)} · {formatBytes(currentPhoto.bytes)}
-            </div>
-            <div className="photo-actions">
-              <button type="button" className="button" disabled={!activeMonitorId || photoActionPending}
-                onClick={() => void runPhotoAction(() => rotateNextPhoto(activeMonitorId))}>
-                <SkipForward size={14} /> Next photo
-              </button>
-              <button
-                type="button"
-                className="button"
-                aria-pressed={currentPhoto.isFavorite}
-                disabled={photoActionPending}
-                onClick={() => void runPhotoAction(() => setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite))}
-              >
-                <Heart size={14} fill={currentPhoto.isFavorite ? 'currentColor' : 'none'} />
-                {currentPhoto.isFavorite ? 'Favorited' : 'Add to favorites'}
-              </button>
-              <button type="button" className="button" disabled={photoActionPending}
-                onClick={() => void runPhotoAction(() => blacklistAndSkipPhoto(currentPhoto.id))}>
-                <EyeOff size={14} /> Hide photo
-              </button>
-              <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
-                <ExternalLink size={14} /> View album
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-          No photo is displayed on the selected monitor yet.
-        </div>
-      )}
 
       <section ref={favoritesSection} className="photo-favorites" aria-labelledby="photo-favorites-title">
         <h3 className="section-title" id="photo-favorites-title">Favorites{favorites.length ? ` · ${favorites.length}` : ''}</h3>
@@ -365,7 +393,7 @@ export const PhotosApiView: React.FC = () => {
                 type="button"
                 className="button"
                 disabled={photoActionPending}
-                onClick={() => void runPhotoAction(() => blacklistAndSkipPhoto(photo.id))}
+                onClick={() => void hide(photo)}
               >
                 <EyeOff size={12} /> Hide photo
               </button>
@@ -384,7 +412,7 @@ export const PhotosApiView: React.FC = () => {
       <SectionTitle>Storage & history</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
-          <span>Image Cache</span>
+          <span>Photo storage</span>
           <span>
             {formatBytes(cached)} / {formatBytes(maxCache)}
           </span>
@@ -407,13 +435,13 @@ export const PhotosApiView: React.FC = () => {
 
         <label style={{ display: 'block', fontSize: 13, marginTop: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span>Cache Size Limit</span>
+            <span>Storage limit</span>
             <span>{formatBytes(displayedCache)}</span>
           </div>
           <input
             type="range"
             className="slider"
-            aria-label="Cache Size Limit"
+            aria-label="Storage limit"
             min={MIN_CACHE}
             max={MAX_CACHE}
             step={50 * MB}
@@ -424,27 +452,26 @@ export const PhotosApiView: React.FC = () => {
 
         <div style={{ marginTop: 14 }}>
           <ToggleRow
-            label="Auto-reset album/filter history when all photos have been shown (Recommended)"
-            description="When off, only new photos and matching favorites rotate."
+            label="Start over when every photo has been shown"
+            description="Recommended. When off, only new photos and matching favorites rotate."
             checked={settings?.exhaustionAutoReset ?? true}
             onChange={(next) => void updateSettings({ exhaustionAutoReset: next })}
           />
         </div>
 
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-          Shown history: {photoStatus?.historyCount ?? 0} IDs • Blacklisted: {photoStatus?.blacklistCount ?? 0}
-          {photoStatus && <div>API requests available: {photoStatus.rateLimitRemaining}</div>}
+          {plural(photoStatus?.historyCount ?? 0, 'photo')} shown, {plural(photoStatus?.blacklistCount ?? 0, 'photo')} hidden
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="button button-primary" disabled={photoStatus?.isRefilling} onClick={() => void triggerPhotoRefill()}>
+          <button type="button" className="button button-primary" disabled={photoStatus?.isRefilling} onClick={() => void runPhotoAction(triggerPhotoRefill)}>
             <RefreshCw size={14} /> {photoStatus?.isRefilling ? 'Refilling queue…' : 'Refill queue'}
           </button>
-          <button type="button" className="button" onClick={() => void clearPhotoCache()}>
+          <button type="button" className="button" onClick={() => void clearCache()}>
             <Trash2 size={14} /> Clear cache
           </button>
-          <button type="button" className="button" onClick={() => void resetPhotoHistory()}>
-            <History size={14} /> Reset history
+          <button type="button" className="button" onClick={() => void runPhotoAction(() => resetPhotoHistory(), 'All photos can show again')}>
+            <History size={14} /> Show all photos again
           </button>
         </div>
       </div>

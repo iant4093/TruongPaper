@@ -4,7 +4,13 @@ Use this checklist after the automated checks pass. Test the actual desktop app,
 
 Start with the macOS checks (about 20–30 minutes), then Steam and one wallpaper of each type (another 15–30 minutes). Multi-display and Windows checks can be done separately when those devices are available. Stop at the first failure in a section and send the report format at the end; you do not need to debug it yourself.
 
-## Start here with the macOS 1.0.7 build
+## Start here with the latest macOS test build
+
+1. Open **Library**, apply the Workshop scene **Cyberpunk: Edgerunner-Lucy [4K]**, and watch it for 10 seconds. Her intro should play once and settle with her whole head in frame. Her hair and jacket keep moving.
+2. In that scene's details, set **Scene fit mode** to **Fit + Black Bars**. The whole 16:9 scene should show. Set it back to **Fill**.
+3. Apply **Clone trooper helmet in the snow**. It should fill the display, with soft falling snow and no white squares.
+
+Then continue with these checks:
 
 1. Open **Library** and apply the installed Workshop video `3836199874`.
 2. Set **Playback Speed** to its maximum, **2.00x**. Open a full-screen app in a different Space, then swipe back to the desktop. The wallpaper should show a still while playback resumes. Repeat after pausing manually and check that it stays paused.

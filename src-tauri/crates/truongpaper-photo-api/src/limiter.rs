@@ -8,15 +8,17 @@ use crate::{RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// First backoff step.
 pub const BACKOFF_BASE_MS: u64 = 2_000;
 /// Backoff ceiling before jitter.
 pub const BACKOFF_MAX_MS: u64 = 120_000;
-/// Doubling stops after this many consecutive failures (2s * 2^6 = 128s, capped at 120s).
+/// Doubling stops after this many doublings (2s * 2^6 = 128s, capped at 120s).
 pub const BACKOFF_MAX_EXPONENT: u32 = 6;
+/// A server-provided `Retry-After` is honoured up to this long.
+pub const RETRY_AFTER_MAX: Duration = Duration::from_secs(3_600);
 
 /// Sliding-window limiter shared by JSON calls and image downloads.
 pub struct SlidingRateLimiter {
@@ -25,6 +27,8 @@ pub struct SlidingRateLimiter {
     timestamps: Mutex<VecDeque<Instant>>,
     cooldown_until: Mutex<Option<Instant>>,
     consecutive_failures: AtomicU32,
+    /// Last API attempt failed with a network error and nothing has succeeded since.
+    offline: AtomicBool,
 }
 
 impl Default for SlidingRateLimiter {
@@ -47,6 +51,7 @@ impl SlidingRateLimiter {
             timestamps: Mutex::new(VecDeque::with_capacity(max_requests + 4)),
             cooldown_until: Mutex::new(None),
             consecutive_failures: AtomicU32::new(0),
+            offline: AtomicBool::new(false),
         }
     }
 
@@ -142,9 +147,12 @@ impl SlidingRateLimiter {
         self.cooldown_remaining_at(Instant::now())
     }
 
-    /// Un-jittered exponential delay: 2s, 4s, 8s, ... capped at 120s.
+    /// Un-jittered exponential delay for the n-th consecutive failure: 2s, 4s, 8s, ... capped
+    /// at 120s. The first failure (and a defensive 0) waits the base 2s.
     pub fn backoff_base(consecutive_failures: u32) -> Duration {
-        let exp = consecutive_failures.min(BACKOFF_MAX_EXPONENT);
+        let exp = consecutive_failures
+            .saturating_sub(1)
+            .min(BACKOFF_MAX_EXPONENT);
         let ms = BACKOFF_BASE_MS
             .saturating_mul(1_u64 << exp)
             .min(BACKOFF_MAX_MS);
@@ -182,16 +190,64 @@ impl SlidingRateLimiter {
         self.trigger_backoff_at(Instant::now(), consecutive_failures, jitter)
     }
 
+    /// Starts a cooldown of exactly `dur` from `now` (never shortens a running one).
+    pub fn trigger_cooldown_at(&self, now: Instant, dur: Duration) {
+        let mut guard = self.cooldown_until.lock();
+        let new_until = now + dur;
+        *guard = Some(match *guard {
+            Some(existing) if existing > new_until => existing,
+            _ => new_until,
+        });
+    }
+
+    /// Cooldown for one failure: the exponential backoff, or the server's `Retry-After` when
+    /// that is longer (capped at [`RETRY_AFTER_MAX`]).
+    fn fail_at(&self, now: Instant, retry_after: Option<Duration>, jitter_unit: f64) -> Duration {
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut dur = Self::backoff_delay(failures, jitter_unit);
+        if let Some(ra) = retry_after {
+            dur = dur.max(ra.min(RETRY_AFTER_MAX));
+        }
+        self.trigger_cooldown_at(now, dur);
+        dur
+    }
+
     /// Registers a 403 / 429 / 503 and starts the next exponential cooldown. The failure
     /// counter lives in the limiter so it survives across refill calls.
     pub fn note_throttled(&self) -> Duration {
-        let failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
-        self.trigger_backoff(failures)
+        self.note_throttled_with(None)
     }
 
-    /// Registers a successful response and resets the failure counter.
+    /// [`Self::note_throttled`] honouring a parsed `Retry-After`.
+    pub fn note_throttled_with(&self, retry_after: Option<Duration>) -> Duration {
+        let jitter: f64 = rand::thread_rng().gen();
+        self.fail_at(Instant::now(), retry_after, jitter)
+    }
+
+    /// Registers a network failure (DNS, TLS, timeout, connection refused): marks the limiter
+    /// offline and starts the same escalating cooldown, so callers never hot-loop.
+    pub fn note_network_error(&self) -> Duration {
+        self.offline.store(true, Ordering::SeqCst);
+        self.note_throttled_with(None)
+    }
+
+    /// True when the last API attempt failed on the network and nothing succeeded since.
+    pub fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::SeqCst)
+    }
+
+    /// Registers a successful response: resets the failure counter and clears offline.
     pub fn note_success(&self) {
         self.consecutive_failures.store(0, Ordering::SeqCst);
+        self.offline.store(false, Ordering::SeqCst);
+    }
+
+    /// Forgets the failure counter and any running cooldown so the next request may go out now
+    /// (manual "Retry now"). The `offline` flag stays until a request succeeds. The sliding
+    /// request window is untouched, so the rate budget is still respected.
+    pub fn clear_backoff(&self) {
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+        *self.cooldown_until.lock() = None;
     }
 
     /// Consecutive throttled responses since the last success.
@@ -203,6 +259,19 @@ impl SlidingRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_backoff_ends_the_cooldown_but_keeps_offline() {
+        let limiter = SlidingRateLimiter::new();
+        limiter.note_network_error();
+        assert!(limiter.cooldown_remaining().is_some());
+        assert_eq!(limiter.consecutive_failures(), 1);
+        limiter.clear_backoff();
+        assert!(limiter.cooldown_remaining().is_none());
+        assert!(limiter.can_make_request());
+        assert_eq!(limiter.consecutive_failures(), 0);
+        assert!(limiter.is_offline());
+    }
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
@@ -266,20 +335,21 @@ mod tests {
     fn backoff_base_doubles_and_caps_at_120s() {
         let ms = |n| SlidingRateLimiter::backoff_base(n).as_millis();
         assert_eq!(ms(0), 2_000);
-        assert_eq!(ms(1), 4_000);
-        assert_eq!(ms(2), 8_000);
-        assert_eq!(ms(5), 64_000);
-        assert_eq!(ms(6), 120_000);
+        assert_eq!(ms(1), 2_000, "first failure waits 2s");
+        assert_eq!(ms(2), 4_000);
+        assert_eq!(ms(3), 8_000);
+        assert_eq!(ms(6), 64_000);
+        assert_eq!(ms(7), 120_000);
         assert_eq!(ms(40), 120_000);
     }
 
     #[test]
     fn jitter_adds_zero_to_25_percent() {
         let d = |n, j| SlidingRateLimiter::backoff_delay(n, j).as_millis();
-        assert_eq!(d(1, 0.0), 4_000);
-        assert_eq!(d(1, 1.0), 5_000);
-        assert_eq!(d(1, 0.5), 4_500);
-        assert_eq!(d(1, 9.0), 5_000, "jitter is clamped");
+        assert_eq!(d(2, 0.0), 4_000);
+        assert_eq!(d(2, 1.0), 5_000);
+        assert_eq!(d(2, 0.5), 4_500);
+        assert_eq!(d(2, 9.0), 5_000, "jitter is clamped");
         assert_eq!(d(8, 1.0), 150_000);
     }
 
@@ -287,7 +357,7 @@ mod tests {
     fn backoff_blocks_until_cooldown_expires_and_never_shrinks() {
         let l = SlidingRateLimiter::new();
         let t0 = Instant::now();
-        let dur = l.trigger_backoff_at(t0, 2, 0.0);
+        let dur = l.trigger_backoff_at(t0, 3, 0.0);
         assert_eq!(dur, secs(8));
         assert!(!l.can_make_request_at(t0 + secs(7)));
         assert!(!l.try_acquire_at(t0 + secs(7)));
@@ -305,11 +375,37 @@ mod tests {
         let l = SlidingRateLimiter::new();
         let d1 = l.note_throttled();
         let d2 = l.note_throttled();
-        assert!((4_000..=5_000).contains(&(d1.as_millis() as u64)));
-        assert!((8_000..=10_000).contains(&(d2.as_millis() as u64)));
+        assert!((2_000..=2_500).contains(&(d1.as_millis() as u64)));
+        assert!((4_000..=5_000).contains(&(d2.as_millis() as u64)));
         assert_eq!(l.consecutive_failures(), 2);
         assert!(!l.can_make_request());
         l.note_success();
         assert_eq!(l.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn retry_after_extends_cooldown_and_is_capped() {
+        let l = SlidingRateLimiter::new();
+        let d = l.note_throttled_with(Some(secs(30)));
+        assert_eq!(d, secs(30));
+        assert!(l.cooldown_remaining().unwrap() > secs(29));
+        let l = SlidingRateLimiter::new();
+        let d = l.note_throttled_with(Some(secs(1_000_000)));
+        assert_eq!(d, RETRY_AFTER_MAX);
+        // A short Retry-After never undercuts the exponential backoff.
+        let l = SlidingRateLimiter::new();
+        assert!(l.note_throttled_with(Some(secs(0))) >= secs(2));
+    }
+
+    #[test]
+    fn network_errors_cool_down_and_flag_offline_until_success() {
+        let l = SlidingRateLimiter::new();
+        assert!(!l.is_offline());
+        let d = l.note_network_error();
+        assert!(d >= secs(2));
+        assert!(l.is_offline());
+        assert!(!l.can_make_request(), "no hot loop while offline");
+        l.note_success();
+        assert!(!l.is_offline());
     }
 }

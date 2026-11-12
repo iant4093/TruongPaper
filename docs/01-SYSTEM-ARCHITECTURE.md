@@ -642,6 +642,11 @@ struct CompositorUniforms {
     hue_shift: f32,     // [-3.14159, 3.14159], default 0.0
     time: f32,
     _pad: f32,
+    // Span mode sub-rectangle of the shared canvas: canvas_uv = offset + uv * scale.
+    span_offset_x: f32,
+    span_offset_y: f32,
+    span_scale_x: f32,
+    span_scale_y: f32,
 };
 
 @group(0) @binding(0) var t_from: texture_2d<f32>;
@@ -666,14 +671,20 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
     return out;
 }
 
+// Maps monitor-local UV to the (possibly shared, span mode) canvas UV.
+fn canvas_uv(uv: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(u.span_offset_x, u.span_offset_y) + uv * vec2<f32>(u.span_scale_x, u.span_scale_y);
+}
+
 // Computes aspect-corrected UV and samples sharp vs blurred/black bars for a layer
 fn sample_fitted_layer(
-    screen_uv: vec2<f32>,
+    local_uv: vec2<f32>,
     img_aspect: f32,
     fit_mode: u32,
     t_sharp: texture_2d<f32>,
     t_blur: texture_2d<f32>
 ) -> vec3<f32> {
+    let screen_uv = canvas_uv(local_uv);
     let centered = (screen_uv - vec2<f32>(0.5, 0.5)) / max(u.zoom, 0.05)
                    - vec2<f32>(u.offset_x * 0.5, u.offset_y * 0.5);
 
@@ -770,9 +781,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else if (u.transition_mode == 1u) {
         // Mode 1: Blur-Dissolve (sharp -> blurred midpoint -> sharp)
         let col_from_sharp = sample_fitted_layer(in.uv, u.from_image_aspect, u.from_fit_mode, t_from, t_from_blurred);
-        let col_from_blur = textureSampleLevel(t_from_blurred, s_linear, in.uv, 0.0).rgb;
+        let col_from_blur = textureSampleLevel(t_from_blurred, s_linear, canvas_uv(in.uv), 0.0).rgb;
         let col_to_sharp = sample_fitted_layer(in.uv, u.to_image_aspect, u.to_fit_mode, t_to, t_to_blurred);
-        let col_to_blur = textureSampleLevel(t_to_blurred, s_linear, in.uv, 0.0).rgb;
+        let col_to_blur = textureSampleLevel(t_to_blurred, s_linear, canvas_uv(in.uv), 0.0).rgb;
 
         let from_mixed = mix(col_from_sharp, col_from_blur, smoothstep(0.0, 0.7, t));
         let to_mixed = mix(col_to_blur, col_to_sharp, smoothstep(0.3, 1.0, t));

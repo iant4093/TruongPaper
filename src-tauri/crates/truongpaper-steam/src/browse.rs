@@ -164,7 +164,11 @@ fn decoded(value: &Value) -> Result<Value> {
 }
 
 fn thumbnail(value: &Value) -> String {
-    let raw = value.as_str().unwrap_or_default();
+    trusted_image_url(value.as_str().unwrap_or_default())
+}
+
+/// Returns `raw` when it is an https Steam CDN image URL without credentials, else `""`.
+pub(crate) fn trusted_image_url(raw: &str) -> String {
     let Ok(url) = url::Url::parse(raw) else {
         return String::new();
     };

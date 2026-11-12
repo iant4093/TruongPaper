@@ -9,6 +9,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +41,17 @@ pub fn find_default_steam_roots() -> Vec<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
+        // The Steam client records its install path here, wherever the user put it.
+        if let Ok(key) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .open_subkey(r"Software\Valve\Steam")
+        {
+            if let Ok(path) = key.get_value::<String, _>("SteamPath") {
+                let candidate = PathBuf::from(path.replace('/', "\\"));
+                if candidate.is_dir() && !roots.contains(&candidate) {
+                    roots.push(candidate);
+                }
+            }
+        }
         for env_key in ["PROGRAMFILES(X86)", "PROGRAMFILES"] {
             if let Ok(base) = std::env::var(env_key) {
                 let candidate = PathBuf::from(base).join("Steam");
@@ -173,58 +185,70 @@ pub fn scan_workshop_roots(roots: &[PathBuf]) -> Vec<DiscoveredWorkshopWallpaper
             if !dir_path.is_dir() {
                 continue;
             }
-            let Ok(raw_json) = std::fs::read_to_string(dir_path.join("project.json")) else {
-                continue;
-            };
-            // Workshop files may start with a UTF-8 BOM.
-            let Ok(project_json) =
-                serde_json::from_str::<serde_json::Value>(raw_json.trim_start_matches('\u{feff}'))
-            else {
-                continue;
-            };
-
             let folder_name = entry.file_name().to_string_lossy().into_owned();
-            let title = project_json
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&folder_name)
-                .to_string();
-            let raw_type = project_json
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("scene")
-                .to_ascii_lowercase();
-            let preview_rel = project_json
-                .get("preview")
-                .and_then(|v| v.as_str())
-                .unwrap_or("preview.jpg");
-            let audio_reactive = project_json
-                .pointer("/general/supportsaudioprocessing")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let bytes = compute_dir_size(&dir_path);
-            let windows_only = raw_type == "application";
-
-            by_workshop_id.insert(
-                folder_name.clone(),
-                DiscoveredWorkshopWallpaper {
-                    wallpaper_id: format!("workshop:{folder_name}"),
-                    workshop_id: folder_name,
-                    title,
-                    r#type: raw_type,
-                    preview_path: dir_path.join(preview_rel).to_string_lossy().into_owned(),
-                    install_dir: dir_path.to_string_lossy().into_owned(),
-                    bytes,
-                    audio_reactive,
-                    windows_only,
-                    project_json,
-                },
-            );
+            if let Some(found) = read_item_dir(&dir_path, &folder_name) {
+                by_workshop_id.insert(folder_name, found);
+            }
         }
     }
 
     by_workshop_id.into_values().collect()
+}
+
+/// Reads `<dir>/project.json` into a discovered wallpaper whose id is `workshop:<folder_name>`.
+pub fn read_item_dir(dir_path: &Path, folder_name: &str) -> Option<DiscoveredWorkshopWallpaper> {
+    let Ok(raw_json) = std::fs::read_to_string(dir_path.join("project.json")) else {
+        return None;
+    };
+    // Workshop files may start with a UTF-8 BOM.
+    let Ok(project_json) =
+        serde_json::from_str::<serde_json::Value>(raw_json.trim_start_matches('\u{feff}'))
+    else {
+        return None;
+    };
+
+    let title = project_json
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or(folder_name)
+        .to_string();
+    let raw_type = project_json
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("scene")
+        .to_ascii_lowercase();
+    // `preview` comes from downloaded content, so keep it inside the item folder.
+    let preview_rel = project_json
+        .get("preview")
+        .and_then(|v| v.as_str())
+        .filter(|p| {
+            let path = Path::new(p);
+            !p.is_empty()
+                && path
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+        })
+        .unwrap_or("preview.jpg");
+    let audio_reactive = project_json
+        .pointer("/general/supportsaudioprocessing")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let bytes = compute_dir_size(dir_path);
+    let windows_only = raw_type == "application";
+
+    Some(DiscoveredWorkshopWallpaper {
+        wallpaper_id: format!("workshop:{folder_name}"),
+        workshop_id: folder_name.to_string(),
+        title,
+        r#type: raw_type,
+        preview_path: dir_path.join(preview_rel).to_string_lossy().into_owned(),
+        install_dir: dir_path.to_string_lossy().into_owned(),
+        bytes,
+        audio_reactive,
+        windows_only,
+        project_json,
+    })
 }
 
 fn compute_dir_size(dir: &Path) -> u64 {
@@ -256,17 +280,76 @@ pub fn workshop_event_paths(event: &Event) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Quiet period after the last event on a path before it is reported.
+pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Collapses bursts of events per path into one report after [`WATCH_DEBOUNCE`] of quiet.
+#[derive(Debug, Default)]
+pub struct PathDebouncer {
+    pending: HashMap<PathBuf, Instant>,
+}
+
+impl PathDebouncer {
+    pub fn push(&mut self, path: PathBuf, now: Instant) {
+        self.pending.insert(path, now + WATCH_DEBOUNCE);
+    }
+
+    /// Removes and returns every path whose quiet period has elapsed.
+    pub fn take_due(&mut self, now: Instant) -> Vec<PathBuf> {
+        let due: Vec<PathBuf> = self
+            .pending
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &due {
+            self.pending.remove(path);
+        }
+        due
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.pending.values().min().copied()
+    }
+}
+
 /// Watches `roots` recursively (missing directories are skipped) and sends every changed
-/// `project.json` path on `changed_tx`. Keep the returned watcher alive to keep watching.
+/// `project.json` path on `changed_tx`, debounced by path. Keep the returned watcher alive to
+/// keep watching.
 pub fn spawn_workshop_watcher(
     roots: &[PathBuf],
     changed_tx: mpsc::UnboundedSender<PathBuf>,
 ) -> anyhow::Result<RecommendedWatcher> {
+    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<PathBuf>();
+    std::thread::spawn(move || {
+        let mut debouncer = PathDebouncer::default();
+        loop {
+            let wait = debouncer
+                .next_deadline()
+                .map(|d| d.saturating_duration_since(Instant::now()));
+            let received = match wait {
+                Some(wait) => raw_rx.recv_timeout(wait),
+                None => raw_rx
+                    .recv()
+                    .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+            };
+            match received {
+                Ok(path) => debouncer.push(path, Instant::now()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            for path in debouncer.take_due(Instant::now()) {
+                if changed_tx.send(path).is_err() {
+                    return;
+                }
+            }
+        }
+    });
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
                 for path in workshop_event_paths(&event) {
-                    let _ = changed_tx.send(path);
+                    let _ = raw_tx.send(path);
                 }
             }
         },
@@ -390,6 +473,26 @@ mod tests {
     }
 
     #[test]
+    fn debouncer_collapses_bursts_per_path() {
+        let t0 = Instant::now();
+        let mut d = PathDebouncer::default();
+        d.push(PathBuf::from("/a/project.json"), t0);
+        d.push(PathBuf::from("/b/project.json"), t0);
+        d.push(
+            PathBuf::from("/a/project.json"),
+            t0 + Duration::from_millis(300),
+        );
+        assert!(d.take_due(t0 + Duration::from_millis(400)).is_empty());
+        let due = d.take_due(t0 + Duration::from_millis(550));
+        assert_eq!(due, vec![PathBuf::from("/b/project.json")]);
+        assert_eq!(
+            d.take_due(t0 + Duration::from_millis(900)),
+            vec![PathBuf::from("/a/project.json")]
+        );
+        assert!(d.next_deadline().is_none());
+    }
+
+    #[test]
     fn scan_roots_reads_project_json() {
         let root =
             std::env::temp_dir().join(format!("truongpaper-steam-scan-{}", std::process::id()));
@@ -414,6 +517,15 @@ mod tests {
         assert!(!w.windows_only);
         assert!(w.bytes >= 10);
         assert!(w.preview_path.ends_with("p.png"));
+
+        // A preview path that leaves the item folder falls back to the default.
+        std::fs::write(
+            item.join("project.json"),
+            "{\"title\":\"Neon\",\"preview\":\"../../secret.png\"}",
+        )
+        .unwrap();
+        let found = scan_workshop_roots(std::slice::from_ref(&root));
+        assert!(Path::new(&found[0].preview_path).ends_with("2841928371/preview.jpg"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

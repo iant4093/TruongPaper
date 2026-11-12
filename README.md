@@ -22,7 +22,7 @@ A native macOS and Windows desktop wallpaper engine built in Rust and WebGPU tha
 
 ---
 
-TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in an simple dark interface that looks identical on macOS and Windows.
+TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in a simple dark interface that looks identical on macOS and Windows.
 
 Workshop includes a native **Discover** gallery with public guest browsing, search, sorting, tag filters, previews, and pagination. **Installed** keeps your downloads and local Steam library. Direct Workshop links and IDs open the download choices. Choose GGNetwork when it has a guest download, or Steam with a Wallpaper Engine license. GGNetwork receives the public Workshop link when you choose it. Discover follows Steam's guest visibility rules. The sidebar reports disk cache and main-process resident RAM separately.
 

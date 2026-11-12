@@ -6,6 +6,8 @@
 use crate::error::{PhotoApiError, PhotoApiResult};
 use crate::{ApiPhotoResponse, API_RANDOM_URL, PUBLIC_CATALOG_URL};
 use std::future::Future;
+use std::path::Path;
+use std::time::Duration;
 use truongpaper_core::{parse_album_slug, CatalogPage, PublicCatalogAlbum};
 use url::Url;
 
@@ -17,6 +19,8 @@ pub const MAX_CATALOG_PAGES: usize = 50;
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    /// Parsed `Retry-After` header (delta-seconds form), when present.
+    pub retry_after: Option<Duration>,
 }
 
 impl HttpResponse {
@@ -25,8 +29,40 @@ impl HttpResponse {
         Self {
             status,
             body: body.as_bytes().to_vec(),
+            retry_after: None,
         }
     }
+}
+
+/// Result of [`PhotoTransport::download`]. On a non-2xx status nothing was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadOutcome {
+    pub status: u16,
+    pub retry_after: Option<Duration>,
+    pub bytes_written: u64,
+}
+
+/// Parses the delta-seconds form of `Retry-After` (`"120"`). HTTP-date values are ignored.
+pub fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Host suffix every `imageUrl` must belong to.
+const IMAGE_HOST_DOMAIN: &str = "iantruongphotography.com";
+
+/// `imageUrl` must be HTTPS on `iantruongphotography.com` or one of its subdomains (the API
+/// serves images from `photos-api.iantruongphotography.com`).
+pub fn is_allowed_image_url(url: &str) -> bool {
+    let Ok(u) = Url::parse(url) else {
+        return false;
+    };
+    if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() {
+        return false;
+    }
+    u.host_str().is_some_and(|h| {
+        let h = h.to_ascii_lowercase();
+        h == IMAGE_HOST_DOMAIN || h.ends_with(&format!(".{IMAGE_HOST_DOMAIN}"))
+    })
 }
 
 /// Minimal HTTP GET abstraction. Implementations must return non-2xx responses as `Ok` and
@@ -37,6 +73,49 @@ pub trait PhotoTransport: Send + Sync {
         url: &str,
         query: &[(&str, &str)],
     ) -> impl Future<Output = PhotoApiResult<HttpResponse>> + Send;
+
+    /// Downloads `url` into `dest`, refusing bodies larger than `max_bytes`. The default
+    /// buffers through [`Self::fetch`]; `reqwest::Client` streams to disk with a running cap.
+    /// On error no file is left at `dest`.
+    fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> impl Future<Output = PhotoApiResult<DownloadOutcome>> + Send {
+        async move {
+            let resp = self.fetch(url, &[]).await?;
+            let outcome = DownloadOutcome {
+                status: resp.status,
+                retry_after: resp.retry_after,
+                bytes_written: 0,
+            };
+            if !(200..=299).contains(&resp.status) {
+                return Ok(outcome);
+            }
+            if resp.body.len() as u64 > max_bytes {
+                return Err(PhotoApiError::Rejected(format!(
+                    "image larger than {max_bytes} bytes"
+                )));
+            }
+            tokio::fs::write(dest, &resp.body).await?;
+            Ok(DownloadOutcome {
+                bytes_written: resp.body.len() as u64,
+                ..outcome
+            })
+        }
+    }
+}
+
+fn transport_err(e: reqwest::Error) -> PhotoApiError {
+    PhotoApiError::Transport(e.to_string())
+}
+
+fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after)
 }
 
 impl PhotoTransport for reqwest::Client {
@@ -45,17 +124,71 @@ impl PhotoTransport for reqwest::Client {
         if !query.is_empty() {
             req = req.query(query);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| PhotoApiError::Transport(e.to_string()))?;
+        let resp = req.send().await.map_err(transport_err)?;
         let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| PhotoApiError::Transport(e.to_string()))?
-            .to_vec();
-        Ok(HttpResponse { status, body })
+        let retry_after = retry_after_header(resp.headers());
+        let body = resp.bytes().await.map_err(transport_err)?.to_vec();
+        Ok(HttpResponse {
+            status,
+            body,
+            retry_after,
+        })
+    }
+
+    async fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> PhotoApiResult<DownloadOutcome> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut resp = self.get(url).send().await.map_err(transport_err)?;
+        let status = resp.status().as_u16();
+        let retry_after = retry_after_header(resp.headers());
+        let mut outcome = DownloadOutcome {
+            status,
+            retry_after,
+            bytes_written: 0,
+        };
+        if !resp.status().is_success() {
+            return Ok(outcome);
+        }
+        if resp.url().scheme() != "https" {
+            return Err(PhotoApiError::Rejected("redirected to non-https".into()));
+        }
+        if resp.content_length().is_some_and(|len| len > max_bytes) {
+            return Err(PhotoApiError::Rejected(format!(
+                "image larger than {max_bytes} bytes"
+            )));
+        }
+        let mut file = tokio::fs::File::create(dest).await?;
+        let streamed: PhotoApiResult<u64> = async {
+            let mut written = 0_u64;
+            while let Some(chunk) = resp.chunk().await.map_err(transport_err)? {
+                written += chunk.len() as u64;
+                if written > max_bytes {
+                    return Err(PhotoApiError::Rejected(format!(
+                        "image larger than {max_bytes} bytes"
+                    )));
+                }
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+            Ok(written)
+        }
+        .await;
+        drop(file);
+        match streamed {
+            Ok(written) => {
+                outcome.bytes_written = written;
+                Ok(outcome)
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(dest).await;
+                Err(e)
+            }
+        }
     }
 }
 
@@ -66,6 +199,15 @@ impl<T: PhotoTransport + ?Sized> PhotoTransport for &T {
         query: &[(&str, &str)],
     ) -> impl Future<Output = PhotoApiResult<HttpResponse>> + Send {
         (**self).fetch(url, query)
+    }
+
+    fn download(
+        &self,
+        url: &str,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> impl Future<Output = PhotoApiResult<DownloadOutcome>> + Send {
+        (**self).download(url, dest, max_bytes)
     }
 }
 
@@ -108,10 +250,13 @@ impl RandomPhotoQuery {
 }
 
 /// Maps an HTTP status to the documented API error classes.
-pub fn check_status(status: u16) -> PhotoApiResult<()> {
+pub fn check_status(status: u16, retry_after: Option<Duration>) -> PhotoApiResult<()> {
     match status {
         200..=299 => Ok(()),
-        403 | 429 | 503 => Err(PhotoApiError::RateLimited(status)),
+        403 | 429 | 503 => Err(PhotoApiError::RateLimited {
+            status,
+            retry_after,
+        }),
         400 => Err(PhotoApiError::InvalidParameters),
         404 => Err(PhotoApiError::NoPhotos),
         other => Err(PhotoApiError::UnexpectedStatus(other)),
@@ -150,16 +295,46 @@ impl<T: PhotoTransport> PhotoApiClient<T> {
         let pairs = query.to_pairs()?;
         let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let resp = self.transport.fetch(&self.random_url, &borrowed).await?;
-        check_status(resp.status)?;
+        check_status(resp.status, resp.retry_after)?;
         Ok(serde_json::from_slice(&resp.body)?)
     }
 
-    /// Downloads `imageUrl` bytes. Counts against the same rate limit as `fetch_random`.
+    /// Downloads `imageUrl` bytes into memory. Counts against the same rate limit as
+    /// `fetch_random`. Prefer [`Self::download_image_to`] for real photos.
     pub async fn download_image(&self, image_url: &str) -> PhotoApiResult<Vec<u8>> {
         let resp = self.transport.fetch(image_url, &[]).await?;
         match resp.status {
             200..=299 => Ok(resp.body),
-            403 | 429 | 503 => Err(PhotoApiError::RateLimited(resp.status)),
+            429 | 503 => Err(PhotoApiError::RateLimited {
+                status: resp.status,
+                retry_after: resp.retry_after,
+            }),
+            other => Err(PhotoApiError::UnexpectedStatus(other)),
+        }
+    }
+
+    /// Streams `imageUrl` into `dest` (a temp path the caller renames), enforcing `max_bytes`
+    /// while reading. HTTP 403 on an image is a rejection of that photo
+    /// (`UnexpectedStatus(403)`), not a global throttle; only 429 / 503 throttle.
+    pub async fn download_image_to(
+        &self,
+        image_url: &str,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> PhotoApiResult<u64> {
+        let out = self.transport.download(image_url, dest, max_bytes).await?;
+        match out.status {
+            200..=299 => {
+                if out.bytes_written == 0 {
+                    let _ = tokio::fs::remove_file(dest).await;
+                    return Err(PhotoApiError::Rejected("empty image".into()));
+                }
+                Ok(out.bytes_written)
+            }
+            429 | 503 => Err(PhotoApiError::RateLimited {
+                status: out.status,
+                retry_after: out.retry_after,
+            }),
             other => Err(PhotoApiError::UnexpectedStatus(other)),
         }
     }
@@ -172,7 +347,7 @@ impl<T: PhotoTransport> PhotoApiClient<T> {
             url.query_pairs_mut().append_pair("cursor", c);
         }
         let resp = self.transport.fetch(url.as_str(), &[]).await?;
-        check_status(resp.status)?;
+        check_status(resp.status, resp.retry_after)?;
         Ok(serde_json::from_slice(&resp.body)?)
     }
 
@@ -308,7 +483,9 @@ mod tests {
             match check {
                 0 => assert!(matches!(err, PhotoApiError::InvalidParameters)),
                 1 => assert!(matches!(err, PhotoApiError::NoPhotos)),
-                2 => assert!(matches!(err, PhotoApiError::RateLimited(s) if s == status)),
+                2 => assert!(
+                    matches!(err, PhotoApiError::RateLimited { status: s, .. } if s == status)
+                ),
                 _ => assert!(matches!(err, PhotoApiError::UnexpectedStatus(500))),
             }
         }
@@ -339,15 +516,15 @@ mod tests {
                 "https://img/ok" => HttpResponse {
                     status: 200,
                     body: vec![1, 2, 3],
+                    retry_after: None,
                 },
                 "https://img/throttled" => HttpResponse {
                     status: 503,
                     body: vec![],
+                    retry_after: Some(Duration::from_secs(7)),
                 },
-                _ => HttpResponse {
-                    status: 404,
-                    body: vec![],
-                },
+                "https://img/forbidden" => HttpResponse::json(403, ""),
+                _ => HttpResponse::json(404, ""),
             })
         }));
         assert_eq!(
@@ -356,7 +533,11 @@ mod tests {
         );
         assert!(matches!(
             client.download_image("https://img/throttled").await,
-            Err(PhotoApiError::RateLimited(503))
+            Err(PhotoApiError::RateLimited { status: 503, retry_after: Some(d) }) if d == Duration::from_secs(7)
+        ));
+        assert!(matches!(
+            client.download_image("https://img/forbidden").await,
+            Err(PhotoApiError::UnexpectedStatus(403))
         ));
         assert!(matches!(
             client.download_image("https://img/missing").await,
@@ -402,7 +583,7 @@ mod tests {
         }));
         assert!(matches!(
             client.fetch_full_catalog().await,
-            Err(PhotoApiError::RateLimited(503))
+            Err(PhotoApiError::RateLimited { status: 503, .. })
         ));
     }
 
@@ -412,5 +593,89 @@ mod tests {
         let t = FnTransport(|_: &str, _: &[(&str, &str)]| Ok(HttpResponse::json(200, "{}")));
         takes(&&t);
         takes(&reqwest::Client::new());
+    }
+
+    #[test]
+    fn image_urls_are_https_on_the_photography_domain_only() {
+        for ok in [
+            "https://photos-api.iantruongphotography.com/v1/images/c7/YWxi",
+            "https://iantruongphotography.com/x.jpg",
+            "https://PHOTOS-API.iantruongphotography.com/x",
+        ] {
+            assert!(is_allowed_image_url(ok), "{ok}");
+        }
+        for bad in [
+            "http://photos-api.iantruongphotography.com/x",
+            "https://evil.com/x",
+            "https://iantruongphotography.com.evil.com/x",
+            "https://eviliantruongphotography.com/x",
+            "https://user:pw@photos-api.iantruongphotography.com/x",
+            "https://127.0.0.1/x",
+            "file:///etc/passwd",
+            "not a url",
+        ] {
+            assert!(!is_allowed_image_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds_only() {
+        assert_eq!(parse_retry_after(" 120 "), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(parse_retry_after("-5"), None);
+    }
+
+    #[tokio::test]
+    async fn download_image_to_enforces_cap_and_maps_statuses() {
+        let dir = std::env::temp_dir().join(format!("tp-client-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.part");
+        let client = PhotoApiClient::new(FnTransport(|url: &str, _: &[(&str, &str)]| {
+            Ok(match url {
+                "https://img/ok" => HttpResponse {
+                    status: 200,
+                    body: vec![9; 10],
+                    retry_after: None,
+                },
+                "https://img/empty" => HttpResponse::json(200, ""),
+                "https://img/forbidden" => HttpResponse::json(403, ""),
+                _ => HttpResponse {
+                    status: 429,
+                    body: vec![],
+                    retry_after: Some(Duration::from_secs(30)),
+                },
+            })
+        }));
+        assert_eq!(
+            client
+                .download_image_to("https://img/ok", &dest, 10)
+                .await
+                .unwrap(),
+            10
+        );
+        assert_eq!(std::fs::read(&dest).unwrap().len(), 10);
+        std::fs::remove_file(&dest).unwrap();
+        assert!(matches!(
+            client.download_image_to("https://img/ok", &dest, 9).await,
+            Err(PhotoApiError::Rejected(_))
+        ));
+        assert!(!dest.exists());
+        assert!(matches!(
+            client
+                .download_image_to("https://img/empty", &dest, 9)
+                .await,
+            Err(PhotoApiError::Rejected(_))
+        ));
+        assert!(matches!(
+            client
+                .download_image_to("https://img/forbidden", &dest, 9)
+                .await,
+            Err(PhotoApiError::UnexpectedStatus(403))
+        ));
+        assert!(matches!(
+            client.download_image_to("https://img/x", &dest, 9).await,
+            Err(PhotoApiError::RateLimited { status: 429, retry_after: Some(d) }) if d == Duration::from_secs(30)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

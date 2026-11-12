@@ -26,9 +26,40 @@ pub async fn settings_update(
         let mut guard = state.settings.lock();
         let before = guard.clone();
         let after = sanitize_settings(merge_settings_patch(&before, &settings)?);
-        {
+        let hotkeys_changed =
+            before.next_hotkey != after.next_hotkey || before.pause_hotkey != after.pause_hotkey;
+        // Registered first: a shortcut that is invalid or taken rejects the whole update.
+        if hotkeys_changed {
+            crate::controls::apply_hotkeys(&app, &after.next_hotkey, &after.pause_hotkey)?;
+        }
+        let restore_hotkeys = |app: &AppHandle| {
+            if hotkeys_changed {
+                if let Err(err) =
+                    crate::controls::apply_hotkeys(app, &before.next_hotkey, &before.pause_hotkey)
+                {
+                    tracing::warn!("cannot restore the previous hotkeys: {err}");
+                }
+            }
+        };
+        // The OS autostart entry is part of the update: a failure rejects it and the stored
+        // setting keeps its old value.
+        let launch_changed = before.launch_at_login != after.launch_at_login;
+        if launch_changed {
+            if let Err(err) = apply_launch_at_login(&app, after.launch_at_login) {
+                restore_hotkeys(&app);
+                return Err(err);
+            }
+        }
+        let persisted = {
             let conn = state.db.lock();
-            persist_settings(&conn, &after).map_err(|e| e.to_string())?;
+            persist_settings(&conn, &after)
+        };
+        if let Err(err) = persisted {
+            restore_hotkeys(&app);
+            if launch_changed {
+                let _ = apply_launch_at_login(&app, before.launch_at_login);
+            }
+            return Err(err.to_string());
         }
         *guard = after.clone();
         (before, after)
@@ -43,9 +74,6 @@ pub async fn settings_update(
         );
     }
 
-    if before.launch_at_login != after.launch_at_login {
-        apply_launch_at_login(&app, after.launch_at_login);
-    }
     #[cfg(target_os = "windows")]
     if before.sync_lock_screen != after.sync_lock_screen {
         super::lock_screen::request_sync(&app);
@@ -54,7 +82,7 @@ pub async fn settings_update(
     Ok(())
 }
 
-fn apply_launch_at_login(app: &AppHandle, enabled: bool) {
+fn apply_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let launcher = app.autolaunch();
     let res = if enabled {
@@ -62,7 +90,11 @@ fn apply_launch_at_login(app: &AppHandle, enabled: bool) {
     } else {
         launcher.disable()
     };
-    if let Err(err) = res {
+    res.map_err(|err| {
         tracing::warn!("launch-at-login update failed: {err}");
-    }
+        format!(
+            "Could not {} launch at login: {err}",
+            if enabled { "enable" } else { "disable" }
+        )
+    })
 }

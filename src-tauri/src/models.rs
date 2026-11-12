@@ -255,6 +255,8 @@ pub struct WallpaperItem {
     pub project_json: Value,
     pub user_properties: Map<String, Value>,
     pub adjustments: UniversalAdjustments,
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +283,9 @@ pub struct MonitorInfo {
     pub user_paused: bool,
     pub active_source: WallpaperSource,
     pub active_wallpaper_id: Option<String>,
+    /// Per-display output volume `0..=1` (multiplies the wallpaper's own volume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -596,6 +601,7 @@ mod tests {
             project_json: json!({}),
             user_properties: Map::new(),
             adjustments: UniversalAdjustments::default(),
+            is_favorite: false,
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["type"], "video");

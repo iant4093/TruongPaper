@@ -29,8 +29,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use ab_glyph::FontVec;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use truongpaper_we_formats::{
@@ -39,9 +41,10 @@ use truongpaper_we_formats::{
 };
 use wgpu::util::DeviceExt;
 
+use crate::diagnostics::DiagnosticsLog;
 use crate::effect_chain::{
-    BlendMode, BloomPassPlan, BloomPlan, BloomStage, EffectChainPlan, EffectStep, RenderTargetId,
-    TextureBinding, BLOOM_VERTEX_ENTRY_POINT, RT_FULL_FRAME_BUFFER, RT_SCENE,
+    short_name, BlendMode, BloomPassPlan, BloomPlan, BloomStage, EffectChainPlan, EffectStep,
+    RenderTargetId, TextureBinding, BLOOM_VERTEX_ENTRY_POINT, RT_FULL_FRAME_BUFFER, RT_SCENE,
 };
 use crate::json::Value;
 use crate::particles::SpriteParticleVertex;
@@ -55,6 +58,7 @@ use crate::shader_preprocessor::{
     compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
     ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
+use crate::text::{bitmap_size, load_font, rasterize, TextCache, TextKey, TextStyle};
 use crate::video_runtime::{tightly_packed_rows, VideoFrame, VideoPixelFormat};
 
 // ------------------------------------------------------------------------------------------
@@ -118,7 +122,7 @@ pub fn plan_video_upload(frame: &VideoFrame, width: u32, height: u32) -> Option<
         }
     }
     let mut bgra = video_frame_to_rgba(frame, width, height)?;
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     Some(VideoUpload::Converted(bgra))
@@ -664,7 +668,11 @@ impl Default for FrameUniformInputs {
     }
 }
 
-const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Format of uploaded assets and per-layer effect FBOs.
+const FBO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Format of the scene accumulation target, `_rt_FullFrameBuffer` and bloom targets. Half-float
+/// so bright (HDR) values survive until bloom; the final blit converts to the output format.
+pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 struct GpuTarget {
     texture: wgpu::Texture,
@@ -720,6 +728,10 @@ struct GpuPuppet {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    /// Hash of the pose inputs (clips, blend, rate, time) last skinned and uploaded.
+    pose_hash: Option<u64>,
+    /// Reused CPU vertex scratch (no per-frame allocation).
+    scratch: Vec<LayerVertex>,
 }
 
 struct GpuEffectLayer {
@@ -744,7 +756,22 @@ struct GpuParticles {
     blending: BlendMode,
 }
 
+/// A rasterized text layer: the bitmap is rebuilt only when the string or style changes.
+struct GpuText {
+    font: Arc<FontVec>,
+    cache: TextCache,
+    draw: SimpleDraw,
+    quad: wgpu::Buffer,
+    /// Size of the quad in layer units (the layer size, or the bitmap size for auto-sized text).
+    quad_size: Vec2,
+    /// Inputs of the last `update_text`; an identical call is a no-op (no allocation).
+    last_input: Option<(String, TextStyle, Vec2)>,
+    /// Keeps the bitmap texture alive for `draw`.
+    _texture: wgpu::Texture,
+}
+
 enum GpuLayer {
+    Text(Box<GpuText>),
     Effects(Box<GpuEffectLayer>),
     Solid(SimpleDraw),
     Particles(Box<GpuParticles>),
@@ -785,6 +812,7 @@ pub struct SceneRenderer {
     bloom: Option<GpuBloom>,
     blit: SimpleDraw,
     last_pointer: Vec2,
+    diagnostics: DiagnosticsLog,
 }
 
 fn block_on<F: Future>(device: &wgpu::Device, fut: F) -> F::Output {
@@ -852,7 +880,7 @@ fn upload_rgba(
     height: u32,
     rgba: &[u8],
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    upload_texture(device, queue, label, width, height, SCENE_FORMAT, rgba)
+    upload_texture(device, queue, label, width, height, FBO_FORMAT, rgba)
 }
 
 fn upload_texture(
@@ -1144,8 +1172,8 @@ impl SceneRenderer {
             contents: bytemuck::cast_slice(&QUAD_INDICES),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let scene = create_target(device, "scene_target", w, h, SCENE_FORMAT);
-        let full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, SCENE_FORMAT);
+        let scene = create_target(device, "scene_target", w, h, HDR_FORMAT);
+        let full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, HDR_FORMAT);
         let color_blend_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("scene_color_blend_backdrop"),
@@ -1164,7 +1192,7 @@ impl SceneRenderer {
             device,
             &composite_module,
             &[&simple_layout, &color_blend_layout],
-            SCENE_FORMAT,
+            HDR_FORMAT,
             BlendMode::Normal,
             "fs_layer_color",
         );
@@ -1204,6 +1232,7 @@ impl SceneRenderer {
             layer_outputs: HashMap::new(),
             bloom: None,
             last_pointer: Vec2::splat(0.5),
+            diagnostics: DiagnosticsLog::default(),
         };
         for blend in [
             BlendMode::Normal,
@@ -1212,8 +1241,9 @@ impl SceneRenderer {
             BlendMode::Multiply,
             BlendMode::Screen,
         ] {
-            renderer.ensure_composite_pipeline(device, SCENE_FORMAT, blend);
+            renderer.ensure_composite_pipeline(device, HDR_FORMAT, blend);
         }
+        renderer.ensure_composite_pipeline(device, FBO_FORMAT, BlendMode::Normal);
         renderer.ensure_composite_pipeline(device, target_format, BlendMode::Normal);
         renderer
     }
@@ -1365,7 +1395,7 @@ impl SceneRenderer {
                 module: &self.particle_module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: SCENE_FORMAT,
+                    format: HDR_FORMAT,
                     blend: blend.to_wgpu_blend(),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1445,6 +1475,10 @@ impl SceneRenderer {
                 let msg = format!("texture {path}: {e}; using a fallback texture");
                 tracing::warn!("{msg}");
                 warnings.push(msg);
+                self.diagnostics.push(format!(
+                    "Texture {} unreadable; a placeholder is drawn instead",
+                    short_name(path)
+                ));
                 false
             }
         }
@@ -1668,6 +1702,13 @@ impl SceneRenderer {
         })
     }
 
+    /// Short human-readable notes about content skipped or approximated by the last
+    /// [`Self::load`] (skipped effect passes, shaders that fell back to a copy, missing
+    /// textures or fonts). Deduplicated, at most 50 entries.
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.diagnostics.to_vec()
+    }
+
     /// Uploads textures, compiles every pass shader and allocates FBOs for `graph`. Returns
     /// non-fatal warnings (failed shaders fall back to plain copies, missing textures to white).
     pub fn load(
@@ -1683,8 +1724,8 @@ impl SceneRenderer {
             graph.scene_size.y.round().max(1.0) as u32,
         );
         if (self.scene.width, self.scene.height) != (w, h) {
-            self.scene = create_target(device, "scene_target", w, h, SCENE_FORMAT);
-            self.full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, SCENE_FORMAT);
+            self.scene = create_target(device, "scene_target", w, h, HDR_FORMAT);
+            self.full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, HDR_FORMAT);
             self.color_blend_backdrop =
                 Self::make_backdrop_group(device, &self.color_blend_layout, &self.full_frame.view);
             self.blit = self.make_simple_draw(device, &self.scene.view);
@@ -1692,6 +1733,7 @@ impl SceneRenderer {
         self.layers.clear();
         self.layer_outputs.clear();
         self.bloom = None;
+        self.diagnostics = DiagnosticsLog::default();
 
         let mut plans: Vec<_> = graph
             .layers
@@ -1724,14 +1766,39 @@ impl SceneRenderer {
                             "scene_layer_output",
                             plan.width,
                             plan.height,
-                            SCENE_FORMAT,
+                            FBO_FORMAT,
                         ),
                     );
                 }
             }
         }
+        let mut fonts: HashMap<Option<String>, Option<Arc<FontVec>>> = HashMap::new();
         for (layer, plan) in graph.layers.iter().zip(plans.drain(..)) {
             let gpu = match &layer.kind {
+                SceneLayerKind::Text { style, .. } => {
+                    let font = fonts
+                        .entry(style.font.clone())
+                        .or_insert_with(|| load_font(vfs, style.font.as_deref()).ok().map(Arc::new))
+                        .clone();
+                    match font {
+                        Some(font) => Some(GpuLayer::Text(Box::new(
+                            self.new_gpu_text(device, queue, font),
+                        ))),
+                        None => {
+                            let msg = format!(
+                                "text layer '{}' skipped: no font could be loaded",
+                                layer.key()
+                            );
+                            tracing::warn!("{msg}");
+                            warnings.push(msg);
+                            self.diagnostics.push(format!(
+                                "Text layer '{}' skipped: no usable font",
+                                layer.key()
+                            ));
+                            None
+                        }
+                    }
+                }
                 SceneLayerKind::Image { .. } | SceneLayerKind::Composition { .. } => self
                     .load_effect_layer(
                         device,
@@ -1811,7 +1878,7 @@ impl SceneRenderer {
                         blending,
                     })))
                 }
-                SceneLayerKind::Sound { .. } | SceneLayerKind::Text { .. } => None,
+                SceneLayerKind::Sound { .. } => None,
             };
             self.layers.push(gpu);
         }
@@ -1882,11 +1949,13 @@ impl SceneRenderer {
             );
         }
         let target_format = |id: &RenderTargetId| match id {
-            RenderTargetId::FullFrame | RenderTargetId::Scene => Some(SCENE_FORMAT),
+            RenderTargetId::FullFrame | RenderTargetId::Scene => Some(HDR_FORMAT),
             other => targets.get(other).map(|t: &GpuTarget| t.format),
         };
         let layer_size = Vec2::new(plan.width as f32, plan.height as f32);
 
+        let mut local_diag: Vec<String> = Vec::new();
+        local_diag.extend(plan.diagnostics.iter().cloned());
         let (mut base, mut base_copy, mut base_uv) = (None, None, [1.0f32, 1.0]);
         if samples_scene {
             base_copy = Some(self.make_simple_draw(device, &self.full_frame.view));
@@ -1927,7 +1996,7 @@ impl SceneRenderer {
                     &bindings,
                     tex0_format,
                     RenderTargetId::FboA,
-                    SCENE_FORMAT,
+                    FBO_FORMAT,
                     BlendMode::Normal,
                 ) {
                     Ok(p) => base = Some(p),
@@ -1938,6 +2007,11 @@ impl SceneRenderer {
                         );
                         tracing::warn!("{msg}");
                         warnings.push(msg);
+                        local_diag.push(format!(
+                            "Layer '{}' shader {} failed to compile; drawn as a plain copy",
+                            layer.key(),
+                            short_name(&mpass.shader)
+                        ));
                     }
                 }
             }
@@ -1991,6 +2065,11 @@ impl SceneRenderer {
                                 );
                                 tracing::warn!("{msg}");
                                 warnings.push(msg);
+                                local_diag.push(format!(
+                                    "Effect {} skipped: shader {} failed to compile",
+                                    short_name(&p.effect_file),
+                                    short_name(&p.shader)
+                                ));
                                 if p.swaps {
                                     let source = if p.target == RenderTargetId::FboA {
                                         RenderTargetId::FboB
@@ -2046,11 +2125,16 @@ impl SceneRenderer {
                     );
                     tracing::warn!("{msg}");
                     warnings.push(msg);
+                    local_diag.push(format!(
+                        "Layer '{}' puppet animation unavailable; drawn as a flat image",
+                        layer.key()
+                    ));
                     None
                 }
             },
             _ => None,
         };
+        self.diagnostics.extend(local_diag);
 
         Some(GpuEffectLayer {
             plan,
@@ -2065,6 +2149,86 @@ impl SceneRenderer {
             samples_scene,
             fullscreen,
         })
+    }
+
+    fn new_gpu_text(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        font: Arc<FontVec>,
+    ) -> GpuText {
+        let (texture, view) = upload_rgba(device, queue, "scene_text", 1, 1, &[255, 255, 255, 0]);
+        GpuText {
+            font,
+            cache: TextCache::default(),
+            draw: self.make_simple_draw(device, &view),
+            quad: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_text_quad"),
+                size: (4 * std::mem::size_of::<LayerVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            quad_size: Vec2::ONE,
+            last_input: None,
+            _texture: texture,
+        }
+    }
+
+    /// Re-rasterizes a text layer when its string, style or size changed.
+    #[allow(clippy::too_many_arguments)]
+    fn update_text(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        simple_layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        t: &mut GpuText,
+        layer_size: Vec2,
+        text: &str,
+        style: &TextStyle,
+    ) {
+        if t.last_input
+            .as_ref()
+            .is_some_and(|(s, st, sz)| s == text && st == style && *sz == layer_size)
+        {
+            return;
+        }
+        t.last_input = Some((text.to_string(), style.clone(), layer_size));
+        let (w, h) = bitmap_size(&t.font, text, style, (layer_size.x, layer_size.y));
+        let key = TextKey {
+            text: text.to_string(),
+            style: style.clone(),
+            width: w,
+            height: h,
+        };
+        let font = t.font.clone();
+        if t.cache.ensure(key, |k| {
+            rasterize(&font, &k.text, k.width, k.height, &k.style)
+        }) {
+            if let Some(bmp) = t.cache.bitmap() {
+                let (texture, view) = upload_rgba(
+                    device,
+                    queue,
+                    "scene_text",
+                    bmp.width,
+                    bmp.height,
+                    &bmp.rgba,
+                );
+                t.draw = Self::make_simple_draw_raw(
+                    device,
+                    simple_layout,
+                    &view,
+                    sampler,
+                    SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
+                );
+                t._texture = texture;
+            }
+        }
+        let valid = |v: f32| v.is_finite() && v >= 1.0;
+        t.quad_size = if valid(layer_size.x) && valid(layer_size.y) {
+            layer_size
+        } else {
+            Vec2::new(w as f32, h as f32)
+        };
     }
 
     fn load_puppet(
@@ -2105,6 +2269,8 @@ impl SceneRenderer {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
+            pose_hash: None,
+            scratch: Vec::new(),
         })
     }
 
@@ -2113,7 +2279,7 @@ impl SceneRenderer {
         for p in &plan.passes {
             if p.target != RT_SCENE {
                 targets.entry(p.target).or_insert_with(|| {
-                    create_target(device, p.target, p.width, p.height, SCENE_FORMAT)
+                    create_target(device, p.target, p.width, p.height, HDR_FORMAT)
                 });
             }
         }
@@ -2139,7 +2305,7 @@ impl SceneRenderer {
                         module: &self.bloom_module,
                         entry_point: Some(p.stage.fragment_entry_point()),
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: SCENE_FORMAT,
+                            format: HDR_FORMAT,
                             blend: p.blending.to_wgpu_blend(),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
@@ -2276,6 +2442,20 @@ impl SceneRenderer {
                 continue;
             }
             let matrices = graph.layer_pass_matrices(li, camera);
+            if let (SceneLayerKind::Text { text, style }, Some(GpuLayer::Text(t))) =
+                (&layer.kind, self.layers[li].as_mut())
+            {
+                Self::update_text(
+                    device,
+                    queue,
+                    &self.simple_layout,
+                    &self.clamp_sampler,
+                    t,
+                    layer.transform.size,
+                    text,
+                    style,
+                );
+            }
             match self.layers[li].as_mut() {
                 Some(GpuLayer::Effects(fx)) => {
                     // Puppet deformation (CPU skinning).
@@ -2301,19 +2481,39 @@ impl SceneRenderer {
                                 });
                             }
                         }
-                        let bones = layered_bone_matrices(&p.skeleton, &clips, frame.time);
-                        let positions = PuppetDeformer::deform(&p.vertices, &bones, &[]);
-                        let verts: Vec<LayerVertex> = positions
-                            .iter()
-                            .zip(&p.vertices)
-                            .map(|(pos, v)| LayerVertex {
-                                position: *pos,
-                                // Base and effect passes already crop the source padding.
-                                texcoord: v.uv,
-                            })
-                            .collect();
-                        if !verts.is_empty() {
-                            queue.write_buffer(&p.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+                        let pose_hash = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            frame.time.to_bits().hash(&mut h);
+                            for c in &clips {
+                                c.animation.hash(&mut h);
+                                c.blend.to_bits().hash(&mut h);
+                                c.rate.to_bits().hash(&mut h);
+                                c.additive.hash(&mut h);
+                            }
+                            h.finish()
+                        };
+                        // A paused scene (same time, same clips) keeps the uploaded pose.
+                        if p.pose_hash != Some(pose_hash) {
+                            p.pose_hash = Some(pose_hash);
+                            let bones = layered_bone_matrices(&p.skeleton, &clips, frame.time);
+                            let positions = PuppetDeformer::deform(&p.vertices, &bones, &[]);
+                            p.scratch.clear();
+                            p.scratch
+                                .extend(positions.iter().zip(&p.vertices).map(|(pos, v)| {
+                                    LayerVertex {
+                                        position: *pos,
+                                        // Base and effect passes already crop the source padding.
+                                        texcoord: v.uv,
+                                    }
+                                }));
+                            if !p.scratch.is_empty() {
+                                queue.write_buffer(
+                                    &p.vertex_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&p.scratch),
+                                );
+                            }
                         }
                     }
                 }
@@ -2337,6 +2537,32 @@ impl SceneRenderer {
                 GpuLayer::Effects(fx) => {
                     self.render_effect_layer(queue, encoder, fx, layer, &matrices, &base_values);
                 }
+                GpuLayer::Text(t) => {
+                    if !layer.visible {
+                        continue;
+                    }
+                    queue.write_buffer(
+                        &t.draw.uniform,
+                        0,
+                        bytemuck::bytes_of(&SimpleUniforms::new(
+                            matrices.model_view_projection,
+                            (layer.color * layer.brightness).extend(layer.alpha),
+                        )),
+                    );
+                    queue.write_buffer(
+                        &t.quad,
+                        0,
+                        bytemuck::cast_slice(&layer_quad_vertices(t.quad_size, [1.0, 1.0])),
+                    );
+                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
+                    run_pass(encoder, "scene_text", &self.scene.view, None, |rp| {
+                        rp.set_pipeline(pipeline);
+                        rp.set_bind_group(0, &t.draw.bind_group, &[]);
+                        rp.set_vertex_buffer(0, t.quad.slice(..));
+                        rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                        rp.draw_indexed(0..6, 0, 0..1);
+                    });
+                }
                 GpuLayer::Solid(draw) => {
                     queue.write_buffer(
                         &draw.uniform,
@@ -2346,8 +2572,7 @@ impl SceneRenderer {
                             (layer.color * layer.brightness).extend(layer.alpha),
                         )),
                     );
-                    let pipeline =
-                        &self.composite_pipelines[&(SCENE_FORMAT, BlendMode::Translucent)];
+                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
                     let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("scene_solid_quad"),
                         contents: bytemuck::cast_slice(&layer_quad_vertices(
@@ -2469,12 +2694,12 @@ impl SceneRenderer {
             }
         };
         let target_format = |id: &RenderTargetId| match id {
-            RenderTargetId::Scene | RenderTargetId::FullFrame => SCENE_FORMAT,
+            RenderTargetId::Scene | RenderTargetId::FullFrame => HDR_FORMAT,
             other => fx
                 .targets
                 .get(other)
                 .map(|t| t.format)
-                .unwrap_or(SCENE_FORMAT),
+                .unwrap_or(HDR_FORMAT),
         };
         let transparent = Some(wgpu::Color::TRANSPARENT);
 
@@ -2512,8 +2737,7 @@ impl SceneRenderer {
                             0,
                             bytemuck::bytes_of(&SimpleUniforms::new(mvp, color)),
                         );
-                        let pipeline =
-                            &self.composite_pipelines[&(SCENE_FORMAT, BlendMode::Normal)];
+                        let pipeline = &self.composite_pipelines[&(FBO_FORMAT, BlendMode::Normal)];
                         run_pass(encoder, "scene_layer_base_copy", view, transparent, |rp| {
                             rp.set_pipeline(pipeline);
                             rp.set_bind_group(0, &draw.bind_group, &[]);
@@ -2613,7 +2837,7 @@ impl SceneRenderer {
                     let pipeline = if color_blend {
                         &self.color_blend_pipeline
                     } else {
-                        &self.composite_pipelines[&(SCENE_FORMAT, blend)]
+                        &self.composite_pipelines[&(HDR_FORMAT, blend)]
                     };
                     run_pass(
                         encoder,

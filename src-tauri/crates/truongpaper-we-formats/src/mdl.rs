@@ -5,9 +5,11 @@
 use bytemuck::{Pod, Zeroable};
 use std::io::{Error, ErrorKind, Result as IoResult};
 
-/// Bytes per vertex in the `.mdl` file:
-/// `pos vec3 | weight_indices uvec4 | weights vec4 | (28 unused bytes) | tc vec2`.
+/// Bytes per vertex in padded or extended mesh records.
 pub const MDL_VERTEX_STRIDE: usize = 80;
+const STANDARD_VERTEX_STRIDE: usize = 52;
+const STANDARD_MESH_MARKER: usize = 0x01800009;
+const EXTENDED_MESH_MARKER: usize = 0x0180000f;
 /// Bytes per triangle in the index block (`3 * u16`).
 pub const MDL_TRIANGLE_BYTES: usize = 6;
 
@@ -37,8 +39,33 @@ pub struct ParsedMdlMesh {
     pub version: String,
     pub vertices: Vec<MdlPuppetVertex>,
     pub indices: Vec<u16>,
+    /// Newer mesh records insert seven words before the bone indices.
+    pub extended_layout: bool,
     /// `MDLS` / `MDLA` sections found after the mesh block, in file order.
     pub sections: Vec<MdlSection>,
+}
+
+#[derive(Clone, Copy)]
+enum VertexLayout {
+    Padded,
+    Standard,
+    Extended,
+}
+
+impl VertexLayout {
+    fn stride(self) -> usize {
+        match self {
+            Self::Standard => STANDARD_VERTEX_STRIDE,
+            Self::Padded | Self::Extended => MDL_VERTEX_STRIDE,
+        }
+    }
+
+    fn bone_offset(self) -> usize {
+        match self {
+            Self::Extended => 40,
+            Self::Standard | Self::Padded => 12,
+        }
+    }
 }
 
 impl ParsedMdlMesh {
@@ -103,63 +130,86 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
     // The mesh block ends where the "MDLS" skeleton section begins (if any).
     let scan_limit = find_tag(bytes, b"MDLS", 9).unwrap_or(bytes.len());
 
-    let mut found_block: Option<(usize, usize, usize)> = None;
-    for offset in 9..scan_limit.saturating_sub(16) {
-        let Some(v_bytes) = read_u32(bytes, offset + 4) else {
-            break;
-        };
-        if v_bytes == 0 || v_bytes % MDL_VERTEX_STRIDE != 0 || v_bytes > scan_limit {
-            continue;
+    let offsets = 9..scan_limit.saturating_sub(16);
+    let find_block = |offset: usize, layout: VertexLayout| {
+        let v_start = offset + 8;
+        let v_bytes = read_u32(bytes, offset + 4)?;
+        if v_bytes == 0 || v_bytes % layout.stride() != 0 {
+            return None;
         }
-        let idx_len_pos = offset + 8 + v_bytes;
-        if idx_len_pos + 4 > scan_limit {
-            continue;
-        }
-        let Some(i_bytes) = read_u32(bytes, idx_len_pos) else {
-            continue;
-        };
-        if i_bytes > 0
-            && i_bytes % MDL_TRIANGLE_BYTES == 0
-            && idx_len_pos + 4 + i_bytes <= scan_limit
+        let i_start = v_start.checked_add(v_bytes)?.checked_add(4)?;
+        let i_bytes = read_u32(bytes, i_start - 4)?;
+        if i_bytes == 0
+            || i_bytes % MDL_TRIANGLE_BYTES != 0
+            || i_start.checked_add(i_bytes)? > scan_limit
         {
-            found_block = Some((offset + 8, v_bytes, i_bytes));
-            break;
+            return None;
         }
-    }
+        let vertex_count = v_bytes / layout.stride();
+        if !bytes[i_start..i_start + i_bytes]
+            .chunks_exact(2)
+            .all(|i| usize::from(u16::from_le_bytes([i[0], i[1]])) < vertex_count)
+        {
+            return None;
+        }
+        Some((v_start, v_bytes, i_bytes, layout))
+    };
+    let found_block = offsets
+        .clone()
+        .find_map(|offset| {
+            let layout = match read_u32(bytes, offset)? {
+                STANDARD_MESH_MARKER => VertexLayout::Standard,
+                EXTENDED_MESH_MARKER => VertexLayout::Extended,
+                _ => return None,
+            };
+            find_block(offset, layout)
+        })
+        .or_else(|| {
+            offsets
+                .clone()
+                .find_map(|offset| find_block(offset, VertexLayout::Padded))
+        })
+        .or_else(|| {
+            offsets
+                .clone()
+                .find_map(|offset| find_block(offset, VertexLayout::Standard))
+        });
 
-    let (v_start, v_bytes, i_bytes) = found_block.ok_or_else(|| {
+    let (v_start, v_bytes, i_bytes, layout) = found_block.ok_or_else(|| {
         Error::new(
             ErrorKind::InvalidData,
-            "Could not locate valid 80-byte stride mesh block in .mdl",
+            "Could not locate a valid puppet mesh block in .mdl",
         )
     })?;
 
-    let v_count = v_bytes / MDL_VERTEX_STRIDE;
+    let stride = layout.stride();
+    let v_count = v_bytes / stride;
+    let bones = layout.bone_offset();
     let mut vertices = Vec::with_capacity(v_count);
     let half_w = layer_size[0] * 0.5;
     let half_h = layer_size[1] * 0.5;
 
     for i in 0..v_count {
-        let start = v_start + i * MDL_VERTEX_STRIDE;
-        let b = &bytes[start..start + MDL_VERTEX_STRIDE];
+        let start = v_start + i * stride;
+        let b = &bytes[start..start + stride];
         let x = read_f32(b, 0);
         let y = read_f32(b, 4);
         let z = read_f32(b, 8);
         vertices.push(MdlPuppetVertex {
             position: [half_w + x, half_h - y, z],
             blend_indices: [
-                read_u32_raw(b, 12),
-                read_u32_raw(b, 16),
-                read_u32_raw(b, 20),
-                read_u32_raw(b, 24),
+                read_u32_raw(b, bones),
+                read_u32_raw(b, bones + 4),
+                read_u32_raw(b, bones + 8),
+                read_u32_raw(b, bones + 12),
             ],
             blend_weights: [
-                read_f32(b, 28),
-                read_f32(b, 32),
-                read_f32(b, 36),
-                read_f32(b, 40),
+                read_f32(b, bones + 16),
+                read_f32(b, bones + 20),
+                read_f32(b, bones + 24),
+                read_f32(b, bones + 28),
             ],
-            uv: [read_f32(b, 72), read_f32(b, 76)],
+            uv: [read_f32(b, stride - 8), read_f32(b, stride - 4)],
         });
     }
 
@@ -175,6 +225,7 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
         version,
         vertices,
         indices,
+        extended_layout: matches!(layout, VertexLayout::Extended),
         sections,
     })
 }

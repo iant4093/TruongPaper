@@ -896,12 +896,17 @@ impl SceneGraph {
         vfs: &WeVirtualFileSystem,
         model_path: &str,
     ) -> Result<LoadedKind, String> {
-        let text = vfs
-            .read_string(model_path)
-            .map_err(|e| format!("cannot read model {model_path}: {e}"))?;
-        let model = ModelJsonFile::from_json_str(&text)
-            .map_err(|e| format!("invalid model {model_path}: {e}"))?;
         let norm = normalize_path(model_path);
+        let stock_utility =
+            norm == SOLID_MODEL_PATH || COMPOSITION_MODEL_PATHS.contains(&norm.as_str());
+        let model = match vfs.read_string(model_path) {
+            Ok(text) => ModelJsonFile::from_json_str(&text)
+                .map_err(|e| format!("invalid model {model_path}: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && stock_utility => {
+                ModelJsonFile::default()
+            }
+            Err(e) => return Err(format!("cannot read model {model_path}: {e}")),
+        };
         let model_size = match (model.width, model.height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => Some(Vec2::new(w as f32, h as f32)),
             _ => None,

@@ -280,7 +280,7 @@ pub fn parse_mdl_skeleton(
         .iter()
         .find(|s| s.tag == "MDLA" && s.offset > mdls.offset)
     {
-        Some(mdla) => parse_mdla(bytes, mdla.offset, bones_num)?,
+        Some(mdla) => parse_mdla(bytes, mdla.offset, bones_num, mesh.extended_layout)?,
         None => Vec::new(),
     };
 
@@ -296,6 +296,7 @@ fn parse_mdla(
     bytes: &[u8],
     offset: usize,
     bones_num: usize,
+    extended_layout: bool,
 ) -> Result<Vec<PuppetAnimation>, PuppetError> {
     let mut r = Reader { bytes, pos: offset };
     let version_str = r.cstr("MDLA version")?;
@@ -353,7 +354,11 @@ fn parse_mdla(
             }
             bone_frames.push(frames);
         }
-        if version == 3 {
+        if extended_layout {
+            // Extended mesh exports pad the next clip's ID with byte-sized fields.
+            let padding = if version >= 6 { 3 } else { 2 };
+            r.skip(padding, "extended MDLA trailer")?;
+        } else if version == 3 {
             r.skip(1, "MDLA3 trailer")?;
         } else {
             let n = r.u32("animation event count")? as usize;
@@ -495,6 +500,126 @@ impl PuppetAnimator {
             .map(|(w, o)| *w * *o)
             .collect()
     }
+}
+
+/// An animation selected by the scene, with its user properties resolved.
+#[derive(Debug, Clone, Copy)]
+pub struct PuppetLayer {
+    pub animation: i32,
+    pub blend: f32,
+    pub rate: f32,
+    pub additive: bool,
+}
+
+#[derive(Clone, Copy)]
+struct BonePose {
+    position: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+}
+
+impl From<PuppetFrame> for BonePose {
+    fn from(frame: PuppetFrame) -> Self {
+        Self {
+            position: frame.position,
+            rotation: euler_to_quat(frame.angle),
+            scale: frame.scale,
+        }
+    }
+}
+
+impl BonePose {
+    fn interpolate(self, next: Self, weight: f32) -> Self {
+        Self {
+            position: self.position.lerp(next.position, weight),
+            rotation: self.rotation.slerp(next.rotation, weight),
+            scale: self.scale.lerp(next.scale, weight),
+        }
+    }
+
+    fn add_delta(&mut self, start: Self, current: Self, weight: f32) {
+        self.position += (current.position - start.position) * weight;
+        self.scale += (current.scale - start.scale) * weight;
+        let delta = current.rotation * start.rotation.conjugate();
+        self.rotation = Quat::IDENTITY.slerp(delta, weight) * self.rotation;
+    }
+}
+
+/// Evaluates the scene's animation layers together. Additive clips apply their motion from
+/// their starting pose, which allows independent clips to animate different parts of a rig.
+pub fn layered_bone_matrices(
+    skeleton: &PuppetSkeleton,
+    layers: &[PuppetLayer],
+    time: f32,
+) -> Vec<Mat4> {
+    let active: Vec<_> = layers
+        .iter()
+        .filter_map(|layer| {
+            if !layer.blend.is_finite() || layer.blend <= 0.0 {
+                return None;
+            }
+            let clip = skeleton.animation(layer.animation)?;
+            let pair = animation_frame_pair(clip.mode, time * layer.rate, clip.fps, clip.length)?;
+            Some((layer, clip, pair))
+        })
+        .collect();
+    if active.is_empty() {
+        return vec![Mat4::IDENTITY; skeleton.bones.len()];
+    }
+
+    let mut world: Vec<Mat4> = Vec::with_capacity(skeleton.bones.len());
+    for (index, bone) in skeleton.bones.iter().enumerate() {
+        let (scale, rotation, position) = bone.transform.to_scale_rotation_translation();
+        let rest = BonePose {
+            scale,
+            rotation,
+            position,
+        };
+        let samples = || {
+            active.iter().filter_map(|(layer, clip, (a, b, t))| {
+                let track = clip.bone_frames.get(index)?;
+                let last = *track.last()?;
+                let start = BonePose::from(track[0]);
+                let frame = BonePose::from(track.get(*a).copied().unwrap_or(last))
+                    .interpolate(track.get(*b).copied().unwrap_or(last).into(), *t);
+                Some((*layer, start, frame))
+            })
+        };
+        let opaque_weight: f32 = samples()
+            .filter(|(layer, _, _)| !layer.additive)
+            .map(|(layer, _, _)| layer.blend.min(1.0))
+            .sum();
+        let mut pose = rest;
+        let mut accumulated = (1.0 - opaque_weight).max(0.0);
+        if opaque_weight == 0.0 {
+            // Character sheets can store their assembled starting pose in the clip, while the
+            // bind pose still describes the separate pieces on the source texture.
+            if let Some((_, start, _)) = samples().next() {
+                pose = start;
+            }
+        }
+        for (layer, _, frame) in samples().filter(|(layer, _, _)| !layer.additive) {
+            let weight = layer.blend.min(1.0);
+            accumulated += weight;
+            pose = pose.interpolate(frame, weight / accumulated);
+        }
+        for (layer, start, frame) in samples().filter(|(layer, _, _)| layer.additive) {
+            pose.add_delta(start, frame, layer.blend.min(1.0));
+        }
+        let parent = bone
+            .parent
+            .and_then(|p| world.get(p).copied())
+            .unwrap_or(Mat4::IDENTITY);
+        world.push(
+            parent
+                * Mat4::from_scale_rotation_translation(pose.scale, pose.rotation, pose.position),
+        );
+    }
+    world
+        .iter()
+        .zip(&skeleton.offsets)
+        .map(|(world, offset)| *world * *offset)
+        .collect()
 }
 
 /// CPU morph + skinning deformer.

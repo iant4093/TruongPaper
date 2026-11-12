@@ -1,6 +1,7 @@
 use glam::{Mat4, Vec3};
 use truongpaper_renderer::puppet::{
-    animation_frame_pair, euler_to_quat, mirror_frame_index, PuppetAnimationMode,
+    animation_frame_pair, euler_to_quat, layered_bone_matrices, mirror_frame_index,
+    PuppetAnimationMode, PuppetLayer,
 };
 use truongpaper_renderer::{
     parse_mdl_skeleton, puppet_combos, PuppetAnimator, PuppetDeformer, PuppetError,
@@ -237,6 +238,59 @@ fn parses_two_bones_and_an_animation() {
         assert_eq!(a.bone_frames[0][1].scale, Vec3::ONE);
         assert!(sk.animation(7).is_some() && sk.animation(8).is_none());
     }
+}
+
+#[test]
+fn parses_extended_mesh_and_blends_its_selected_clips() {
+    let built = build(2, &two_bones(), &moving_root_tracks(), None);
+    let mut bytes = built.bytes;
+    bytes[12..16].copy_from_slice(&0x0180000fu32.to_le_bytes());
+    for vertex in bytes[20..20 + 3 * 80].chunks_exact_mut(80) {
+        vertex[12..72].rotate_right(28);
+    }
+
+    let mdla = built.mdla_offset;
+    bytes[mdla + 7] = b'6';
+    bytes[mdla + 13..mdla + 17].copy_from_slice(&2u32.to_le_bytes());
+    let mut second_clip = bytes[mdla + 21..bytes.len() - 4].to_vec();
+    second_clip[..4].copy_from_slice(&8i32.to_le_bytes());
+    bytes.truncate(bytes.len() - 4);
+    bytes.extend([0, 0, 0]);
+    bytes.extend(second_clip);
+    bytes.extend([0, 0, 0]);
+
+    let mesh = parse_mdl(&bytes, [0.0, 0.0]).unwrap();
+    assert!(mesh.extended_layout);
+    assert_eq!(mesh.vertices[1].blend_indices, [1, 0, 0, 0]);
+    assert_eq!(mesh.vertices[1].blend_weights, [1.0, 0.0, 0.0, 0.0]);
+    let skeleton = parse_mdl_skeleton(&bytes, &mesh).unwrap();
+    assert_eq!(
+        skeleton
+            .animations
+            .iter()
+            .map(|clip| clip.id)
+            .collect::<Vec<_>>(),
+        [7, 8]
+    );
+
+    let layers = [
+        PuppetLayer {
+            animation: 7,
+            blend: 0.5,
+            rate: 1.0,
+            additive: true,
+        },
+        PuppetLayer {
+            animation: 8,
+            blend: 0.25,
+            rate: 1.0,
+            additive: true,
+        },
+    ];
+    let matrices = layered_bone_matrices(&skeleton, &layers, 0.5);
+    assert!(matrices[0]
+        .transform_point3(Vec3::ZERO)
+        .abs_diff_eq(Vec3::new(3.75, 0.0, 0.0), 1e-6));
 }
 
 #[test]

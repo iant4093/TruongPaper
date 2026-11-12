@@ -354,8 +354,28 @@ pub struct SceneObject {
     pub maxtime: Option<f32>,
     #[serde(default)]
     pub text: Option<UserBoundValue<String>>,
+    #[serde(
+        default,
+        rename = "animationlayers",
+        deserialize_with = "null_as_default"
+    )]
+    pub animation_layers: Vec<ScenePuppetAnimation>,
     #[serde(default)]
     pub effects: Vec<SceneEffectRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenePuppetAnimation {
+    #[serde(default)]
+    pub animation: i32,
+    #[serde(default = "default_visible")]
+    pub visible: UserBoundValue<bool>,
+    #[serde(default = "default_alpha")]
+    pub blend: UserBoundValue<f32>,
+    #[serde(default = "default_alpha")]
+    pub rate: UserBoundValue<f32>,
+    #[serde(default)]
+    pub additive: bool,
 }
 fn default_visible() -> UserBoundValue<bool> {
     UserBoundValue::Plain(true)

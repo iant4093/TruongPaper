@@ -34,8 +34,8 @@ use std::task::{Context, Poll, Waker};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use truongpaper_we_formats::{
-    decode_tex_mipmap_to_rgba8, parse_mdl, parse_tex, parse_vec_components, MdlPuppetVertex,
-    TexFormat, WeVirtualFileSystem, FIF_UNKNOWN,
+    decode_tex_mipmap_to_rgba8, parse_mdl, parse_tex, parse_vec_components, resolve_bound_bool,
+    resolve_bound_value, MdlPuppetVertex, TexFormat, WeVirtualFileSystem, FIF_UNKNOWN,
 };
 use wgpu::util::DeviceExt;
 
@@ -45,13 +45,15 @@ use crate::effect_chain::{
 };
 use crate::json::Value;
 use crate::particles::SpriteParticleVertex;
-use crate::puppet::{parse_mdl_skeleton, PuppetAnimator, PuppetDeformer, PuppetSkeleton};
+use crate::puppet::{
+    layered_bone_matrices, parse_mdl_skeleton, PuppetDeformer, PuppetLayer, PuppetSkeleton,
+};
 use crate::scene_assets::{material_texture_path, shader_stage_paths, MaterialFile};
 use crate::scene_graph::{CameraState, SceneGraph, SceneLayer, SceneLayerKind};
 use crate::scene_math::PassMatrices;
 use crate::shader_preprocessor::{
-    compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader,
-    ReflectedUniformField, UniformCommentMetadata, WeShaderStage, WE_SAMPLER_BINDING_OFFSET,
+    compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
+    ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
 use crate::video_runtime::{tightly_packed_rows, VideoFrame, VideoPixelFormat};
 
@@ -532,6 +534,7 @@ struct SimpleUniforms {
 @group(0) @binding(0) var<uniform> u: SimpleUniforms;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_sampler: sampler;
+@group(1) @binding(0) var scene_backdrop: texture_2d<f32>;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -553,6 +556,19 @@ fn vs_main(v: VsIn) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(src_tex, src_sampler, in.uv) * u.color;
+}
+
+@fragment
+fn fs_layer_color(in: VsOut) -> @location(0) vec4<f32> {
+    let src = textureSample(src_tex, src_sampler, in.uv);
+    let dst = textureLoad(scene_backdrop, vec2<i32>(in.position.xy), 0);
+    let alpha = clamp(src.a, 0.0, 1.0);
+    let screen = src.rgb + dst.rgb - src.rgb * dst.rgb;
+    let low = dst.rgb - (1.0 - 2.0 * src.rgb) * dst.rgb * (1.0 - dst.rgb);
+    let high = dst.rgb + (2.0 * src.rgb - 1.0) * (sqrt(max(dst.rgb, vec3(0.0))) - dst.rgb);
+    let soft_light = mix(low, high, step(vec3(0.5), src.rgb));
+    let rgb = select(screen, soft_light, u.color.x == 12.0);
+    return vec4(mix(dst.rgb, rgb, alpha), alpha + dst.a * (1.0 - alpha));
 }
 "#;
 
@@ -693,15 +709,14 @@ enum GpuStep {
     Composite {
         draw: SimpleDraw,
         blending: BlendMode,
+        source: RenderTargetId,
     },
 }
 
 struct GpuPuppet {
     skeleton: PuppetSkeleton,
-    animator: PuppetAnimator,
     /// Model-space vertices (layer-local, y up).
     vertices: Vec<MdlPuppetVertex>,
-    uv_scale: [f32; 2],
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -717,6 +732,8 @@ struct GpuEffectLayer {
     effect_quad: wgpu::Buffer,
     puppet: Option<GpuPuppet>,
     is_composition: bool,
+    samples_scene: bool,
+    fullscreen: bool,
 }
 
 struct GpuParticles {
@@ -747,6 +764,9 @@ pub struct SceneRenderer {
     simple_layout: wgpu::BindGroupLayout,
     ubo_layout: wgpu::BindGroupLayout,
     composite_module: wgpu::ShaderModule,
+    color_blend_layout: wgpu::BindGroupLayout,
+    color_blend_pipeline: wgpu::RenderPipeline,
+    color_blend_backdrop: wgpu::BindGroup,
     particle_module: wgpu::ShaderModule,
     bloom_module: wgpu::ShaderModule,
     composite_pipelines: HashMap<(wgpu::TextureFormat, BlendMode), wgpu::RenderPipeline>,
@@ -754,15 +774,16 @@ pub struct SceneRenderer {
     clamp_sampler: wgpu::Sampler,
     repeat_sampler: wgpu::Sampler,
     white: GpuTexture,
+    soft_particle: wgpu::TextureView,
     fullscreen_quad: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
     textures: HashMap<String, GpuTexture>,
     /// Embedded MP4 `.tex` paths -> placeholder texture size.
     video_textures: HashMap<String, (u32, u32)>,
     layers: Vec<Option<GpuLayer>>,
+    layer_outputs: HashMap<i32, GpuTarget>,
     bloom: Option<GpuBloom>,
     blit: SimpleDraw,
-    last_time: Option<f32>,
     last_pointer: Vec2,
 }
 
@@ -938,18 +959,30 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
         return Err("decoded texture is smaller than its dimensions".into());
     }
     let h_ = &tex.header;
+    // The header describes the original storage allocation. A decoded mip may already
+    // be trimmed to the image dimensions, so UVs must follow the uploaded texture.
+    let visible_width = u32::try_from(h_.image_width)
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(w)
+        .min(w);
+    let visible_height = u32::try_from(h_.image_height)
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(h)
+        .min(h);
     let resolution = Vec4::new(
-        h_.texture_width as f32,
-        h_.texture_height as f32,
-        h_.image_width as f32,
-        h_.image_height as f32,
+        w as f32,
+        h as f32,
+        visible_width as f32,
+        visible_height as f32,
     );
     Ok(TexDecode::Image(DecodedTex {
         rgba,
         width: w,
         height: h,
         resolution,
-        uv_scale: tex.uv_scale(),
+        uv_scale: [resolution.z / resolution.x, resolution.w / resolution.y],
         format: h_.format,
     }))
 }
@@ -1084,6 +1117,23 @@ impl SceneRenderer {
             uv_scale: [1.0, 1.0],
             tex_format: None,
         };
+        const SPRITE_SIZE: u32 = 32;
+        let mut sprite = Vec::with_capacity((SPRITE_SIZE * SPRITE_SIZE * 4) as usize);
+        for y in 0..SPRITE_SIZE {
+            for x in 0..SPRITE_SIZE {
+                let uv = (Vec2::new(x as f32, y as f32) + Vec2::splat(0.5)) / SPRITE_SIZE as f32;
+                let falloff = (1.0 - (uv * 2.0 - Vec2::ONE).length()).max(0.0);
+                sprite.extend_from_slice(&[255, 255, 255, (255.0 * falloff.powf(1.5)) as u8]);
+            }
+        }
+        let (_, soft_particle) = upload_rgba(
+            device,
+            queue,
+            "scene_soft_particle",
+            SPRITE_SIZE,
+            SPRITE_SIZE,
+            &sprite,
+        );
         let fullscreen_quad = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_fullscreen_quad"),
             contents: bytemuck::cast_slice(&layer_quad_vertices(Vec2::splat(2.0), [1.0, 1.0])),
@@ -1096,6 +1146,30 @@ impl SceneRenderer {
         });
         let scene = create_target(device, "scene_target", w, h, SCENE_FORMAT);
         let full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, SCENE_FORMAT);
+        let color_blend_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("scene_color_blend_backdrop"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                }],
+            });
+        let color_blend_pipeline = Self::build_composite_pipeline(
+            device,
+            &composite_module,
+            &[&simple_layout, &color_blend_layout],
+            SCENE_FORMAT,
+            BlendMode::Normal,
+            "fs_layer_color",
+        );
+        let color_blend_backdrop =
+            Self::make_backdrop_group(device, &color_blend_layout, &full_frame.view);
 
         let mut renderer = Self {
             target_format,
@@ -1111,6 +1185,9 @@ impl SceneRenderer {
             simple_layout,
             ubo_layout,
             composite_module,
+            color_blend_layout,
+            color_blend_pipeline,
+            color_blend_backdrop,
             particle_module,
             bloom_module,
             composite_pipelines: HashMap::new(),
@@ -1118,13 +1195,14 @@ impl SceneRenderer {
             clamp_sampler,
             repeat_sampler,
             white,
+            soft_particle,
             fullscreen_quad,
             quad_indices,
             textures: HashMap::new(),
             video_textures: HashMap::new(),
             layers: Vec::new(),
+            layer_outputs: HashMap::new(),
             bloom: None,
-            last_time: None,
             last_pointer: Vec2::splat(0.5),
         };
         for blend in [
@@ -1195,23 +1273,42 @@ impl SceneRenderer {
         if self.composite_pipelines.contains_key(&(format, blend)) {
             return;
         }
+        let pipeline = Self::build_composite_pipeline(
+            device,
+            &self.composite_module,
+            &[&self.simple_layout],
+            format,
+            blend,
+            "fs_main",
+        );
+        self.composite_pipelines.insert((format, blend), pipeline);
+    }
+
+    fn build_composite_pipeline(
+        device: &wgpu::Device,
+        module: &wgpu::ShaderModule,
+        bind_group_layouts: &[&wgpu::BindGroupLayout],
+        format: wgpu::TextureFormat,
+        blend: BlendMode,
+        fragment: &str,
+    ) -> wgpu::RenderPipeline {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene_composite_layout"),
-            bind_group_layouts: &[&self.simple_layout],
+            bind_group_layouts,
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene_composite"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
-                module: &self.composite_module,
+                module,
                 entry_point: Some("vs_main"),
                 buffers: &[layer_vertex_layout(&COMPOSITE_ATTRS)],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &self.composite_module,
-                entry_point: Some("fs_main"),
+                module,
+                entry_point: Some(fragment),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: blend.to_wgpu_blend(),
@@ -1224,8 +1321,22 @@ impl SceneRenderer {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
-        });
-        self.composite_pipelines.insert((format, blend), pipeline);
+        })
+    }
+
+    fn make_backdrop_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_color_blend_backdrop"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
+        })
     }
 
     fn ensure_particle_pipeline(&mut self, device: &wgpu::Device, blend: BlendMode) {
@@ -1331,7 +1442,7 @@ impl SceneRenderer {
                 true
             }
             Err(e) => {
-                let msg = format!("texture {path}: {e}; using a white placeholder");
+                let msg = format!("texture {path}: {e}; using a fallback texture");
                 tracing::warn!("{msg}");
                 warnings.push(msg);
                 false
@@ -1416,6 +1527,7 @@ impl SceneRenderer {
         let t = match id {
             RenderTargetId::FullFrame => Some(&self.full_frame),
             RenderTargetId::Scene => Some(&self.scene),
+            RenderTargetId::LayerOutput(id) => self.layer_outputs.get(id),
             other => targets.get(other),
         };
         match t {
@@ -1455,24 +1567,9 @@ impl SceneRenderer {
             }
         }
         let (vpath, fpath) = shader_stage_paths(shader);
-        let vert = preprocess_we_shader(
-            vfs,
-            &vpath,
-            WeShaderStage::Vertex,
-            combos,
-            tex0_format,
-            &bound,
-        )
-        .map_err(|e| format!("{vpath}: {e}"))?;
-        let frag = preprocess_we_shader(
-            vfs,
-            &fpath,
-            WeShaderStage::Fragment,
-            combos,
-            tex0_format,
-            &bound,
-        )
-        .map_err(|e| format!("{fpath}: {e}"))?;
+        let (vert, frag) =
+            preprocess_we_shader_pair(vfs, &vpath, &fpath, combos, tex0_format, &bound)
+                .map_err(|e| format!("{vpath}, {fpath}: {e}"))?;
         let compiled = with_validation(device, || {
             compile_we_shader_pair(device, shader, &vert, &frag)
         })??;
@@ -1588,16 +1685,62 @@ impl SceneRenderer {
         if (self.scene.width, self.scene.height) != (w, h) {
             self.scene = create_target(device, "scene_target", w, h, SCENE_FORMAT);
             self.full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, SCENE_FORMAT);
+            self.color_blend_backdrop =
+                Self::make_backdrop_group(device, &self.color_blend_layout, &self.full_frame.view);
             self.blit = self.make_simple_draw(device, &self.scene.view);
         }
         self.layers.clear();
+        self.layer_outputs.clear();
         self.bloom = None;
-        self.last_time = None;
 
-        for layer in &graph.layers {
+        let mut plans: Vec<_> = graph
+            .layers
+            .iter()
+            .map(|layer| {
+                matches!(
+                    layer.kind,
+                    SceneLayerKind::Image { .. } | SceneLayerKind::Composition { .. }
+                )
+                .then(|| EffectChainPlan::build(vfs, layer, &graph.user_props))
+            })
+            .collect();
+        let referenced: std::collections::HashSet<_> = plans
+            .iter()
+            .flatten()
+            .flat_map(|plan| plan.passes())
+            .flat_map(|pass| pass.textures.values())
+            .filter_map(|binding| match binding {
+                TextureBinding::Target(RenderTargetId::LayerOutput(id)) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for (layer, plan) in graph.layers.iter().zip(&plans) {
+            if let (Some(id), Some(plan)) = (layer.id, plan) {
+                if referenced.contains(&id) {
+                    self.layer_outputs.insert(
+                        id,
+                        create_target(
+                            device,
+                            "scene_layer_output",
+                            plan.width,
+                            plan.height,
+                            SCENE_FORMAT,
+                        ),
+                    );
+                }
+            }
+        }
+        for (layer, plan) in graph.layers.iter().zip(plans.drain(..)) {
             let gpu = match &layer.kind {
                 SceneLayerKind::Image { .. } | SceneLayerKind::Composition { .. } => self
-                    .load_effect_layer(device, queue, vfs, graph, layer, &mut warnings)
+                    .load_effect_layer(
+                        device,
+                        queue,
+                        vfs,
+                        layer,
+                        plan.expect("image effect plan"),
+                        &mut warnings,
+                    )
                     .map(|l| GpuLayer::Effects(Box::new(l))),
                 SceneLayerKind::Solid { .. } => Some(GpuLayer::Solid(Self::make_simple_draw_raw(
                     device,
@@ -1639,12 +1782,12 @@ impl SceneRenderer {
                         .as_deref()
                         .and_then(|p| self.textures.get(p))
                         .map(|t| &t.view)
-                        .unwrap_or(&self.white.view);
+                        .unwrap_or(&self.soft_particle);
                     let draw = Self::make_simple_draw_raw(
                         device,
                         &self.simple_layout,
                         view,
-                        &self.repeat_sampler,
+                        &self.clamp_sampler,
                         SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
                     );
                     let capacity = spec.maxcount.clamp(1, 10_000) as usize;
@@ -1686,13 +1829,23 @@ impl SceneRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         vfs: &WeVirtualFileSystem,
-        graph: &SceneGraph,
         layer: &SceneLayer,
+        plan: EffectChainPlan,
         warnings: &mut Vec<String>,
     ) -> Option<GpuEffectLayer> {
-        let plan = EffectChainPlan::build(vfs, layer, &graph.user_props);
         warnings.extend(plan.warnings.iter().cloned());
         let is_composition = matches!(layer.kind, SceneLayerKind::Composition { .. });
+        let fullscreen = matches!(&layer.kind, SceneLayerKind::Composition { model, model_path, .. }
+            if model.fullscreen == Some(true) || model_path.eq_ignore_ascii_case("models/util/fullscreenlayer.json"));
+        let samples_scene = is_composition
+            && !plan.passes().any(|pass| {
+                pass.textures.values().any(|binding| {
+                    matches!(
+                        binding,
+                        TextureBinding::Target(RenderTargetId::LayerOutput(_))
+                    )
+                })
+            });
 
         // Phase 1 (mutable): textures and pipelines.
         let mut asset_paths: Vec<String> = Vec::new();
@@ -1735,7 +1888,7 @@ impl SceneRenderer {
         let layer_size = Vec2::new(plan.width as f32, plan.height as f32);
 
         let (mut base, mut base_copy, mut base_uv) = (None, None, [1.0f32, 1.0]);
-        if is_composition {
+        if samples_scene {
             base_copy = Some(self.make_simple_draw(device, &self.full_frame.view));
         } else if let SceneLayerKind::Image {
             material,
@@ -1838,7 +1991,22 @@ impl SceneRenderer {
                                 );
                                 tracing::warn!("{msg}");
                                 warnings.push(msg);
-                                GpuStep::Pass(None)
+                                if p.swaps {
+                                    let source = if p.target == RenderTargetId::FboA {
+                                        RenderTargetId::FboB
+                                    } else {
+                                        RenderTargetId::FboA
+                                    };
+                                    GpuStep::Copy {
+                                        draw: self.make_simple_draw(
+                                            device,
+                                            self.target_binding(&source, &targets).view,
+                                        ),
+                                        target: p.target.clone(),
+                                    }
+                                } else {
+                                    GpuStep::Pass(None)
+                                }
                             }
                         }
                     }
@@ -1850,6 +2018,7 @@ impl SceneRenderer {
                 EffectStep::Composite { source, blending } => GpuStep::Composite {
                     draw: self.make_simple_draw(device, self.target_binding(source, &targets).view),
                     blending: *blending,
+                    source: source.clone(),
                 },
             });
         }
@@ -1868,7 +2037,7 @@ impl SceneRenderer {
             SceneLayerKind::Image {
                 puppet_path: Some(path),
                 ..
-            } => match Self::load_puppet(device, vfs, path, base_uv) {
+            } => match Self::load_puppet(device, vfs, path) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     let msg = format!(
@@ -1893,6 +2062,8 @@ impl SceneRenderer {
             effect_quad,
             puppet,
             is_composition,
+            samples_scene,
+            fullscreen,
         })
     }
 
@@ -1900,7 +2071,6 @@ impl SceneRenderer {
         device: &wgpu::Device,
         vfs: &WeVirtualFileSystem,
         path: &str,
-        uv_scale: [f32; 2],
     ) -> Result<GpuPuppet, String> {
         let bytes = vfs.read_bytes(path).map_err(|e| e.to_string())?;
         // Layer size 0 keeps file coordinates (x, -y); flip y back to model space (y up).
@@ -1929,12 +2099,9 @@ impl SceneRenderer {
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let animation_id = skeleton.animations.first().map(|a| a.id);
         Ok(GpuPuppet {
-            animator: PuppetAnimator::new(animation_id),
             skeleton,
             vertices,
-            uv_scale,
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
@@ -2049,11 +2216,6 @@ impl SceneRenderer {
         camera: &CameraState,
         frame: &FrameUniformInputs,
     ) {
-        let dt = self
-            .last_time
-            .map(|t| (frame.time - t).max(0.0))
-            .unwrap_or(0.0);
-        self.last_time = Some(frame.time);
         let pointer_last = self.last_pointer;
         self.last_pointer = frame.pointer;
         let daytime = std::time::SystemTime::now()
@@ -2106,7 +2268,11 @@ impl SceneRenderer {
         let layer_count = graph.layers.len().min(self.layers.len());
         for li in 0..layer_count {
             let layer = &graph.layers[li];
-            if !layer.visible {
+            if !layer.visible
+                && layer
+                    .id
+                    .is_none_or(|id| !self.layer_outputs.contains_key(&id))
+            {
                 continue;
             }
             let matrices = graph.layer_pass_matrices(li, camera);
@@ -2114,14 +2280,36 @@ impl SceneRenderer {
                 Some(GpuLayer::Effects(fx)) => {
                     // Puppet deformation (CPU skinning).
                     if let Some(p) = fx.puppet.as_mut() {
-                        let bones = p.animator.bone_matrices(&p.skeleton, dt);
+                        let configured = &graph.scene.objects[layer.object_index].animation_layers;
+                        let mut clips: Vec<_> = configured
+                            .iter()
+                            .filter(|clip| resolve_bound_bool(&clip.visible, &graph.user_props))
+                            .map(|clip| PuppetLayer {
+                                animation: clip.animation,
+                                blend: resolve_bound_value(&clip.blend, &graph.user_props),
+                                rate: resolve_bound_value(&clip.rate, &graph.user_props),
+                                additive: clip.additive,
+                            })
+                            .collect();
+                        if configured.is_empty() {
+                            if let Some(clip) = p.skeleton.animations.first() {
+                                clips.push(PuppetLayer {
+                                    animation: clip.id,
+                                    blend: 1.0,
+                                    rate: 1.0,
+                                    additive: false,
+                                });
+                            }
+                        }
+                        let bones = layered_bone_matrices(&p.skeleton, &clips, frame.time);
                         let positions = PuppetDeformer::deform(&p.vertices, &bones, &[]);
                         let verts: Vec<LayerVertex> = positions
                             .iter()
                             .zip(&p.vertices)
                             .map(|(pos, v)| LayerVertex {
                                 position: *pos,
-                                texcoord: [v.uv[0] * p.uv_scale[0], v.uv[1] * p.uv_scale[1]],
+                                // Base and effect passes already crop the source padding.
+                                texcoord: v.uv,
                             })
                             .collect();
                         if !verts.is_empty() {
@@ -2246,7 +2434,8 @@ impl SceneRenderer {
         matrices: &PassMatrices,
         base_values: &UniformValues,
     ) {
-        if fx.plan.uses_full_frame_buffer || fx.is_composition {
+        let color_blend = matches!(layer.color_blend_mode, 7 | 12) && layer.visible;
+        if fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend {
             encoder.copy_texture_to_texture(
                 self.scene.texture.as_image_copy(),
                 self.full_frame.texture.as_image_copy(),
@@ -2301,24 +2490,12 @@ impl SceneRenderer {
                             rp.set_pipeline(&base.pipeline);
                             rp.set_bind_group(0, &base.uniform_bind_group, &[]);
                             rp.set_bind_group(1, &base.texture_bind_group, &[]);
-                            match &fx.puppet {
-                                Some(p) if p.index_count > 0 => {
-                                    rp.set_vertex_buffer(0, p.vertex_buffer.slice(..));
-                                    rp.set_index_buffer(
-                                        p.index_buffer.slice(..),
-                                        wgpu::IndexFormat::Uint16,
-                                    );
-                                    rp.draw_indexed(0..p.index_count, 0, 0..1);
-                                }
-                                _ => {
-                                    rp.set_vertex_buffer(0, fx.base_quad.slice(..));
-                                    rp.set_index_buffer(
-                                        self.quad_indices.slice(..),
-                                        wgpu::IndexFormat::Uint16,
-                                    );
-                                    rp.draw_indexed(0..6, 0, 0..1);
-                                }
-                            }
+                            rp.set_vertex_buffer(0, fx.base_quad.slice(..));
+                            rp.set_index_buffer(
+                                self.quad_indices.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            rp.draw_indexed(0..6, 0, 0..1);
                         });
                     } else if let Some(draw) = &fx.base_copy {
                         let (mvp, vb, color) = if fx.is_composition {
@@ -2347,6 +2524,14 @@ impl SceneRenderer {
                             );
                             rp.draw_indexed(0..6, 0, 0..1);
                         });
+                    } else {
+                        run_pass(
+                            encoder,
+                            "scene_layer_clear",
+                            view,
+                            Some(wgpu::Color::BLACK),
+                            |_| {},
+                        );
                     }
                 }
                 GpuStep::Pass(Some(pass)) => {
@@ -2387,16 +2572,49 @@ impl SceneRenderer {
                         rp.draw_indexed(0..6, 0, 0..1);
                     });
                 }
-                GpuStep::Composite { draw, blending } => {
+                GpuStep::Composite {
+                    draw,
+                    blending,
+                    source,
+                } => {
+                    if let Some(output) = layer.id.and_then(|id| self.layer_outputs.get(&id)) {
+                        if let Some(source) = fx.targets.get(source) {
+                            encoder.copy_texture_to_texture(
+                                source.texture.as_image_copy(),
+                                output.texture.as_image_copy(),
+                                output.texture.size(),
+                            );
+                        }
+                    }
+                    if !layer.visible {
+                        continue;
+                    }
                     queue.write_buffer(
                         &draw.uniform,
                         0,
                         bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            Vec4::ONE,
+                            if fx.fullscreen {
+                                Mat4::IDENTITY
+                            } else {
+                                matrices.model_view_projection
+                            },
+                            if color_blend {
+                                Vec4::splat(layer.color_blend_mode as f32)
+                            } else {
+                                Vec4::ONE
+                            },
                         )),
                     );
-                    let pipeline = &self.composite_pipelines[&(SCENE_FORMAT, *blending)];
+                    let blend = if fx.is_composition && !fx.samples_scene {
+                        BlendMode::Translucent
+                    } else {
+                        *blending
+                    };
+                    let pipeline = if color_blend {
+                        &self.color_blend_pipeline
+                    } else {
+                        &self.composite_pipelines[&(SCENE_FORMAT, blend)]
+                    };
                     run_pass(
                         encoder,
                         "scene_layer_composite",
@@ -2405,12 +2623,23 @@ impl SceneRenderer {
                         |rp| {
                             rp.set_pipeline(pipeline);
                             rp.set_bind_group(0, &draw.bind_group, &[]);
-                            rp.set_vertex_buffer(0, fx.effect_quad.slice(..));
-                            rp.set_index_buffer(
-                                self.quad_indices.slice(..),
-                                wgpu::IndexFormat::Uint16,
-                            );
-                            rp.draw_indexed(0..6, 0, 0..1);
+                            if color_blend {
+                                rp.set_bind_group(1, &self.color_blend_backdrop, &[]);
+                            }
+                            // Effects operate on the source image. Warp the finished image
+                            // when drawing into the scene, where bones can move past the quad.
+                            let (vb, ib, count) = match &fx.puppet {
+                                Some(p) if p.index_count > 0 => {
+                                    (&p.vertex_buffer, &p.index_buffer, p.index_count)
+                                }
+                                _ if fx.fullscreen => {
+                                    (&self.fullscreen_quad, &self.quad_indices, 6)
+                                }
+                                _ => (&fx.effect_quad, &self.quad_indices, 6),
+                            };
+                            rp.set_vertex_buffer(0, vb.slice(..));
+                            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+                            rp.draw_indexed(0..count, 0, 0..1);
                         },
                     );
                 }

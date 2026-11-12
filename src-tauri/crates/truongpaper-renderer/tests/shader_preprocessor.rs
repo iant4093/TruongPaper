@@ -5,7 +5,7 @@ mod common;
 use common::TempDir;
 use std::collections::HashMap;
 use truongpaper_renderer::shader_preprocessor::{
-    lighting_v1_stub, we_glsl_preamble, WE_SAMPLER_BINDING_OFFSET,
+    lighting_v1_stub, preprocess_we_shader_pair, we_glsl_preamble, WE_SAMPLER_BINDING_OFFSET,
 };
 use truongpaper_renderer::*;
 use truongpaper_we_formats::{TexFormat, WeVirtualFileSystem};
@@ -25,6 +25,32 @@ fn pp(
     slots: &[bool; 8],
 ) -> String {
     preprocess_we_shader(vfs, path, stage, combos, tex0, slots).expect("preprocess")
+}
+
+#[test]
+fn sampler_combo_is_shared_by_both_shader_stages() {
+    let tmp = TempDir::new("shared_combo");
+    tmp.write(
+        "wall/shaders/test.vert",
+        "#if MASK\nvarying vec2 v_MaskUv;\n#endif",
+    );
+    tmp.write(
+        "wall/shaders/test.frag",
+        "uniform sampler2D g_Texture1; // {\"combo\":\"MASK\"}",
+    );
+    let mut slots = NO_SLOTS;
+    slots[1] = true;
+    let (vertex, fragment) = preprocess_we_shader_pair(
+        &mount(&tmp),
+        "shaders/test.vert",
+        "shaders/test.frag",
+        &HashMap::new(),
+        None,
+        &slots,
+    )
+    .unwrap();
+    assert!(vertex.contains("#define MASK 1\n"));
+    assert!(fragment.contains("#define MASK 1\n"));
 }
 
 // ------------------------------------------------------------------------------------------

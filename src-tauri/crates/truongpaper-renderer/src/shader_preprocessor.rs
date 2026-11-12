@@ -76,6 +76,43 @@ pub fn preprocess_we_shader(
     bound_texture_slots: &[bool; 8],
 ) -> IoResult<String> {
     let raw_source = vfs.read_string(shader_virtual_path)?;
+    let combos = shader_combos(
+        &[&raw_source],
+        pass_combos,
+        tex0_format,
+        bound_texture_slots,
+    );
+    prepare_shader_stage(vfs, &raw_source, stage, &combos)
+}
+
+pub fn preprocess_we_shader_pair(
+    vfs: &WallpaperVfs,
+    vertex_path: &str,
+    fragment_path: &str,
+    pass_combos: &HashMap<String, i32>,
+    tex0_format: Option<TexFormat>,
+    bound_texture_slots: &[bool; 8],
+) -> IoResult<(String, String)> {
+    let vertex = vfs.read_string(vertex_path)?;
+    let fragment = vfs.read_string(fragment_path)?;
+    let combos = shader_combos(
+        &[&vertex, &fragment],
+        pass_combos,
+        tex0_format,
+        bound_texture_slots,
+    );
+    Ok((
+        prepare_shader_stage(vfs, &vertex, WeShaderStage::Vertex, &combos)?,
+        prepare_shader_stage(vfs, &fragment, WeShaderStage::Fragment, &combos)?,
+    ))
+}
+
+fn shader_combos(
+    sources: &[&str],
+    pass_combos: &HashMap<String, i32>,
+    tex0_format: Option<TexFormat>,
+    bound_texture_slots: &[bool; 8],
+) -> HashMap<String, i32> {
     let mut combos = pass_combos.clone();
 
     // Rule 1: Automatic TEX0FORMAT injection for RG88 (8) and R8 (9)
@@ -92,7 +129,7 @@ pub fn preprocess_we_shader(
     }
 
     // Parse // [COMBO] JSON lines & Rule 2: Sampler comment combo auto-activation
-    for line in raw_source.lines() {
+    for line in sources.iter().flat_map(|source| source.lines()) {
         let trimmed = line.trim();
         if let Some(json_str) = trimmed.strip_prefix("// [COMBO]") {
             if let Ok(val) = Value::parse(json_str.trim()) {
@@ -117,9 +154,17 @@ pub fn preprocess_we_shader(
             }
         }
     }
+    combos
+}
 
+fn prepare_shader_stage(
+    vfs: &WallpaperVfs,
+    raw_source: &str,
+    stage: WeShaderStage,
+    combos: &HashMap<String, i32>,
+) -> IoResult<String> {
     // Recursively expand #include "..." directives via 4-layer VFS
-    let expanded_body = expand_includes_recursive(vfs, &raw_source, 0)?;
+    let expanded_body = expand_includes_recursive(vfs, raw_source, 0)?;
 
     let mut out = String::with_capacity(expanded_body.len() + 2048);
     out.push_str(WE_GLSL_PREAMBLE);
@@ -481,7 +526,7 @@ fn upgrade_to_naga_glsl450(
                 continue;
             }
             if let Some(rest) = t.strip_prefix("varying ") {
-                let decl = rest.trim_end_matches(';');
+                let decl = rest.split(';').next().unwrap_or(rest);
                 let var_name = decl.split_whitespace().last().unwrap_or("").to_string();
                 let loc = *varying_locs.entry(var_name).or_insert_with(|| {
                     let l = *next_loc;

@@ -106,6 +106,8 @@ pub enum RenderTargetId {
     },
     /// `_rt_FullFrameBuffer`.
     FullFrame,
+    /// Output of another image layer, sampled by composition effects.
+    LayerOutput(i32),
     /// The scene color target.
     Scene,
 }
@@ -245,6 +247,13 @@ impl Resolver<'_> {
     }
 
     fn texture(&self, name: &str, current: &RenderTargetId) -> TextureBinding {
+        if let Some(id) = name
+            .strip_prefix("_rt_imageLayerComposite_")
+            .and_then(|name| name.strip_suffix("_a"))
+            .and_then(|id| id.parse().ok())
+        {
+            return TextureBinding::Target(RenderTargetId::LayerOutput(id));
+        }
         match self.target(name, current) {
             Some(t) => TextureBinding::Target(t),
             None if name.starts_with("_rt_") => {

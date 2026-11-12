@@ -104,6 +104,18 @@ impl WeVirtualFileSystem {
             "__video_host__.html",
             include_bytes!("../../truongpaper-platform/src/video-wallpaper-host.html"),
         );
+        builtin_virtual_files.insert(
+            "shaders/common.h",
+            include_bytes!("shader_fallbacks/common.glsl"),
+        );
+        builtin_virtual_files.insert(
+            "shaders/common_blending.h",
+            include_bytes!("shader_fallbacks/blending.glsl"),
+        );
+        builtin_virtual_files.insert(
+            "shaders/common_perspective.h",
+            include_bytes!("shader_fallbacks/perspective.glsl"),
+        );
 
         Self {
             wallpaper_dir,

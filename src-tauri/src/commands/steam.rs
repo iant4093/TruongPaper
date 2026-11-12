@@ -30,7 +30,6 @@ use truongpaper_steam::{
 };
 
 const SECRET_STEAM_USERNAME: &str = "steam_username";
-const SECRET_STEAM_REFRESH_TOKEN: &str = "steam_refresh_token";
 /// Sidecar name as declared in `tauri.conf.json` `bundle.externalBin`.
 const SIDECAR_NAME: &str = "DepotDownloader";
 
@@ -43,6 +42,8 @@ pub struct SteamSession {
     tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Task ids of sign-in runs, so a closed sign-in window can stop its QR session.
     logins: Mutex<HashSet<u64>>,
+    /// Whether the old keychain copy of the account name has been looked up this launch.
+    legacy_checked: std::sync::atomic::AtomicBool,
     next_id: AtomicU64,
 }
 
@@ -261,10 +262,51 @@ fn emit_auth(app: &AppHandle, ev: &SidecarEvent) {
     }
 }
 
-fn saved_username() -> Result<String, String> {
-    VAULT
-        .get(SECRET_STEAM_USERNAME)?
+fn saved_username(session: &SteamSession) -> Result<String, String> {
+    session
+        .account()
         .ok_or_else(|| "Sign in to Steam first (QR code or username/password)".to_string())
+}
+
+/// The Steam account name is not a secret (DepotDownloader keeps the real sign-in token in
+/// its own folder), so it lives in a plain file. Reading the keychain made macOS ask for the
+/// login password every time a rebuilt, ad-hoc signed app checked who was signed in.
+const ACCOUNT_FILE: &str = "account-name.txt";
+
+impl SteamSession {
+    fn account_path(&self) -> PathBuf {
+        self.working_dir.join(ACCOUNT_FILE)
+    }
+
+    /// Saved account name. Older builds kept it in the keychain; it is moved once.
+    pub fn account(&self) -> Option<String> {
+        if let Ok(name) = std::fs::read_to_string(self.account_path()) {
+            let name = name.trim();
+            return (!name.is_empty()).then(|| name.to_string());
+        }
+        if !self.legacy_checked.swap(true, Ordering::Relaxed) {
+            if let Ok(Some(name)) = VAULT.get(SECRET_STEAM_USERNAME) {
+                let _ = self.set_account(Some(&name));
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    pub fn set_account(&self, name: Option<&str>) -> Result<(), String> {
+        let path = self.account_path();
+        match name.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(name) => {
+                std::fs::create_dir_all(&self.working_dir).map_err(|e| e.to_string())?;
+                std::fs::write(&path, name).map_err(|e| e.to_string())
+            }
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
 }
 
 fn emit_progress(
@@ -369,7 +411,7 @@ pub async fn steam_download_workshop_item(
     let workshop_id = parse_workshop_url_or_id(&url_or_id).map_err(|e| e.to_string())?;
     let _download = state.steam.track_download(&workshop_id)?;
     let username = match source.unwrap_or(WorkshopDownloadSource::Steam) {
-        WorkshopDownloadSource::Steam => Some(saved_username()?),
+        WorkshopDownloadSource::Steam => Some(saved_username(&state.steam)?),
         WorkshopDownloadSource::GgNetwork => None,
     };
     let title = match fetch_workshop_preview(&state.http, &workshop_id).await {
@@ -452,7 +494,7 @@ pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Resul
     }
     result.unwrap()?;
     let account = account.ok_or_else(|| "Steam signed in, but the downloader did not report the account name. Try Username & 2FA.".to_string())?;
-    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))?;
+    state.steam.set_account(Some(&account))?;
     Ok(account)
 }
 
@@ -465,8 +507,8 @@ pub async fn steam_cancel_login(state: State<'_, AppState>) -> Result<(), String
 
 /// Saved Steam account name, or `None` when signed out.
 #[tauri::command]
-pub async fn steam_account() -> Result<Option<String>, String> {
-    VAULT.get(SECRET_STEAM_USERNAME)
+pub async fn steam_account(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.steam.account())
 }
 
 /// `-username -password` login; `steam-auth://need-2fa` is emitted when Steam Guard asks.
@@ -490,7 +532,7 @@ pub async fn steam_login_credentials(
         }
     }
     let account = username.trim().to_string();
-    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))?;
+    state.steam.set_account(Some(&account))?;
     Ok(account)
 }
 
@@ -512,8 +554,10 @@ pub async fn steam_submit_2fa_code(state: State<'_, AppState>, code: String) -> 
 #[tauri::command]
 pub async fn steam_logout(state: State<'_, AppState>) -> Result<(), String> {
     state.steam.abort_all();
-    VAULT.put(SECRET_STEAM_USERNAME, None)?;
-    VAULT.put(SECRET_STEAM_REFRESH_TOKEN, None)
+    state.steam.set_account(None)?;
+    // Remove a copy left by older builds without reading it first (a read can prompt).
+    let _ = VAULT.clear_all();
+    Ok(())
 }
 
 #[tauri::command]
@@ -574,6 +618,22 @@ mod tests {
         assert_eq!(payload, json!({"kind": "email", "prompt": "STEAM GUARD!"}));
         assert!(auth_event_payload(&SidecarEvent::Completed).is_none());
         assert!(auth_event_payload(&SidecarEvent::ProgressPercent(3.0)).is_none());
+    }
+
+    #[test]
+    fn account_name_lives_in_a_plain_file() {
+        let dir = std::env::temp_dir().join(format!("tp-steam-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = SteamSession::new(dir.clone());
+        // Skip the keychain lookup that only migrates older installs.
+        session.legacy_checked.store(true, Ordering::Relaxed);
+        assert_eq!(session.account(), None);
+        session.set_account(Some(" ian ")).unwrap();
+        assert_eq!(session.account().as_deref(), Some("ian"));
+        session.set_account(None).unwrap();
+        assert_eq!(session.account(), None);
+        session.set_account(None).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

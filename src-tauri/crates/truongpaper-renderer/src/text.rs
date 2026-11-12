@@ -377,7 +377,9 @@ pub fn load_font(vfs: &WeVirtualFileSystem, font: Option<&str>) -> Result<FontVe
             match vfs.read_bytes(name) {
                 Ok(bytes) => match font_from_bytes(bytes) {
                     Some(f) => return Ok(f),
-                    None => tracing::debug!("font {name} is not a valid font file; using a system font"),
+                    None => {
+                        tracing::debug!("font {name} is not a valid font file; using a system font")
+                    }
                 },
                 Err(e) => tracing::debug!("cannot read font {name}: {e}; using a system font"),
             }

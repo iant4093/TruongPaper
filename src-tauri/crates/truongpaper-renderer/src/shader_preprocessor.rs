@@ -369,12 +369,22 @@ fn truncate_arithmetic_texcoord(src: &str) -> String {
         while let Some(idx) = rest.find(NAME) {
             let before = &rest[..idx];
             let after = &rest[idx + NAME.len()..];
-            let word_start = !before.chars().next_back().is_some_and(|c| is_ident(c) || c == '.');
+            let word_start = !before
+                .chars()
+                .next_back()
+                .is_some_and(|c| is_ident(c) || c == '.');
             let word_end = !after.chars().next().is_some_and(is_ident);
             let next = after.trim_start().chars().next();
             let prev = before.trim_end().chars().next_back();
             // `a - b` and unary minus both count; `a-- ` never occurs in shaders.
-            let arithmetic = next.is_some_and(is_op) || prev.is_some_and(is_op);
+            let so_far = format!("{consumed}{before}");
+            let sampled = prev == Some(',')
+                && next == Some(')')
+                && so_far
+                    .rfind("texSample2D")
+                    .map(|i| &so_far[i..])
+                    .is_some_and(|seg| seg.matches('(').count() == seg.matches(')').count() + 1);
+            let arithmetic = next.is_some_and(is_op) || prev.is_some_and(is_op) || sampled;
             consumed.push_str(before);
             consumed.push_str(NAME);
             if word_start && word_end && next != Some('.') && arithmetic {
@@ -443,7 +453,7 @@ pub fn apply_truncating_assignment_compatibility(src: &str) -> String {
 
 /// HLSL converts scalars implicitly (`int hit = step(a, b);`, `uint i = x % 32;` with a float
 /// `x`); GLSL (and naga) reject those stores. Wraps the initializer of single-declaration
-/// `int` / `uint` / `float` statements in the matching constructor and turns `a % b` inside
+/// `int` / `uint` / `float` / vector statements (which also covers scalar splats and truncation) in the matching constructor and turns `a % b` inside
 /// them into `mod(float(a), float(b))`.
 pub fn apply_scalar_conversion_compatibility(src: &str) -> String {
     let mut out = String::with_capacity(src.len() + 64);
@@ -457,9 +467,11 @@ pub fn apply_scalar_conversion_compatibility(src: &str) -> String {
 fn convert_scalar_decl(line: &str) -> Option<String> {
     let indent_len = line.len() - line.trim_start().len();
     let t = line.trim();
-    let (ty, rest) = ["uint ", "int ", "float "]
-        .iter()
-        .find_map(|p| t.strip_prefix(p).map(|r| (p.trim(), r)))?;
+    let (ty, rest) = [
+        "uint ", "int ", "float ", "vec2 ", "vec3 ", "vec4 ", "float2 ", "float3 ", "float4 ",
+    ]
+    .iter()
+    .find_map(|p| t.strip_prefix(p).map(|r| (p.trim(), r)))?;
     let (name, init) = rest.split_once('=')?;
     let name = name.trim();
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -506,7 +518,10 @@ fn convert_scalar_decl(line: &str) -> Option<String> {
         return None;
     }
     let init = rewrite_modulo(init);
-    Some(format!("{}{ty} {name} = {ty}({init});", &line[..indent_len]))
+    Some(format!(
+        "{}{ty} {name} = {ty}({init});",
+        &line[..indent_len]
+    ))
 }
 
 /// `a % b` (simple operands) -> `mod(float(a), float(b))`.
@@ -1216,7 +1231,10 @@ mod compat_tests {
             "\tint hit = step(a, b);\n\tuint f = (g + 1) % RES;\n\tfloat x = max(p, q);\nfloat y = float(z);\nint a = 1, b = 2;\n",
         );
         assert!(out.contains("int hit = int(step(a, b));"), "{out}");
-        assert!(out.contains("uint f = uint(mod(float((g + 1)), float(RES)));"), "{out}");
+        assert!(
+            out.contains("uint f = uint(mod(float((g + 1)), float(RES)));"),
+            "{out}"
+        );
         assert!(out.contains("float x = float(max(p, q));"), "{out}");
         assert!(out.contains("float y = float(z);\n"), "{out}");
         assert!(out.contains("int a = 1, b = 2;"), "{out}");
@@ -1228,7 +1246,7 @@ mod compat_tests {
             "varying vec4 v_TexCoord;\nvec2 uv = (v_TexCoord * 2.0 - 1.0) / 2.0;\nvec4 c = texSample2D(t, v_TexCoord);\nfloat a = v_TexCoord.z * 2.0;\n",
         );
         assert!(out.contains("(v_TexCoord.xy * 2.0 - 1.0)"), "{out}");
-        assert!(out.contains("texSample2D(t, v_TexCoord)"), "{out}");
+        assert!(out.contains("texSample2D(t, v_TexCoord.xy)"), "{out}");
         assert!(out.contains("v_TexCoord.z * 2.0"), "{out}");
     }
 }

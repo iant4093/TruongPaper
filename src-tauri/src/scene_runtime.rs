@@ -253,7 +253,6 @@ impl SceneRuntime {
                     init_outputs.push((slot.slot_key, value));
                 }
                 Err(err) => {
-                    if let Ok(d) = std::env::var("DUMP_SCRIPTS") { let _ = std::fs::write(format!("{d}/{}.js", slot.slot_key.replace('/', "_")), &slot.script); } // TMPDEBUG
                     tracing::warn!(
                         "scene {scene_path}: SceneScript '{}' skipped: {err}",
                         slot.slot_key
@@ -292,7 +291,10 @@ impl SceneRuntime {
         let cursor = [0.5, 0.5];
         let world = cursor_world_position(cursor, self.scene_size());
         if let Err(err) = self.step_scripts(0.0, cursor, world, false, &[0.0; 64], &[0.0; 64]) {
-            tracing::warn!("scene {}: SceneScript settle failed: {err}", self.graph.scene_path);
+            tracing::warn!(
+                "scene {}: SceneScript settle failed: {err}",
+                self.graph.scene_path
+            );
         }
     }
 

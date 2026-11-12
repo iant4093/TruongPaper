@@ -134,6 +134,7 @@ fn bundled_headers_and_utility_textures_resolve() {
         "common_composite.h",
         "common_fragment.h",
         "common_perspective.h",
+        "common_vertex.h",
     ] {
         assert!(vfs.exists(&format!("shaders/{header}")), "{header}");
     }

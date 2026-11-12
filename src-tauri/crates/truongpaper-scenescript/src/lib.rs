@@ -341,12 +341,16 @@ pub fn create_sandboxed_runtime() -> rquickjs::Result<(Runtime, Context)> {
     Ok((rt, ctx))
 }
 
-
 /// Resolves import specifiers to themselves; only the built-in WE modules exist.
 struct WeModuleResolver;
 
 impl Resolver for WeModuleResolver {
-    fn resolve<'js>(&mut self, _ctx: &Ctx<'js>, base: &str, name: &str) -> rquickjs::Result<String> {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+    ) -> rquickjs::Result<String> {
         if we_module_source(name).is_some() {
             Ok(name.to_string())
         } else {
@@ -1239,7 +1243,12 @@ mod tests {
     fn unknown_import_is_an_error() {
         let e = engine();
         assert!(e
-            .register_property_script("z", "L", "import x from 'nope'; export function update(v){return v;}", "0")
+            .register_property_script(
+                "z",
+                "L",
+                "import x from 'nope'; export function update(v){return v;}",
+                "0"
+            )
             .is_err());
     }
 }

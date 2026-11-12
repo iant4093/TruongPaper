@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "twirl",
+	"name": "Twirl",
+	"description": "TruongPaper built-in twirl effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/twirl.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/twirl.json",
+		"shaders/effects/twirl.frag",
+		"shaders/effects/twirl.vert"
+	]
+}

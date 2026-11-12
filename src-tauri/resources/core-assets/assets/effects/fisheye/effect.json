@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "fisheye",
+	"name": "Fisheye",
+	"description": "TruongPaper built-in fisheye effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/fisheye.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/fisheye.json",
+		"shaders/effects/fisheye.frag",
+		"shaders/effects/fisheye.vert"
+	]
+}

@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "spin",
+	"name": "Spin",
+	"description": "TruongPaper built-in spin effect",
+	"group": "animate",
+	"passes": [
+		{
+			"material": "materials/effects/spin.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/spin.json",
+		"shaders/effects/spin.frag",
+		"shaders/effects/spin.vert"
+	]
+}

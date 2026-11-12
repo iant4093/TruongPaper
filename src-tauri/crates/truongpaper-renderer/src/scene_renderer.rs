@@ -432,7 +432,12 @@ pub fn map_material_constants(
             .and_then(|k| constants.get(k))
             .or_else(|| constants.get(&meta.name))
             .or(meta.default.as_ref());
-        if let Some(f) = value.and_then(json_value_floats) {
+        if let Some(mut f) = value.and_then(json_value_floats) {
+            // A scalar (e.g. a user slider bound to a `vec2` scale) fills every component.
+            let n = type_components(&meta.glsl_type);
+            if f.len() == 1 && (2..=4).contains(&n) && !meta.glsl_type.starts_with('m') {
+                f = vec![f[0]; n];
+            }
             out.insert(meta.name.clone(), f);
         }
     }
@@ -2686,6 +2691,20 @@ impl SceneRenderer {
             brightness: layer.brightness,
             ..base_values.clone()
         };
+        // Effect passes draw a clip-space quad (`a_Position` in -1..1) with an identity
+        // model-view-projection, as in Wallpaper Engine: stock passes such as the horizontal
+        // precise blur and the godrays caster write `gl_Position = vec4(a_Position, 1.0)`
+        // directly, while others still multiply by `g_ModelViewProjectionMatrix`.
+        let effect_values = UniformValues {
+            matrices: PassMatrices {
+                model_view_projection: Mat4::IDENTITY,
+                model_view_projection_inverse: Mat4::IDENTITY,
+                model: Mat4::IDENTITY,
+                model_inverse: Mat4::IDENTITY,
+                view_projection: Mat4::IDENTITY,
+            },
+            ..local_values.clone()
+        };
         let target_view = |id: &RenderTargetId| -> Option<&wgpu::TextureView> {
             match id {
                 RenderTargetId::Scene => Some(&self.scene.view),
@@ -2762,12 +2781,12 @@ impl SceneRenderer {
                     let Some(view) = target_view(&pass.target) else {
                         continue;
                     };
-                    Self::write_we_uniforms(queue, pass, &local_values);
+                    Self::write_we_uniforms(queue, pass, &effect_values);
                     run_pass(encoder, "scene_effect_pass", view, transparent, |rp| {
                         rp.set_pipeline(&pass.pipeline);
                         rp.set_bind_group(0, &pass.uniform_bind_group, &[]);
                         rp.set_bind_group(1, &pass.texture_bind_group, &[]);
-                        rp.set_vertex_buffer(0, fx.effect_quad.slice(..));
+                        rp.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
                         rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
                         rp.draw_indexed(0..6, 0, 0..1);
                     });

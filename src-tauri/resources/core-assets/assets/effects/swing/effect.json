@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "swing",
+	"name": "Swing",
+	"description": "TruongPaper built-in swing effect",
+	"group": "animate",
+	"passes": [
+		{
+			"material": "materials/effects/swing.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/swing.json",
+		"shaders/effects/swing.frag",
+		"shaders/effects/swing.vert"
+	]
+}

@@ -583,3 +583,78 @@ fn invalid_glsl_reports_stage_and_label() {
     let err = translate_we_shader_pair("broken", &vert, &frag).unwrap_err();
     assert!(err.contains("Fragment") && err.contains("broken"), "{err}");
 }
+
+fn translate_pair(tmp: &TempDir, vert: &str, frag: &str) -> Result<TranslatedWeShaderPair, String> {
+    tmp.write("wall/shaders/t.vert", vert);
+    tmp.write("wall/shaders/t.frag", frag);
+    let vfs = mount(tmp);
+    let (v, f) = preprocess_we_shader_pair(
+        &vfs,
+        "shaders/t.vert",
+        "shaders/t.frag",
+        &HashMap::new(),
+        None,
+        &[true; 8],
+    )
+    .unwrap();
+    translate_we_shader_pair("t", &v, &f)
+}
+
+const PLAIN_VERT: &str = "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() { gl_Position = vec4(a_Position, 1.0); v_TexCoord = a_TexCoord; }\n";
+
+#[test]
+fn include_headers_can_sample_textures_declared_after_the_include() {
+    let tmp = TempDir::new("hoist");
+    tmp.write(
+        "core/shaders/helper.h",
+        "vec4 helperSample(vec2 uv) { return texSample2D(g_Texture0, uv); }\n",
+    );
+    let frag = "#include \"helper.h\"\nvarying vec2 v_TexCoord;\nuniform sampler2D g_Texture0; // {\"hidden\":true}\nvoid main() { gl_FragColor = helperSample(v_TexCoord); }\n";
+    translate_pair(&tmp, PLAIN_VERT, frag).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn sample_is_usable_as_a_variable_name() {
+    let tmp = TempDir::new("sample-ident");
+    let frag = "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\nvoid main() { vec4 sample = texSample2D(g_Texture0, v_TexCoord); gl_FragColor = sample; }\n";
+    translate_pair(&tmp, PLAIN_VERT, frag).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn unwritten_fragment_varyings_become_private_globals() {
+    let tmp = TempDir::new("unwritten-varying");
+    let frag = "varying vec2 v_TexCoord;\nvarying vec2 v_Scroll;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord + v_Scroll); }\n";
+    let t = translate_pair(&tmp, PLAIN_VERT, frag).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        t.fragment_wgsl.contains("var<private> v_Scroll"),
+        "{}",
+        t.fragment_wgsl
+    );
+    let inputs = t.fragment_naga.entry_points[0].function.arguments.len();
+    assert_eq!(inputs, 1, "only v_TexCoord stays a stage input");
+}
+
+#[test]
+fn wider_vectors_assigned_to_narrower_ones_are_truncated() {
+    let tmp = TempDir::new("truncate");
+    let vert = "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec4 v_TexCoord;\nvarying vec2 v_NoiseCoord;\nvoid main() {\n gl_Position = vec4(a_Position, 1.0);\n v_TexCoord = a_TexCoord.xyxy;\n v_NoiseCoord = v_TexCoord;\n}\n";
+    let frag = "varying vec4 v_TexCoord;\nvarying vec2 v_NoiseCoord;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, v_NoiseCoord); }\n";
+    let t = translate_pair(&tmp, vert, frag).unwrap_or_else(|e| panic!("{e}"));
+    assert!(t.vertex_glsl450.contains("v_NoiseCoord = v_TexCoord.xy;"));
+}
+
+#[test]
+fn scalar_uniform_arrays_use_a_16_byte_stride_and_stay_indexable() {
+    let tmp = TempDir::new("scalar-array");
+    let vert = "uniform float g_AudioSpectrum16Left[16];\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nfloat total(float b[16]) { return b[0] + b[15]; }\nvoid main()\n{\n gl_Position = vec4(a_Position, 1.0);\n v_TexCoord = a_TexCoord * total(g_AudioSpectrum16Left) + g_AudioSpectrum16Left[3];\n}\n";
+    let frag = "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
+    let t = translate_pair(&tmp, vert, frag).unwrap_or_else(|e| panic!("{e}"));
+    let field = &t.uniform_fields[0];
+    assert_eq!(field.name, "g_AudioSpectrum16Left[16]");
+    assert_eq!(field.byte_size, 16 * 16);
+    assert!(
+        t.vertex_wgsl.contains("array<vec4<f32>, 16>"),
+        "{}",
+        t.vertex_wgsl
+    );
+}

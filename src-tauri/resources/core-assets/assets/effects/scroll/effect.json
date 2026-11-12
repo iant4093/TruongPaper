@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "scroll",
+	"name": "Scroll",
+	"description": "TruongPaper built-in scroll effect",
+	"group": "animate",
+	"passes": [
+		{
+			"material": "materials/effects/scroll.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/scroll.json",
+		"shaders/effects/scroll.frag",
+		"shaders/effects/scroll.vert"
+	]
+}

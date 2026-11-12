@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "nitro",
+	"name": "Nitro (Glitch)",
+	"description": "TruongPaper built-in nitro (glitch) effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/nitro.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/nitro.json",
+		"shaders/effects/nitro.frag",
+		"shaders/effects/nitro.vert"
+	]
+}

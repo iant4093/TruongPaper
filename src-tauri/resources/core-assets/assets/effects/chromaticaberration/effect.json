@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "chromaticaberration",
+	"name": "Chromatic Aberration",
+	"description": "TruongPaper built-in chromatic aberration effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/chromaticaberration.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/chromaticaberration.json",
+		"shaders/effects/chromaticaberration.frag",
+		"shaders/effects/chromaticaberration.vert"
+	]
+}

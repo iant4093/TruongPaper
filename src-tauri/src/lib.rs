@@ -38,6 +38,29 @@ impl StartupClock {
     }
 }
 
+/// Points the scene VFS at our own bundled stock-effect and shader-include implementations
+/// (`resources/core-assets`, shipped through `bundle.resources`). Dev builds fall back to the
+/// repository copy because resources are not copied next to the debug binary.
+fn register_bundled_core_assets(app: &tauri::App) {
+    let packaged = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("core-assets").join("assets"))
+        .filter(|dir| dir.is_dir());
+    let dir = packaged.or_else(|| {
+        let dev =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/core-assets/assets");
+        (cfg!(debug_assertions) && dev.is_dir()).then_some(dev)
+    });
+    match dir {
+        Some(dir) => truongpaper_we_formats::set_bundled_assets_dir(dir),
+        None => {
+            tracing::warn!("bundled core assets not found; stock effects need Wallpaper Engine")
+        }
+    }
+}
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let clock = StartupClock(std::time::Instant::now());
     // Closing Studio hides it. The tray keeps running and uses it for Pause and Next.
@@ -50,6 +73,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    register_bundled_core_assets(app);
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
     let conn = truongpaper_core::open_and_initialize_db(&app_data_dir.join(DB_FILE_NAME))?;

@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "cloudmotion",
+	"name": "Cloud Motion",
+	"description": "TruongPaper built-in cloud motion effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/cloudmotion.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/cloudmotion.json",
+		"shaders/effects/cloudmotion.frag",
+		"shaders/effects/cloudmotion.vert"
+	]
+}

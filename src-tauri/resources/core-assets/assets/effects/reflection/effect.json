@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "reflection",
+	"name": "Reflection",
+	"description": "TruongPaper built-in reflection effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/reflection.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/reflection.json",
+		"shaders/effects/reflection.frag",
+		"shaders/effects/reflection.vert"
+	]
+}

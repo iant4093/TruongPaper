@@ -1,0 +1,16 @@
+{
+	"passes": [
+		{
+			"shader": "effects/refraction",
+			"blending": "normal",
+			"depthtest": "disabled",
+			"depthwrite": "disabled",
+			"cullmode": "nocull",
+			"textures": [
+				null,
+				"util/flatnormal",
+				"util/white"
+			]
+		}
+	]
+}

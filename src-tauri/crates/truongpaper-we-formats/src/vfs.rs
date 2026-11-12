@@ -1,7 +1,9 @@
 //! 4-layer Virtual File System (`WeVirtualFileSystem`, spec section 2.1).
 //!
 //! Resolution order: (1) loose `<wallpaper_dir>/<path>`, (2) `scene.pkg`, (3) `gifscene.pkg`,
-//! (4) `<core_assets_dir>/<path>` (`we_core_assets/assets/`) then built-in virtual files.
+//! (4) `<core_assets_dir>/<path>` (`we_core_assets/assets/`), then the app's own bundled
+//! clean-room core assets (`resources/core-assets/assets/`, see [`set_bundled_assets_dir`]),
+//! then built-in virtual files.
 
 use crate::binary::{parse_pkg_index, PkgArchive};
 use memmap2::Mmap;
@@ -10,6 +12,21 @@ use std::fs::File;
 use std::io::{Cursor, Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
+
+static BUNDLED_ASSETS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Registers the app's bundled core-assets tree (our own implementations of the stock effects and
+/// shader headers). Every [`WeVirtualFileSystem`] mounted afterwards falls back to it when a file is
+/// in neither the wallpaper nor the real Wallpaper Engine core assets. First call wins.
+pub fn set_bundled_assets_dir(dir: PathBuf) {
+    let _ = BUNDLED_ASSETS_DIR.set(dir);
+}
+
+/// The directory registered with [`set_bundled_assets_dir`], if any.
+pub fn bundled_assets_dir() -> Option<&'static Path> {
+    BUNDLED_ASSETS_DIR.get().map(PathBuf::as_path)
+}
 
 /// A memory-mapped `.pkg` plus its parsed index. Entry reads are zero-copy slices of the mapping.
 pub struct MappedPkg {
@@ -41,6 +58,8 @@ pub struct WeVirtualFileSystem {
     pub scene_pkg: Option<MappedPkg>,
     pub gifscene_pkg: Option<MappedPkg>,
     pub core_assets_dir: PathBuf,
+    /// Our own bundled stand-ins for stock effects and includes; consulted after `core_assets_dir`.
+    pub bundled_assets_dir: Option<PathBuf>,
     pub builtin_virtual_files: HashMap<&'static str, &'static [u8]>,
 }
 
@@ -122,8 +141,15 @@ impl WeVirtualFileSystem {
             scene_pkg,
             gifscene_pkg,
             core_assets_dir,
+            bundled_assets_dir: bundled_assets_dir().map(Path::to_path_buf),
             builtin_virtual_files,
         }
+    }
+
+    /// Overrides the bundled-assets layer (tests and tools that do not use the global).
+    pub fn with_bundled_assets_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.bundled_assets_dir = dir;
+        self
     }
 
     /// Normalizes a Wallpaper Engine virtual path and rejects any `..` traversal component.
@@ -183,7 +209,15 @@ impl WeVirtualFileSystem {
             return open_file_asset(&core_path);
         }
 
-        // Layer 4b: built-in in-memory virtual files.
+        // Layer 4b: bundled clean-room core assets.
+        if let Some(bundled) = &self.bundled_assets_dir {
+            let bundled_path = bundled.join(&rel);
+            if bundled_path.is_file() {
+                return open_file_asset(&bundled_path);
+            }
+        }
+
+        // Layer 4c: built-in in-memory virtual files.
         if let Some(bytes) = self.builtin_virtual_files.get(rel.as_str()) {
             return Ok(VfsAsset::Bytes(bytes));
         }
@@ -294,6 +328,29 @@ mod tests {
             vfs.read_bytes("nope.bin").unwrap_err().kind(),
             ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn bundled_assets_sit_between_core_assets_and_builtins() {
+        let tmp = TempDir::new("bundled");
+        let (wall, core, bundled) = (
+            tmp.0.join("wall"),
+            tmp.0.join("core"),
+            tmp.0.join("bundled"),
+        );
+        for d in [&wall, &core, &bundled] {
+            fs::create_dir_all(d.join("shaders")).unwrap();
+        }
+        fs::write(wall.join("w.txt"), b"wall").unwrap();
+        fs::write(bundled.join("w.txt"), b"bundled-w").unwrap();
+        fs::write(core.join("shaders/common_blur.h"), b"real").unwrap();
+        fs::write(bundled.join("shaders/common_blur.h"), b"ours").unwrap();
+        fs::write(bundled.join("shaders/common.h"), b"ours-common").unwrap();
+        let vfs = WeVirtualFileSystem::mount(wall, core).with_bundled_assets_dir(Some(bundled));
+        assert_eq!(vfs.read_bytes("w.txt").unwrap(), b"wall");
+        assert_eq!(vfs.read_bytes("shaders/common_blur.h").unwrap(), b"real");
+        assert_eq!(vfs.read_bytes("shaders/common.h").unwrap(), b"ours-common");
+        // beats built-in
     }
 
     #[test]

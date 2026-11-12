@@ -63,7 +63,8 @@
       "bin/DepotDownloader"
     ],
     "resources": {
-      "bin/licenses/": "sidecar-licenses/"
+      "bin/licenses/": "sidecar-licenses/",
+      "resources/core-assets/": "core-assets/"
     },
     "icon": [
       "icons/32x32.png",

@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "iris",
+	"name": "Iris Movement",
+	"description": "TruongPaper built-in iris movement effect",
+	"group": "interactive",
+	"passes": [
+		{
+			"material": "materials/effects/iris.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/iris.json",
+		"shaders/effects/iris.frag",
+		"shaders/effects/iris.vert"
+	]
+}

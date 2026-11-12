@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "foliagesway",
+	"name": "Foliage Sway",
+	"description": "TruongPaper built-in foliage sway effect",
+	"group": "animate",
+	"passes": [
+		{
+			"material": "materials/effects/foliagesway.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/foliagesway.json",
+		"shaders/effects/foliagesway.frag",
+		"shaders/effects/foliagesway.vert"
+	]
+}

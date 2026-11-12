@@ -401,3 +401,14 @@ fn bgra_frames_of_the_texture_size_upload_without_conversion() {
     assert!(plan_video_upload(&short, 2, 1).is_none());
     assert!(plan_video_upload(&frame, 2, 0).is_none());
 }
+
+#[test]
+fn scalar_constant_fills_every_component_of_a_vector_uniform() {
+    // e.g. a user "blur" slider (1.5) bound to the vec2 `scale` of a blur pass.
+    let meta = parse_uniform_comment_metadata(
+        "uniform vec2 g_Scale; // {\"material\":\"scale\",\"default\":\"1 1\"}\n",
+    );
+    let constants = HashMap::from([("scale".to_string(), Value::Number(1.5))]);
+    let mapped = map_material_constants(&meta, &constants);
+    assert_eq!(mapped["g_Scale"], vec![1.5, 1.5]);
+}

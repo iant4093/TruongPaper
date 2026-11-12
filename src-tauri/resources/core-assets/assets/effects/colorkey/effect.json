@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "colorkey",
+	"name": "Color Key",
+	"description": "TruongPaper built-in color key effect",
+	"group": "colorize",
+	"passes": [
+		{
+			"material": "materials/effects/colorkey.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/colorkey.json",
+		"shaders/effects/colorkey.frag",
+		"shaders/effects/colorkey.vert"
+	]
+}

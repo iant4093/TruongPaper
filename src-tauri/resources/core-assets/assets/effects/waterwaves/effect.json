@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "waterwaves",
+	"name": "Water Waves",
+	"description": "TruongPaper built-in water waves effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/waterwaves.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/waterwaves.json",
+		"shaders/effects/waterwaves.frag",
+		"shaders/effects/waterwaves.vert"
+	]
+}

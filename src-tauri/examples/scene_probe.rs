@@ -31,6 +31,13 @@ async fn render() -> anyhow::Result<()> {
             None,
         )
         .await?;
+    // Our bundled stock effects/includes sit behind the wallpaper and real WE core assets.
+    // PROBE_NO_BUNDLED=1 renders without them.
+    if std::env::var("PROBE_NO_BUNDLED").is_err() {
+        truongpaper_we_formats::set_bundled_assets_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/core-assets/assets"),
+        );
+    }
     let dir = PathBuf::from(&args[1]);
     let vfs = WeVirtualFileSystem::mount(dir.clone(), PathBuf::from(&args[2]));
     let project: serde_json::Value =

@@ -23,7 +23,9 @@ pub use scene_schema::{
     SceneGeneral, SceneObject, ScenePassOverride, UserBoundValue, UserConditionSpec,
     UserPropertyMap,
 };
-pub use vfs::{MappedPkg, WallpaperVfs, WeVirtualFileSystem};
+pub use vfs::{
+    bundled_assets_dir, set_bundled_assets_dir, MappedPkg, WallpaperVfs, WeVirtualFileSystem,
+};
 
 use std::io::{self, Read};
 

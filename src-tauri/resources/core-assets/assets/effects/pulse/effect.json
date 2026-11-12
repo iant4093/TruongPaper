@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "pulse",
+	"name": "Pulse",
+	"description": "TruongPaper built-in pulse effect",
+	"group": "animate",
+	"passes": [
+		{
+			"material": "materials/effects/pulse.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/pulse.json",
+		"shaders/effects/pulse.frag",
+		"shaders/effects/pulse.vert"
+	]
+}

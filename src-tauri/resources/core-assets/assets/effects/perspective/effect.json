@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "perspective",
+	"name": "Perspective",
+	"description": "TruongPaper built-in perspective effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/perspective.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/perspective.json",
+		"shaders/effects/perspective.frag",
+		"shaders/effects/perspective.vert"
+	]
+}

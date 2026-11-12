@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "shake",
+	"name": "Shake",
+	"description": "TruongPaper built-in shake effect",
+	"group": "animate",
+	"passes": [
+		{
+			"material": "materials/effects/shake.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/shake.json",
+		"shaders/effects/shake.frag",
+		"shaders/effects/shake.vert"
+	]
+}

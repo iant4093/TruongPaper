@@ -7,7 +7,9 @@
 //! (e.g. `"layer7.alpha"`); `update` runs for every slot each frame via [`SceneScriptEngine::step_frame`].
 
 use parking_lot::Mutex;
-use rquickjs::{CaughtError, Context, Ctx, Function, Runtime};
+use rquickjs::loader::{Loader, Resolver};
+use rquickjs::module::Declared;
+use rquickjs::{CaughtError, Context, Ctx, Function, Module, Runtime};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -157,6 +159,87 @@ globalThis.console = {
     error(...a) { __log('error', a.map(String).join(' ')); },
 };
 
+
+for (const C of [Vec2, Vec3, Vec4]) {
+    const keys = C === Vec2 ? ['x', 'y'] : C === Vec3 ? ['x', 'y', 'z'] : ['x', 'y', 'z', 'w'];
+    const map = (self, f) => new C(...keys.map(k => f(self[k], k)));
+    C.prototype.negate = function () { return map(this, v => -v); };
+    C.prototype.abs = function () { return map(this, Math.abs); };
+    C.prototype.round = function () { return map(this, Math.round); };
+    C.prototype.floor = function () { return map(this, Math.floor); };
+    C.prototype.ceil = function () { return map(this, Math.ceil); };
+    C.prototype.sign = function () { return map(this, Math.sign); };
+    C.prototype.min = function (o) { return map(this, (v, k) => Math.min(v, o[k] ?? o)); };
+    C.prototype.max = function (o) { return map(this, (v, k) => Math.max(v, o[k] ?? o)); };
+    C.prototype.equals = function (o) { return keys.every(k => this[k] === o[k]); };
+    C.prototype.distance = function (o) { return this.subtract(o).length(); };
+    C.prototype.toJSON = function () { return this.toString(); };
+}
+Vec3.prototype.xy = function () { return new Vec2(this.x, this.y); };
+Object.defineProperty(Vec2.prototype, 'xy', { get() { return this.copy(); } });
+Vec2.prototype.angle = function () { return Math.atan2(this.y, this.x); };
+Vec3.prototype.reflect = function (n) { return this.subtract(n.multiply(2 * this.dot(n))); };
+
+globalThis.__WEMath = {
+    PI: Math.PI,
+    TWO_PI: Math.PI * 2,
+    mix: (a, b, t) => a + (b - a) * t,
+    clamp: (v, lo, hi) => Math.min(Math.max(v, lo), hi),
+    saturate: v => Math.min(Math.max(v, 0), 1),
+    smoothStep: (lo, hi, v) => { const t = Math.min(Math.max((v - lo) / ((hi - lo) || 1), 0), 1); return t * t * (3 - 2 * t); },
+    deg2rad: d => d * Math.PI / 180,
+    rad2deg: r => r * 180 / Math.PI,
+    sign: Math.sign,
+    fract: v => v - Math.floor(v),
+    step: (e, v) => (v < e ? 0 : 1),
+};
+globalThis.__WEColor = {
+    rgb2hsv(c) {
+        const r = c.x, g = c.y, b = c.z, mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+        let h = 0;
+        if (d > 0) {
+            if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+            h /= 6; if (h < 0) h += 1;
+        }
+        return new Vec3(h, mx === 0 ? 0 : d / mx, mx);
+    },
+    hsv2rgb(c) {
+        const h = ((c.x % 1) + 1) % 1 * 6, s = c.y, v = c.z, i = Math.floor(h), f = h - i;
+        const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+        const t3 = [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i % 6];
+        return new Vec3(t3[0], t3[1], t3[2]);
+    },
+    normalizeColor(c) { return new Vec3(c.x / 255, c.y / 255, c.z / 255); },
+    expandColor(c) { return new Vec3(c.x * 255, c.y * 255, c.z * 255); },
+    rgb2hex(c) {
+        const h = v => Math.round(Math.min(Math.max(v, 0), 1) * 255).toString(16).padStart(2, '0');
+        return '#' + h(c.x) + h(c.y) + h(c.z);
+    },
+    hsv2hex(c) { return globalThis.__WEColor.rgb2hex(globalThis.__WEColor.hsv2rgb(c)); },
+};
+(function () {
+    const store = {};
+    globalThis.localStorage = {
+        get(k) { return store[k]; },
+        set(k, v) { store[k] = v; },
+        getItem(k) { return k in store ? store[k] : null; },
+        setItem(k, v) { store[k] = String(v); },
+        removeItem(k) { delete store[k]; },
+        clear() { for (const k of Object.keys(store)) delete store[k]; },
+    };
+    globalThis.engine.AUDIO_RESOLUTION_16 = 16;
+    globalThis.engine.AUDIO_RESOLUTION_32 = 32;
+    globalThis.engine.AUDIO_RESOLUTION_64 = 64;
+    globalThis.engine.openUserShortcut = function () {};
+    globalThis.engine.setTimeout = function () { return 0; };
+    globalThis.engine.setInterval = function () { return 0; };
+    globalThis.engine.clearTimeout = function () {};
+    globalThis.engine.clearInterval = function () {};
+    globalThis.engine.isRunningInEditor = function () { return false; };
+    globalThis.engine.isPortrait = function () { return false; };
+    globalThis.engine.isLandscape = function () { return true; };
+})();
+
 // Host-side helper: call `fname(arg)` on every slot that exports it; one failing script
 // must not take down the others.
 globalThis.__callAll = function (fname, arg) {
@@ -171,18 +254,6 @@ globalThis.__callAll = function (fname, arg) {
     }
 };
 "#;
-
-/// Lifecycle callbacks that are lifted from a script's top level into `exports`.
-const LIFECYCLE_FNS: [&str; 8] = [
-    "init",
-    "update",
-    "cursorMove",
-    "cursorDown",
-    "cursorUp",
-    "cursorClick",
-    "applyUserProperties",
-    "destroy",
-];
 
 /// Desktop cursor events forwarded to `cursorMove/Down/Up/Click`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,8 +294,71 @@ pub struct LayerState {
 pub fn create_sandboxed_runtime() -> rquickjs::Result<(Runtime, Context)> {
     let rt = Runtime::new()?;
     rt.set_memory_limit(MEMORY_LIMIT_BYTES);
+    rt.set_loader(WeModuleResolver, WeModuleLoader);
     let ctx = Context::full(&rt)?;
     Ok((rt, ctx))
+}
+
+
+/// Resolves import specifiers to themselves; only the built-in WE modules exist.
+struct WeModuleResolver;
+
+impl Resolver for WeModuleResolver {
+    fn resolve<'js>(&mut self, _ctx: &Ctx<'js>, base: &str, name: &str) -> rquickjs::Result<String> {
+        if we_module_source(name).is_some() {
+            Ok(name.to_string())
+        } else {
+            Err(rquickjs::Error::new_resolving(base, name))
+        }
+    }
+}
+
+struct WeModuleLoader;
+
+impl Loader for WeModuleLoader {
+    fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Module<'js, Declared>> {
+        match we_module_source(name) {
+            Some(src) => Module::declare(ctx.clone(), name, src),
+            None => Err(rquickjs::Error::new_loading(name)),
+        }
+    }
+}
+
+/// Source of the Wallpaper Engine script modules (`import * as WEMath from 'WEMath'`).
+fn we_module_source(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "WEMath" => {
+            "const M = globalThis.__WEMath; export default M;\n\
+             export const mix = M.mix, smoothStep = M.smoothStep, clamp = M.clamp, deg2rad = M.deg2rad, rad2deg = M.rad2deg, sign = M.sign, saturate = M.saturate, fract = M.fract, step = M.step, PI = M.PI, TWO_PI = M.TWO_PI;"
+        }
+        "WEVector" => {
+            "export const Vec2 = globalThis.Vec2, Vec3 = globalThis.Vec3, Vec4 = globalThis.Vec4;\n\
+             export default { Vec2, Vec3, Vec4 };"
+        }
+        "WEColor" => {
+            "const C = globalThis.__WEColor; export default C;\n\
+             export const rgb2hsv = C.rgb2hsv, hsv2rgb = C.hsv2rgb, normalizeColor = C.normalizeColor, expandColor = C.expandColor, hsv2hex = C.hsv2hex, rgb2hex = C.rgb2hex;"
+        }
+        _ => return None,
+    })
+}
+
+/// Loads `source` as a real ES module (so `export`, `import`, arrow functions, classes, ... all
+/// work) and returns its namespace object. Per-slot globals are provided through a preamble that
+/// reads `globalThis.__cur`, which the caller sets right before.
+fn load_script_module<'js>(
+    ctx: &Ctx<'js>,
+    unique: usize,
+    source: &str,
+) -> anyhow::Result<rquickjs::Object<'js>> {
+    let full = format!(
+        "const thisLayer = globalThis.__cur.thisLayer, createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
+    );
+    let module = Module::declare(ctx.clone(), format!("__slot{unique}"), full)
+        .map_err(|e| js_err(ctx, e))?;
+    let (module, promise) = module.eval().map_err(|e| js_err(ctx, e))?;
+    promise.finish::<()>().map_err(|e| js_err(ctx, e))?;
+    module.namespace().map_err(|e| js_err(ctx, e))
 }
 
 /// Formats a float as a JS numeric literal (`NaN`/`inf` become `0`).
@@ -250,41 +384,6 @@ where
     T: rquickjs::FromJs<'js>,
 {
     ctx.eval::<T, _>(src).map_err(|e| js_err(ctx, e))
-}
-
-/// Turns Wallpaper Engine's ES-module style script (`export function update(v) {...}`) into a
-/// plain function body: strips `export` keywords and reports exported identifiers.
-fn prepare_script(raw: &str) -> (String, Vec<String>) {
-    let mut body = String::with_capacity(raw.len() + 64);
-    let mut exported: Vec<String> = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("export ") {
-            let rest = rest.trim_start();
-            let rest = rest.strip_prefix("async ").unwrap_or(rest);
-            let name_part = ["function*", "function", "var", "let", "const", "class"]
-                .iter()
-                .find_map(|kw| rest.strip_prefix(kw));
-            if let Some(after_kw) = name_part {
-                let name: String = after_kw
-                    .trim_start()
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-                    .collect();
-                if !name.is_empty() {
-                    exported.push(name);
-                    let indent = &line[..line.len() - trimmed.len()];
-                    body.push_str(indent);
-                    body.push_str(&trimmed["export ".len()..]);
-                    body.push('\n');
-                    continue;
-                }
-            }
-        }
-        body.push_str(line);
-        body.push('\n');
-    }
-    (body, exported)
 }
 
 pub struct SceneScriptEngine {
@@ -512,54 +611,58 @@ impl SceneScriptEngine {
     ) -> anyhow::Result<String> {
         let script_props: serde_json::Value = serde_json::from_str(script_props_json)?;
         let script_props = serde_json::to_string(&script_props)?;
-        let (valid_body, exported) = prepare_script(raw_es_script);
-        let mut export_names: Vec<&str> = LIFECYCLE_FNS.to_vec();
-        for n in &exported {
-            if !export_names.contains(&n.as_str()) {
-                export_names.push(n);
-            }
-        }
-        let export_assigns: String = export_names
-            .iter()
-            .map(|n| format!("if (typeof {n} !== 'undefined') exports.{n} = {n};\n"))
-            .collect();
+        static NEXT_MODULE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT_MODULE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         self.guarded(INIT_BUDGET, |ctx| {
-            let wrapper = format!(
-                "(function() {{
-                    const exports = {{}};
-                    const thisLayer = globalThis.__layers[{layer_name}] || {{}};
-                    const __spStore = {{}};
-                    var scriptProperties = __spStore;
-                    const __sp = {script_props};
-                    const __pick = function(o, fallback) {{
-                        return Object.prototype.hasOwnProperty.call(__sp, o.name) ? __sp[o.name] : fallback;
-                    }};
-                    const createScriptProperties = function() {{
+            eval_js::<()>(
+                ctx,
+                format!(
+                    "(function() {{
+                        const __spStore = {{}};
+                        const __sp = {script_props};
+                        const __pick = function(o, fallback) {{
+                            return Object.prototype.hasOwnProperty.call(__sp, o.name) ? __sp[o.name] : fallback;
+                        }};
                         const builder = {{
                             addSlider(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
                             addCheckbox(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
                             addColor(o) {{ __spStore[o.name] = new Vec3(__pick(o, o.value)); return builder; }},
                             addText(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
                             addCombo(o) {{ __spStore[o.name] = __pick(o, o.value ?? o.options?.[0]?.value ?? 0); return builder; }},
+                            addFile(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
                             finish() {{ return __spStore; }}
                         }};
-                        return builder;
-                    }};
-                    {valid_body}
-                    {export_assigns}
-                    let val = {initial_value_expr};
-                    if (typeof exports.init === 'function') {{
-                        const r = exports.init(val);
-                        if (r !== undefined) val = r;
-                    }}
-                    globalThis.__scripts[{slot_key}] = {{ exports, thisLayer, currentValue: val, scriptProperties: __spStore }};
-                    return String(val);
-                }})()",
-                layer_name = js_str(layer_name),
-                slot_key = js_str(slot_key),
-            );
-            eval_js::<String>(ctx, wrapper)
+                        globalThis.__cur = {{
+                            thisLayer: globalThis.__layers[{layer_name}] || {{}},
+                            createScriptProperties() {{ return builder; }},
+                            store: __spStore,
+                        }};
+                    }})()",
+                    layer_name = js_str(layer_name),
+                ),
+            )?;
+            let ns = load_script_module(ctx, unique, raw_es_script)?;
+            ctx.globals()
+                .set("__ns", ns)
+                .map_err(|e| js_err(ctx, e))?;
+            eval_js::<String>(
+                ctx,
+                format!(
+                    "(function() {{
+                        const exports = globalThis.__ns, cur = globalThis.__cur;
+                        globalThis.__ns = undefined; globalThis.__cur = undefined;
+                        let val = {initial_value_expr};
+                        if (typeof exports.init === 'function') {{
+                            const r = exports.init(val);
+                            if (r !== undefined) val = r;
+                        }}
+                        globalThis.__scripts[{slot_key}] = {{ exports, thisLayer: cur.thisLayer, currentValue: val, scriptProperties: cur.store }};
+                        return String(val);
+                    }})()",
+                    slot_key = js_str(slot_key),
+                ),
+            )
         })
     }
 
@@ -970,7 +1073,7 @@ mod tests {
         let err = e
             .register_property_script("x", "L", "export function update( {", "0")
             .unwrap_err();
-        assert!(err.to_string().contains("eval_script"), "{err}");
+        assert!(err.to_string().contains("__slot"), "{err}");
     }
 
     #[test]
@@ -1066,12 +1169,34 @@ mod tests {
     }
 
     #[test]
-    fn prepare_script_strips_export_and_collects_names() {
-        let (body, names) =
-            prepare_script("  export function update(v) {}\nexport let a = 1;\nconst x = 2;");
-        assert_eq!(names, vec!["update", "a"]);
-        assert!(body.contains("  function update(v) {}"));
-        assert!(body.contains("let a = 1;"));
-        assert!(!body.contains("export"));
+    fn es_module_syntax_is_supported() {
+        let e = engine();
+        // Minified, mid-line export, import of WE modules, arrow functions, classes, template
+        // literals, `export var scriptProperties` and a localStorage stub.
+        let out = e
+            .register_property_script(
+                "m",
+                "L",
+                "import * as WEMath from 'WEMath'; import { Vec3 as V3 } from 'WEVector';\n\
+                 import WEColor from 'WEColor';\n\
+                 export var scriptProperties = createScriptProperties().addSlider({name:'k',value:2}).finish();\n\
+                 class Acc { constructor(){ this.n = 0; } bump(){ return ++this.n; } }\n\
+                 const acc = new Acc(); var n=0;export function update(v){ try { return up(v);} catch(e){ return 'ERR '+e; } } function up(v){ localStorage.setItem('a','1'); \
+                 const f = (a) => WEMath.mix(0, 10, a) * scriptProperties.k; \
+                 return `${f(0.5)}|${acc.bump()}|${new V3(1,2,3).length() > 3}|${localStorage.getItem('a')}|${WEColor.rgb2hex(new Vec3(1,0,0))}`; }",
+                "0",
+            )
+            .unwrap();
+        assert_eq!(out, "0");
+        let r = step(&e);
+        assert_eq!(r["m"], "10|1|true|1|#ff0000");
+    }
+
+    #[test]
+    fn unknown_import_is_an_error() {
+        let e = engine();
+        assert!(e
+            .register_property_script("z", "L", "import x from 'nope'; export function update(v){return v;}", "0")
+            .is_err());
     }
 }

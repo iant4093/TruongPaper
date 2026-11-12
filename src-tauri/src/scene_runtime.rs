@@ -253,6 +253,7 @@ impl SceneRuntime {
                     init_outputs.push((slot.slot_key, value));
                 }
                 Err(err) => {
+                    if let Ok(d) = std::env::var("DUMP_SCRIPTS") { let _ = std::fs::write(format!("{d}/{}.js", slot.slot_key.replace('/', "_")), &slot.script); } // TMPDEBUG
                     tracing::warn!(
                         "scene {scene_path}: SceneScript '{}' skipped: {err}",
                         slot.slot_key

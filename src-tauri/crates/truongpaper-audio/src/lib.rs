@@ -297,6 +297,8 @@ pub const RESTART_BACKOFF: Duration = Duration::from_secs(2);
 const PAUSED_POLL: Duration = Duration::from_millis(250);
 
 struct WorkerShared {
+    /// Analyzer tick rate in Hz (`f32::to_bits`); see [`tick_period_for_hz`].
+    tick_hz: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     waker: std::thread::Thread,
@@ -325,7 +327,23 @@ pub struct AudioWorkerHandle {
     shared: Arc<WorkerShared>,
 }
 
+/// Analyzer tick period for a requested rate: clamped to 5..=60 Hz (non-finite = 60 Hz).
+pub fn tick_period_for_hz(hz: f32) -> Duration {
+    let hz = if hz.is_finite() {
+        hz.clamp(5.0, 60.0)
+    } else {
+        60.0
+    };
+    Duration::from_secs_f64(1.0 / f64::from(hz))
+}
+
 impl AudioWorkerHandle {
+    /// Sets the analyzer tick rate (use `min(60, render fps cap)`; the spectrum is only
+    /// consumed once per rendered frame).
+    pub fn set_tick_hz(&self, hz: f32) {
+        self.shared.tick_hz.store(hz.to_bits(), Ordering::Relaxed);
+    }
+
     /// Asks the ticker thread to exit (the capture backend is stopped with it).
     pub fn stop(&self) {
         self.shared.stop.store(true, Ordering::Relaxed);
@@ -354,6 +372,8 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let ring_for_thread = Arc::clone(&ring);
     let stop_for_thread = Arc::clone(&stop);
+    let tick_hz = Arc::new(AtomicU32::new(60.0f32.to_bits()));
+    let tick_for_thread = Arc::clone(&tick_hz);
 
     let thread = std::thread::Builder::new()
         .name("truongpaper-audio".into())
@@ -419,7 +439,8 @@ where
                     }
                 }
                 // 60 Hz tick even during WASAPI silence (no callbacks).
-                next_deadline += TICK_PERIOD;
+                next_deadline +=
+                    tick_period_for_hz(f32::from_bits(tick_for_thread.load(Ordering::Relaxed)));
                 let now = Instant::now();
                 if let Some(wait) = next_deadline.checked_duration_since(now) {
                     std::thread::park_timeout(wait);
@@ -438,6 +459,7 @@ where
     AudioWorkerHandle {
         ring,
         shared: Arc::new(WorkerShared {
+            tick_hz,
             stop,
             waker: thread.thread().clone(),
             thread: Mutex::new(Some(thread)),

@@ -728,6 +728,10 @@ struct GpuPuppet {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    /// Hash of the pose inputs (clips, blend, rate, time) last skinned and uploaded.
+    pose_hash: Option<u64>,
+    /// Reused CPU vertex scratch (no per-frame allocation).
+    scratch: Vec<LayerVertex>,
 }
 
 struct GpuEffectLayer {
@@ -760,6 +764,8 @@ struct GpuText {
     quad: wgpu::Buffer,
     /// Size of the quad in layer units (the layer size, or the bitmap size for auto-sized text).
     quad_size: Vec2,
+    /// Inputs of the last `update_text`; an identical call is a no-op (no allocation).
+    last_input: Option<(String, TextStyle, Vec2)>,
     /// Keeps the bitmap texture alive for `draw`.
     _texture: wgpu::Texture,
 }
@@ -2163,6 +2169,7 @@ impl SceneRenderer {
                 mapped_at_creation: false,
             }),
             quad_size: Vec2::ONE,
+            last_input: None,
             _texture: texture,
         }
     }
@@ -2179,6 +2186,13 @@ impl SceneRenderer {
         text: &str,
         style: &TextStyle,
     ) {
+        if t.last_input
+            .as_ref()
+            .is_some_and(|(s, st, sz)| s == text && st == style && *sz == layer_size)
+        {
+            return;
+        }
+        t.last_input = Some((text.to_string(), style.clone(), layer_size));
         let (w, h) = bitmap_size(&t.font, text, style, (layer_size.x, layer_size.y));
         let key = TextKey {
             text: text.to_string(),
@@ -2255,6 +2269,8 @@ impl SceneRenderer {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
+            pose_hash: None,
+            scratch: Vec::new(),
         })
     }
 
@@ -2465,19 +2481,39 @@ impl SceneRenderer {
                                 });
                             }
                         }
-                        let bones = layered_bone_matrices(&p.skeleton, &clips, frame.time);
-                        let positions = PuppetDeformer::deform(&p.vertices, &bones, &[]);
-                        let verts: Vec<LayerVertex> = positions
-                            .iter()
-                            .zip(&p.vertices)
-                            .map(|(pos, v)| LayerVertex {
-                                position: *pos,
-                                // Base and effect passes already crop the source padding.
-                                texcoord: v.uv,
-                            })
-                            .collect();
-                        if !verts.is_empty() {
-                            queue.write_buffer(&p.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+                        let pose_hash = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            frame.time.to_bits().hash(&mut h);
+                            for c in &clips {
+                                c.animation.hash(&mut h);
+                                c.blend.to_bits().hash(&mut h);
+                                c.rate.to_bits().hash(&mut h);
+                                c.additive.hash(&mut h);
+                            }
+                            h.finish()
+                        };
+                        // A paused scene (same time, same clips) keeps the uploaded pose.
+                        if p.pose_hash != Some(pose_hash) {
+                            p.pose_hash = Some(pose_hash);
+                            let bones = layered_bone_matrices(&p.skeleton, &clips, frame.time);
+                            let positions = PuppetDeformer::deform(&p.vertices, &bones, &[]);
+                            p.scratch.clear();
+                            p.scratch
+                                .extend(positions.iter().zip(&p.vertices).map(|(pos, v)| {
+                                    LayerVertex {
+                                        position: *pos,
+                                        // Base and effect passes already crop the source padding.
+                                        texcoord: v.uv,
+                                    }
+                                }));
+                            if !p.scratch.is_empty() {
+                                queue.write_buffer(
+                                    &p.vertex_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&p.scratch),
+                                );
+                            }
                         }
                     }
                 }

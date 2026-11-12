@@ -229,6 +229,7 @@ pub fn run() {
             commands::library::wallpaper_save_preset,
             commands::library::wallpaper_apply_preset,
             commands::monitor::playback_set_paused,
+            controls::playback_next,
             commands::monitor::monitor_set_volume,
             // --- Playlists, Auto-Updater & Global Settings ---
             commands::playlist::playlist_list,
@@ -301,7 +302,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 49, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 50, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

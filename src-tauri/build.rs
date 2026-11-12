@@ -44,6 +44,7 @@ const APP_COMMANDS: &[&str] = &[
     "wallpaper_save_preset",
     "wallpaper_apply_preset",
     "playback_set_paused",
+    "playback_next",
     "monitor_set_volume",
     "playlist_list",
     "playlist_save",

@@ -116,18 +116,16 @@ describe('Main studio window', () => {
     }
   });
 
-  it('points the Photography details drawer to the one place for photo settings', async () => {
+  it('changes photo settings right in the Photography details drawer', async () => {
     await act(async () => { render(<App />); });
     const fitBefore = useAppStore.getState().settings!.defaultFitMode;
     const sourcesBefore = useAppStore.getState().monitors.map((monitor) => monitor.activeSource);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Details for Ian Truong Photography' })); });
     const details = within(screen.getByRole('complementary', { name: 'Wallpaper details' }));
     expect(details.getByRole('heading', { name: 'Ian Truong Photography' })).toBeTruthy();
-    // Photo settings are not duplicated in the drawer.
-    expect(details.queryByRole('combobox', { name: 'Photo fit' })).toBeNull();
-    await act(async () => { fireEvent.click(details.getByRole('button', { name: 'Open Photography settings' })); });
-
-    const fit = await screen.findByRole('combobox', { name: 'Photo fit' });
+    // The common photo settings are right in the drawer.
+    expect(details.getByRole('combobox', { name: 'Change photo every' })).toBeTruthy();
+    const fit = details.getByRole('combobox', { name: 'Photo fit' });
     const [value, label] = fitBefore === 'fit_black' ? ['fill', 'Fill screen (crop)'] : ['fit_black', 'Fit, black bars'];
     fireEvent.click(fit);
     try {

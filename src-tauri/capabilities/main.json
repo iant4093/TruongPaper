@@ -63,6 +63,7 @@
     "allow-wallpaper-save-preset",
     "allow-wallpaper-apply-preset",
     "allow-playback-set-paused",
+    "allow-playback-next",
     "allow-monitor-set-volume",
     "allow-playlist-list",
     "allow-playlist-save",

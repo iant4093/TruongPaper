@@ -70,6 +70,7 @@ export const App: React.FC = () => {
   const dismissWriteError = useAppStore((s) => s.dismissWriteError);
   const photoSourceSelected = useAppStore((s) => s.selectedPhotoSource);
   const wallpaperSelected = useAppStore((s) => s.wallpapers.some((w) => w.wallpaperId === s.selectedWallpaperId));
+  const playlistSelected = useAppStore((s) => s.playlists.some((p) => p.playlistId === s.selectedPlaylistId));
   const cachedBytes = useAppStore((s) => s.photoStatus?.cachedBytes ?? 0);
   const authOpen = useEverTrue(useAppStore((s) => s.authModalOpen));
   const previewOpen = useEverTrue(useAppStore((s) => !!s.inspectedWorkshop));
@@ -112,21 +113,21 @@ export const App: React.FC = () => {
   const showingCurrent = useAppStore((s) => {
     const m = s.monitors.find((x) => x.monitorId === s.selectedMonitorId) ?? s.monitors[0];
     if (!m) return false;
-    const currentId = m.activeSource.kind === 'workshop' ? m.activeSource.wallpaperId
-      : m.activeSource.kind === 'playlist' ? m.activeWallpaperId : null;
-    return currentId ? s.selectedWallpaperId === currentId && !s.selectedPhotoSource : s.selectedPhotoSource;
+    if (m.activeSource.kind === 'playlist') return s.selectedPlaylistId === m.activeSource.playlistId;
+    if (m.activeSource.kind === 'workshop') return s.selectedWallpaperId === m.activeSource.wallpaperId;
+    return s.selectedPhotoSource;
   });
   const openCurrentDetails = useCallback(() => {
     const s = useAppStore.getState();
     const m = s.monitors.find((x) => x.monitorId === s.selectedMonitorId) ?? s.monitors[0];
     const source = m?.activeSource;
     if (source?.kind === 'workshop') s.selectWallpaper(source.wallpaperId);
-    else if (source?.kind === 'playlist' && m?.activeWallpaperId) s.selectWallpaper(m.activeWallpaperId);
+    else if (source?.kind === 'playlist') s.selectPlaylist(source.playlistId);
     else s.selectPhotoSource();
     setDetailsOpen(true);
   }, []);
 
-  const canInspect = photoSourceSelected || wallpaperSelected;
+  const canInspect = photoSourceSelected || wallpaperSelected || playlistSelected;
   const showInspector = detailsOpen && canInspect;
   const wasInspectorOpen = useRef(false);
   useEffect(() => {

@@ -22,6 +22,7 @@
     "allow-monitors-list",
     "allow-monitor-apply-wallpaper",
     "allow-playback-set-paused",
+    "allow-playback-next",
     "allow-playlist-list",
     "allow-settings-get",
     "allow-settings-update"

@@ -30,7 +30,9 @@ afterEach(() => {
 });
 
 const NEON = 'workshop:2841928371';
-const tileNames = () => tileEls().map((b) => b.getAttribute('aria-label')!.replace(/, current wallpaper$/, ''));
+// Playlists sit first in the grid and are not part of the wallpaper sort.
+const tileNames = () => tileEls().map((b) => b.getAttribute('aria-label')!.replace(/, current wallpaper$/, ''))
+  .filter((name) => !useAppStore.getState().playlists.some((p) => p.name === name));
 
 describe('wallpaper load errors', () => {
   const fail = (message = 'Missing scene.pkg') =>

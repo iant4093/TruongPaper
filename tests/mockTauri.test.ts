@@ -54,6 +54,7 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   wallpaper_save_preset: { wallpaperId: 'workshop:2841928371', presetName: 'Night' },
   wallpaper_apply_preset: { wallpaperId: 'workshop:2841928371', presetId: 'missing' },
   playback_set_paused: { paused: true },
+  playback_next: { monitorId: 'DISPLAY-1' },
   monitor_set_volume: { monitorId: 'DISPLAY-1', volume: 0.5 },
   playlist_save: { playlist: { playlistId: 'x', name: 'X', mode: 'photos_only', intervalSeconds: 60, items: [{ kind: 'photo_api_draw' }] } },
   settings_update: { settings: { fpsCap: 120 } },

@@ -1,4 +1,3 @@
-import { Dropdown } from '../Dropdown';
 // src/components/views/PlaylistsView.tsx
 // §2.4 View 3: "Unified Playlists & Rotation" View
 import React, { useEffect, useRef, useState } from 'react';
@@ -9,6 +8,7 @@ import { PLAYLIST_MODE_LABEL, ROTATION_INTERVALS, TRANSITION_LABEL, plural } fro
 import { confirmAction, toast } from '../../store/feedback';
 import type { Playlist, TransitionType, WallpaperPreset } from '../../types/ipc';
 import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
+import { PlaylistEditor, playlistIsValid } from '../PlaylistEditor';
 
 export interface PlaylistExportFile {
   format: 'truongpaper-playlists';
@@ -50,7 +50,6 @@ export function parsePlaylistExport(raw: string): PlaylistExportFile {
 
 export const PlaylistsView: React.FC = () => {
   const monitors = useAppStore((s) => s.monitors);
-  const wallpapers = useAppStore((s) => s.wallpapers);
   const playlists = useAppStore((s) => s.playlists);
   const settings = useAppStore((s) => s.settings);
   const savedAlbums = useAppStore((s) => s.savedAlbums);
@@ -60,7 +59,6 @@ export const PlaylistsView: React.FC = () => {
   const deletePlaylist = useAppStore((s) => s.deletePlaylist);
   const addAlbum = useAppStore((s) => s.addAlbum);
 
-  const workshopItems = wallpapers.filter((w) => w.type !== 'photo');
   /** Which displays currently play each playlist. */
   const usedBy = (playlistId: string) =>
     monitors.filter((m) => m.activeSource.kind === 'playlist' && m.activeSource.playlistId === playlistId).map((m) => m.name);
@@ -97,7 +95,7 @@ export const PlaylistsView: React.FC = () => {
     try {
       const saved = await savePlaylist(draft);
       setDraft(null);
-      toast.success(`Saved playlist “${saved.name}”. Choose it for a display in Displays.`);
+      toast.success(`Saved playlist “${saved.name}”. Set it from Library.`);
     } catch (err) {
       toast.error(err);
     }
@@ -156,10 +154,6 @@ export const PlaylistsView: React.FC = () => {
     }
   };
 
-  const draftWorkshopIds = new Set(
-    draft?.items.flatMap((i) => (i.kind === 'workshop' ? [i.wallpaperId] : [])) ?? []
-  );
-  const draftPhotoDraws = draft?.items.filter((i) => i.kind === 'photo_api_draw').length ?? 0;
   const intervalLabel = (seconds: number) =>
     seconds === 0 ? 'manual only' : `every ${ROTATION_INTERVALS.find((r) => r.seconds === seconds)?.label ?? `${seconds}s`}`;
 
@@ -229,91 +223,12 @@ export const PlaylistsView: React.FC = () => {
 
       {draft && (
         <div className="card" style={{ padding: 16, marginTop: 12 }}>
-          <input
-            type="text"
-            aria-label="Playlist name"
-            value={draft.name}
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            className="button"
-            style={{ width: '100%', textAlign: 'left', cursor: 'text', marginBottom: 12 }}
-          />
-          <SegmentedControl
-            value={draft.mode}
-            options={[
-              ['photos_only', 'Photos only'],
-              ['workshop_only', 'Wallpapers only'],
-              ['mixed', 'Mixed'],
-            ]}
-            onChange={(next) =>
-              setDraft({
-                ...draft,
-                mode: next,
-                items:
-                  next === 'photos_only'
-                    ? [{ kind: 'photo_api_draw' }]
-                    : next === 'workshop_only'
-                      ? draft.items.filter((i) => i.kind === 'workshop')
-                      : draft.items,
-              })
-            }
-          />
-          <Dropdown className="playlist-interval" label="Playlist interval" value={draft.intervalSeconds}
-            options={ROTATION_INTERVALS.map((interval) => [interval.seconds, interval.label])}
-            onChange={(intervalSeconds) => setDraft({ ...draft, intervalSeconds })} />
-
-          {draft.mode === 'mixed' && (
-            <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginTop: 12 }}>
-              <span>Photos per round</span>
-              <input
-                type="number"
-                min={0}
-                max={10}
-                value={draftPhotoDraws}
-                style={{ width: 60 }}
-                onChange={(e) => {
-                  const n = Math.max(0, Math.min(10, Number(e.target.value) || 0));
-                  setDraft({
-                    ...draft,
-                    items: [
-                      ...Array.from({ length: n }, () => ({ kind: 'photo_api_draw' as const })),
-                      ...draft.items.filter((i) => i.kind === 'workshop'),
-                    ],
-                  });
-                }}
-              />
-            </label>
-          )}
-
-          {draft.mode !== 'photos_only' && (
-            <div style={{ marginTop: 12 }}>
-              {workshopItems.map((w) => (
-                <label key={w.wallpaperId} style={{ display: 'flex', gap: 8, fontSize: 13, marginBottom: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={draftWorkshopIds.has(w.wallpaperId)}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        items: e.target.checked
-                          ? [...draft.items, { kind: 'workshop', wallpaperId: w.wallpaperId }]
-                          : draft.items.filter((i) => !(i.kind === 'workshop' && i.wallpaperId === w.wallpaperId)),
-                      })
-                    }
-                  />
-                  {w.title}
-                </label>
-              ))}
-              {workshopItems.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No wallpapers in the library yet.</div>
-              )}
-            </div>
-          )}
-
+          <PlaylistEditor value={draft} onChange={setDraft} />
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             <button
               type="button"
               className="button button-primary"
-              disabled={draft.items.length === 0 || !draft.name.trim()}
+              disabled={!playlistIsValid(draft)}
               onClick={() => void saveDraft()}
             >
               <Save size={14} /> Save playlist

@@ -281,6 +281,7 @@ export const IPC_COMMANDS = [
   'wallpaper_save_preset',
   'wallpaper_apply_preset',
   'playback_set_paused',
+  'playback_next',
   'monitor_set_volume',
   // Playlists, Auto-Updater & Global Settings
   'playlist_list',

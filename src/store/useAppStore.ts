@@ -69,6 +69,8 @@ export interface AppState {
   selectedMonitorId: string | null;
   selectedWallpaperId: string | null;
   selectedPhotoSource: boolean;
+  /** Playlist whose details are open (exclusive with the two above). */
+  selectedPlaylistId: string | null;
   playlists: Playlist[];
   settings: AppSettings | null;
   systemPowerReasons: string[];
@@ -139,6 +141,9 @@ export interface AppState {
   selectMonitor: (monitorId: string) => void;
   selectWallpaper: (wallpaperId: string | null) => void;
   selectPhotoSource: () => void;
+  selectPlaylist: (playlistId: string) => void;
+  /** Next photo or next playlist item on a display. */
+  playbackNext: (monitorId: string) => Promise<void>;
   applyMonitorSource: (monitorId: string, source: WallpaperSource) => Promise<void>;
   updateWallpaperProperty: (wallpaperId: string, key: string, value: string | number | boolean) => Promise<void>;
   updateWallpaperAdjustments: (wallpaperId: string, adjustments: UniversalAdjustments) => Promise<void>;
@@ -211,6 +216,7 @@ export const useAppStore = create<AppState>((set, get) => {
     selectedMonitorId: readSelectedMonitor(),
     selectedWallpaperId: null,
     selectedPhotoSource: false,
+    selectedPlaylistId: null,
     playlists: [],
     settings: null,
     systemPowerReasons: [],
@@ -641,8 +647,14 @@ export const useAppStore = create<AppState>((set, get) => {
         // No Tauri event bridge (plain browser): single window, nothing to sync.
       }
     },
-    selectWallpaper: (wallpaperId) => set({ selectedWallpaperId: wallpaperId, selectedPhotoSource: false }),
-    selectPhotoSource: () => set({ selectedWallpaperId: null, selectedPhotoSource: true }),
+    selectWallpaper: (wallpaperId) => set({ selectedWallpaperId: wallpaperId, selectedPhotoSource: false, selectedPlaylistId: null }),
+    selectPhotoSource: () => set({ selectedWallpaperId: null, selectedPhotoSource: true, selectedPlaylistId: null }),
+    selectPlaylist: (playlistId) => set({ selectedWallpaperId: null, selectedPhotoSource: false, selectedPlaylistId: playlistId }),
+    playbackNext: async (monitorId) => {
+      const monitor = get().monitors.find((m) => m.monitorId === monitorId);
+      if (monitor?.activeSource.kind === 'photo_api') { await get().rotateNextPhoto(monitorId); return; }
+      await invoke('playback_next', { monitorId });
+    },
 
     applyMonitorSource: async (monitorId, source) => {
       const seq = ++applySeq;

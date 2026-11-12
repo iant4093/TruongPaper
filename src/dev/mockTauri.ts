@@ -722,6 +722,13 @@ export function createMockBackend(
       emitEvent('playback://pause-changed', { monitorId, paused });
       return null;
     },
+    playback_next: (args) => {
+      const monitor = monitors.find((m) => m.monitorId === String(args.monitorId));
+      if (!monitor) throw new Error(`Monitor '${String(args.monitorId)}' is not connected`);
+      if (monitor.activeSource.kind === 'workshop') throw new Error('This display shows a single wallpaper: nothing to advance');
+      if (monitor.activeSource.kind === 'photo_api') return rotate(monitor.monitorId);
+      return null;
+    },
 
     monitor_set_volume: (args) => {
       const monitorId = String(args.monitorId);

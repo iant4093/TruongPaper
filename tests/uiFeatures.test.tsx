@@ -187,7 +187,8 @@ describe('keyboard navigation in the grid', () => {
     const target = tiles()[1];
     target.focus();
     await act(async () => { fireEvent.keyDown(target, { key: 'Enter' }); });
-    await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource.kind).toBe('workshop'));
+    // The tile after Photography is a playlist, set straight from the Library.
+    await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource.kind).toBe('playlist'));
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', before); });
 
     (document.activeElement as HTMLElement).blur();
@@ -530,7 +531,7 @@ describe('shell', () => {
     useAppStore.setState((s) => ({ photoStatus: { ...s.photoStatus!, currentPhotoByMonitor: { ...s.photoStatus!.currentPhotoByMonitor, 'DISPLAY-1': null } } }));
     const next = await screen.findByRole('button', { name: 'Next photo' });
     expect((next as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Next photo works while this display shows photos.')).toBeTruthy();
+    expect(screen.getByText('Next works for photos and playlists.')).toBeTruthy();
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', { kind: 'photo_api' }); });
   });
 

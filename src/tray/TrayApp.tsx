@@ -15,7 +15,7 @@ export const TrayApp: React.FC = () => {
   const monitors = useAppStore((s) => s.monitors);
   const wallpapers = useAppStore((s) => s.wallpapers);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
-  const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
+  const playbackNext = useAppStore((s) => s.playbackNext);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setPhotoFavorite = useAppStore((s) => s.setPhotoFavorite);
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
@@ -87,7 +87,8 @@ export const TrayApp: React.FC = () => {
   const isPaused = activeMonitor?.userPaused ?? false;
   const { wallpaper: currentWallpaper, photo: currentPhoto } =
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
-  const canRotate = !!currentPhoto || activeMonitor?.activeSource.kind === 'photo_api';
+  const isPlaylist = activeMonitor?.activeSource.kind === 'playlist';
+  const canRotate = isPlaylist || activeMonitor?.activeSource.kind === 'photo_api';
   const currentTitle = currentWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
   const currentPreview = wallpaperPreviewSrc(currentWallpaper) || photoPreviewSrc(currentPhoto);
   const currentDetails = currentWallpaper
@@ -114,7 +115,7 @@ export const TrayApp: React.FC = () => {
     setSwitching(true);
     setActionError(null);
     try {
-      if (canRotate) await rotateNextPhoto(activeMonitorId);
+      if (canRotate) await playbackNext(activeMonitorId);
       else await applyMonitorSource(activeMonitorId, { kind: 'photo_api' });
     } catch (error) {
       setActionError(String(error));
@@ -192,7 +193,7 @@ export const TrayApp: React.FC = () => {
               disabled={!activeMonitorId || switching}
               onClick={() => void showPhotos()}
             >
-              {switching ? 'Loading photo…' : canRotate ? 'Next photo' : 'Use photos'}
+              {switching ? 'Loading…' : isPlaylist ? 'Next in playlist' : canRotate ? 'Next photo' : 'Use photos'}
             </button>
           </div>
 

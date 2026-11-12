@@ -20,7 +20,11 @@ function usePlaybackInfo() {
       monitorName: monitor?.name,
       paused: monitor?.userPaused ?? false,
       autoPaused,
-      canRotate: monitor?.activeSource.kind === 'photo_api' || !!photo,
+      kind: monitor?.activeSource.kind,
+      canRotate: monitor?.activeSource.kind === 'photo_api' || monitor?.activeSource.kind === 'playlist',
+      playlistName: monitor?.activeSource.kind === 'playlist'
+        ? s.playlists.find((p) => monitor.activeSource.kind === 'playlist' && p.playlistId === monitor.activeSource.playlistId)?.name
+        : undefined,
       title: wallpaper?.title ?? photo?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected',
       preview: wallpaperPreviewSrc(wallpaper) ?? photoPreviewSrc(photo),
     };
@@ -53,8 +57,9 @@ const LoadErrors: React.FC = () => {
 export const PlaybackBar: React.FC = () => {
   const info = usePlaybackInfo();
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
-  const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
+  const playbackNext = useAppStore((s) => s.playbackNext);
   const state = info.paused ? 'Paused' : info.autoPaused ? 'Auto-paused' : 'Playing';
+  const nextLabel = info.kind === 'playlist' ? 'Next in playlist' : 'Next photo';
   return (
     <>
       <LoadErrors />
@@ -62,18 +67,20 @@ export const PlaybackBar: React.FC = () => {
         <div className="now-playing-image"><Thumb src={info.preview} alt={info.title} height={36} /></div>
         <div className="now-playing-copy">
           <div className="now-playing-title">{info.title}</div>
-          <div className="now-playing-meta">{state}{info.monitorName ? ` on ${info.monitorName}` : ''}</div>
+          <div className="now-playing-meta">
+            {state}{info.monitorName ? ` on ${info.monitorName}` : ''}{info.playlistName ? ` · Playlist: ${info.playlistName}` : ''}
+          </div>
         </div>
-        {!info.canRotate && <span className="playback-hint" id="next-photo-hint">Next photo works while this display shows photos.</span>}
+        {!info.canRotate && <span className="playback-hint" id="next-photo-hint">Next works for photos and playlists.</span>}
         <button type="button" className="button playback-control" disabled={!info.monitorId}
           title={info.paused ? 'Resume playback on this display' : 'Pause playback on this display'}
           onClick={() => setPlaybackPaused(!info.paused, info.monitorId).catch((err) => toast.error(err, 'Could not change playback'))}>
           {info.paused ? <Play size={14} /> : <Pause size={14} />}{info.paused ? 'Resume' : 'Pause'}
         </button>
-        <button type="button" className="button playback-control" disabled={!info.canRotate}
+        <button type="button" className="button playback-control" disabled={!info.canRotate || !info.monitorId}
           aria-describedby={info.canRotate ? undefined : 'next-photo-hint'}
-          onClick={() => rotateNextPhoto(info.monitorId).catch((err) => toast.error(err, 'Could not change photo'))}>
-          Next photo<SkipForward size={14} />
+          onClick={() => { if (info.monitorId) playbackNext(info.monitorId).catch((err) => toast.error(err, 'Could not go to the next one')); }}>
+          {nextLabel}<SkipForward size={14} />
         </button>
       </footer>
     </>

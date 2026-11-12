@@ -281,6 +281,9 @@ pub struct MonitorInfo {
     pub user_paused: bool,
     pub active_source: WallpaperSource,
     pub active_wallpaper_id: Option<String>,
+    /// Per-display output volume `0..=1` (multiplies the wallpaper's own volume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f32>,
 }
 
 #[derive(Clone, Serialize)]

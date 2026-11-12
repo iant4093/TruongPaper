@@ -26,6 +26,10 @@ pub async fn settings_update(
         let mut guard = state.settings.lock();
         let before = guard.clone();
         let after = sanitize_settings(merge_settings_patch(&before, &settings)?);
+        // Registered first: a shortcut that is invalid or taken rejects the whole update.
+        if before.next_hotkey != after.next_hotkey || before.pause_hotkey != after.pause_hotkey {
+            crate::controls::apply_hotkeys(&app, &after.next_hotkey, &after.pause_hotkey)?;
+        }
         {
             let conn = state.db.lock();
             persist_settings(&conn, &after).map_err(|e| e.to_string())?;

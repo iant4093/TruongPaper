@@ -111,8 +111,13 @@ pub fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     if !fps_ok {
         s.fps_cap = serde_json::json!(60);
     }
+    s.next_hotkey = s.next_hotkey.trim().chars().take(MAX_HOTKEY_LEN).collect();
+    s.pause_hotkey = s.pause_hotkey.trim().chars().take(MAX_HOTKEY_LEN).collect();
     s
 }
+
+/// Longest accepted accelerator string.
+const MAX_HOTKEY_LEN: usize = 64;
 
 /// Loads [`AppSettings`] (stored blob merged over defaults), then overlays the photo keys that
 /// `photo_*` commands write directly.
@@ -258,5 +263,34 @@ mod tests {
             get_setting::<bool>(&conn, SETTING_SKIP_MISMATCHED_ORIENTATION).unwrap(),
             Some(false)
         );
+    }
+
+    #[test]
+    fn hotkey_settings_default_trim_and_persist() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.next_hotkey, "CmdOrCtrl+Alt+Right");
+        assert_eq!(defaults.pause_hotkey, "CmdOrCtrl+Alt+P");
+        // A blob saved before the hotkeys existed keeps the defaults.
+        let conn = test_db();
+        set_setting(
+            &conn,
+            SETTING_APP_SETTINGS,
+            &json!({"rotationIntervalSeconds": 60}),
+        )
+        .unwrap();
+        assert_eq!(load_settings(&conn).next_hotkey, "CmdOrCtrl+Alt+Right");
+        let merged = sanitize_settings(
+            merge_settings_patch(
+                &defaults,
+                &json!({"nextHotkey": "  CmdOrCtrl+Alt+N ", "pauseHotkey": ""}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(merged.next_hotkey, "CmdOrCtrl+Alt+N");
+        assert_eq!(merged.pause_hotkey, "", "empty disables the hotkey");
+        persist_settings(&conn, &merged).unwrap();
+        let loaded = load_settings(&conn);
+        assert_eq!(loaded.next_hotkey, "CmdOrCtrl+Alt+N");
+        assert_eq!(loaded.pause_hotkey, "");
     }
 }

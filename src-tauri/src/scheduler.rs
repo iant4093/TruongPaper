@@ -201,6 +201,8 @@ pub struct RotationScheduler {
     launched: bool,
     wake_generation: u64,
     manual: Vec<ManualNote>,
+    /// Monitors whose next playlist item was requested by the user (hotkey / tray).
+    forced: Vec<String>,
 }
 
 impl RotationScheduler {
@@ -211,7 +213,13 @@ impl RotationScheduler {
             launched: false,
             wake_generation,
             manual: Vec::new(),
+            forced: Vec::new(),
         }
+    }
+
+    /// The user asked for the next item of `monitor_id` now; applied by the next [`Self::plan`].
+    pub fn note_force_next(&mut self, monitor_id: &str) {
+        self.forced.push(monitor_id.to_string());
     }
 
     /// Records a manual rotation; applied by the next [`Self::plan`].
@@ -248,6 +256,7 @@ impl RotationScheduler {
         let launch = !std::mem::replace(&mut self.launched, true);
         let woke = std::mem::replace(&mut self.wake_generation, wake_generation) != wake_generation;
         let manual = std::mem::take(&mut self.manual);
+        let forced = std::mem::take(&mut self.forced);
         for (id, schedule) in &mut self.monitors {
             if !monitors.iter().any(|m| &m.monitor_id == id) {
                 schedule.restore_pending = true;
@@ -324,6 +333,20 @@ impl RotationScheduler {
                     trigger: RotationTrigger::AppLaunch,
                     action,
                 });
+                continue;
+            }
+            if forced.contains(&m.monitor_id) {
+                // User-requested "next": advance now, even while paused or set to "Never".
+                s.last_rotation = now;
+                s.wake_pending = false;
+                if let Some(action) = rotation_action(s, m, false) {
+                    out.push(PlannedRotation {
+                        monitor_id: m.monitor_id.clone(),
+                        source: m.source.clone(),
+                        trigger: RotationTrigger::Manual,
+                        action,
+                    });
+                }
                 continue;
             }
             if m.interval_secs == 0 {
@@ -440,6 +463,21 @@ pub fn note_manual_rotation(monitor_id: Option<&str>, restart_playlist: bool) {
     });
 }
 
+static FORCED_NEXT: parking_lot::Mutex<Vec<String>> = parking_lot::const_mutex(Vec::new());
+
+/// Advances the playlist of `monitor_id` on the next scheduler tick (global hotkey / tray Next).
+pub fn request_next(monitor_id: &str) {
+    let mut ids = FORCED_NEXT.lock();
+    if ids.len() >= MAX_PENDING_MANUAL_NOTES {
+        ids.remove(0);
+    }
+    ids.push(monitor_id.to_string());
+}
+
+fn take_forced_next() -> Vec<String> {
+    std::mem::take(&mut *FORCED_NEXT.lock())
+}
+
 fn take_manual_notes() -> Vec<ManualNote> {
     std::mem::take(&mut *MANUAL_NOTES.lock())
 }
@@ -525,6 +563,9 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
     }
     for id in take_disconnected() {
         scheduler.mark_disconnected(&id);
+    }
+    for id in take_forced_next() {
+        scheduler.note_force_next(&id);
     }
     let plans = scheduler.plan(
         Instant::now(),
@@ -1148,5 +1189,39 @@ mod tests {
             note_manual_rotation(Some("X"), false);
         }
         assert!(take_manual_notes().len() <= MAX_PENDING_MANUAL_NOTES);
+    }
+
+    #[test]
+    fn requested_next_advances_a_playlist_even_when_paused_or_manual_only() {
+        let p = playlist(PlaylistMode::Mixed, vec![ws("a"), ws("b"), ws("c")]);
+        let mut tick = playlist_tick("A", &p);
+        let t0 = Instant::now();
+        let mut s = RotationScheduler::new(0);
+        // The launch tick rotates to item 1.
+        s.plan(t0, std::slice::from_ref(&tick), 0, false);
+        tick.interval_secs = 0;
+        tick.renderable = false;
+        assert!(s
+            .plan(secs(t0, 5), std::slice::from_ref(&tick), 0, false)
+            .is_empty());
+        s.note_force_next("A");
+        let plans = s.plan(secs(t0, 6), std::slice::from_ref(&tick), 0, false);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].trigger, RotationTrigger::Manual);
+        assert!(matches!(
+            plans[0].action,
+            RotationAction::ShowPlaylistItem { index: 2, .. }
+        ));
+        assert!(s
+            .plan(secs(t0, 7), std::slice::from_ref(&tick), 0, false)
+            .is_empty());
+    }
+
+    #[test]
+    fn forced_next_requests_are_bounded() {
+        for _ in 0..(MAX_PENDING_MANUAL_NOTES + 10) {
+            request_next("X");
+        }
+        assert!(take_forced_next().len() <= MAX_PENDING_MANUAL_NOTES);
     }
 }

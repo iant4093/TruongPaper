@@ -14,13 +14,8 @@ struct AudioBridge {
     read: FrameReader,
     all_paused: Arc<AtomicBool>,
     gain: Arc<AtomicU32>,
-    worker: truongpaper_audio::AudioWorkerHandle,
-}
-
-impl Drop for AudioBridge {
-    fn drop(&mut self) {
-        self.worker.stop();
-    }
+    /// Dropping the bridge drops the last handle, which stops and joins the worker.
+    _worker: truongpaper_audio::AudioWorkerHandle,
 }
 
 static BRIDGE: Mutex<Option<AudioBridge>> = parking_lot::const_mutex(None);
@@ -41,7 +36,7 @@ fn start() -> AudioBridge {
         read: Box::new(move || latest.load_full()),
         all_paused,
         gain,
-        worker,
+        _worker: worker,
     }
 }
 
@@ -55,19 +50,41 @@ pub fn sensitivity_gain(sensitivity: f32) -> f32 {
 }
 
 /// `Some(sensitivity)` = an audio-reactive wallpaper is playing (starts / resumes the worker);
-/// `None` suspends it.
+/// `None` suspends it: the worker stops, joins and releases the capture device.
+///
+/// The capture device is started and stopped outside the `BRIDGE` mutex, so
+/// [`latest_frame`] never waits on a slow device open or on a worker join.
 pub fn set_demand(demand: Option<f32>) {
-    let mut current = BRIDGE.lock();
     match demand {
         Some(sensitivity) => {
-            let bridge = current.get_or_insert_with(start);
-            bridge
-                .gain
-                .store(sensitivity_gain(sensitivity).to_bits(), Ordering::Relaxed);
-            bridge.all_paused.store(false, Ordering::Relaxed);
+            let gain = sensitivity_gain(sensitivity).to_bits();
+            let running = {
+                let current = BRIDGE.lock();
+                current.as_ref().map(|bridge| {
+                    bridge.gain.store(gain, Ordering::Relaxed);
+                    bridge.all_paused.store(false, Ordering::Relaxed);
+                })
+            };
+            if running.is_some() {
+                return;
+            }
+            let bridge = start();
+            bridge.gain.store(gain, Ordering::Relaxed);
+            let loser = {
+                let mut current = BRIDGE.lock();
+                if current.is_none() {
+                    *current = Some(bridge);
+                    None
+                } else {
+                    Some(bridge)
+                }
+            };
+            // A concurrent caller won the race: stop our duplicate outside the lock.
+            drop(loser);
         }
         None => {
-            current.take();
+            let old = BRIDGE.lock().take();
+            drop(old);
         }
     }
 }

@@ -148,6 +148,23 @@ pub struct AppSettings {
     pub launch_at_login: bool,
     #[serde(default)]
     pub sync_lock_screen: bool,
+    /// Global shortcut (Tauri accelerator) for "Next wallpaper"; empty = disabled.
+    #[serde(default = "default_next_hotkey")]
+    pub next_hotkey: String,
+    /// Global shortcut (Tauri accelerator) for "Pause / Resume"; empty = disabled.
+    #[serde(default = "default_pause_hotkey")]
+    pub pause_hotkey: String,
+}
+
+pub const DEFAULT_NEXT_HOTKEY: &str = "CmdOrCtrl+Alt+Right";
+pub const DEFAULT_PAUSE_HOTKEY: &str = "CmdOrCtrl+Alt+P";
+
+fn default_next_hotkey() -> String {
+    DEFAULT_NEXT_HOTKEY.into()
+}
+
+fn default_pause_hotkey() -> String {
+    DEFAULT_PAUSE_HOTKEY.into()
 }
 
 impl Default for AppSettings {
@@ -167,6 +184,8 @@ impl Default for AppSettings {
             battery_policy: "pause_animations".into(),
             launch_at_login: false,
             sync_lock_screen: false,
+            next_hotkey: default_next_hotkey(),
+            pause_hotkey: default_pause_hotkey(),
         }
     }
 }

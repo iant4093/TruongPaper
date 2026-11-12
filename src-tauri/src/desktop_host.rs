@@ -1206,7 +1206,9 @@ impl MonitorRenderer {
         }
         self.was_rendering = should_render;
         let base = rt.map(|r| r.uniforms).unwrap_or_default();
-        let adjustments = rt.map(|r| r.adjustments).unwrap_or_default();
+        let adjustments = rt
+            .map(MonitorRuntime::effective_adjustments)
+            .unwrap_or_default();
         if let Content::Scene(scene) = &mut self.content {
             scene.set_paused(!should_render);
             scene.set_sound_owner(sound_owner);
@@ -1492,7 +1494,9 @@ fn load_scene(
     for warning in renderer.load(device, queue, &vfs, runtime.graph()) {
         tracing::debug!("scene {}: {warning}", desc.scene_file);
     }
-    let adjustments = rt.map(|r| r.adjustments).unwrap_or_default();
+    let adjustments = rt
+        .map(MonitorRuntime::effective_adjustments)
+        .unwrap_or_default();
     let videos = open_embedded_videos(&renderer, &vfs, desc, &adjustments);
     let mut state = SceneState {
         wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),

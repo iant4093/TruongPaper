@@ -41,6 +41,9 @@ async function checkWithDiagnosis(): Promise<Update | null> {
       return await check({ timeout: 20000 });
     } catch (e) {
       const status = await invoke<string>('update_feed_status').catch(() => '');
+      if (status === 'feed_not_found') {
+        throw new Error('No update feed is available yet. In-app updates start when a release is published.');
+      }
       if (status && status !== 'ok') throw new Error(`${status}. Try again in a few minutes.`);
       throw e ?? first;
     }

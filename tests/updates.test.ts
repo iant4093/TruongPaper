@@ -86,13 +86,13 @@ describe('services/updates', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('diagnoses the release feed via update_feed_status after two failures', async () => {
+  it('explains that a missing feed requires a release', async () => {
     vi.useFakeTimers();
     const m = await freshModule();
     checkMock.mockRejectedValue(new Error('boom'));
-    invokeMock.mockResolvedValue('GitHub release feed returned HTTP 404');
+    invokeMock.mockResolvedValue('feed_not_found');
     const p = m.checkForUpdate();
-    const assertion = expect(p).rejects.toThrow('GitHub release feed returned HTTP 404. Try again in a few minutes.');
+    const assertion = expect(p).rejects.toThrow('No update feed is available yet. In-app updates start when a release is published.');
     await vi.advanceTimersByTimeAsync(1500);
     await assertion;
     expect(invokeMock).toHaveBeenCalledWith('update_feed_status');

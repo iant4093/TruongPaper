@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { Images, Search } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { WALLPAPER_TYPE_LABEL, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, formatBytes, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
 import type { WallpaperType } from '../../types/ipc';
-import { SectionTitle, Thumb, ViewHeader, SegmentedControl } from '../ui';
+import { ViewHeader, SegmentedControl } from '../ui';
 import { WallpaperCard } from '../WallpaperCard';
 
 type LibraryFilter = 'all' | WallpaperType;
@@ -39,7 +39,6 @@ export const AllWallpapersView: React.FC<{ onSelectPhotoSource: () => void }> = 
   const search = query.trim().toLowerCase();
   const items = wallpapers.filter((w) => (filter === 'all' || w.type === filter) && w.title.toLowerCase().includes(search));
   const showPhotos = filter === 'all' && 'ian truong photography photos'.includes(search);
-  const showQueue = filter === 'all' && !search && !!photoStatus;
   const apply = async (wallpaperId?: string) => {
     if (!activeMonitor || applying !== null) return;
     setError(null);
@@ -70,21 +69,6 @@ export const AllWallpapersView: React.FC<{ onSelectPhotoSource: () => void }> = 
         {items.map((w) => <WallpaperCard key={w.wallpaperId} title={w.title} preview={w.previewPath} kind={WALLPAPER_TYPE_LABEL[w.type]} detail={w.windowsOnly ? 'Windows only' : formatBytes(w.bytes)} audioReactive={w.audioReactive} selected={w.wallpaperId === selectedWallpaperId} active={activeMonitor?.activeSource.kind === 'workshop' && activeMonitor.activeSource.wallpaperId === w.wallpaperId} canApply={!!activeMonitor && applying === null} applying={applying === w.wallpaperId} onSelect={() => selectWallpaper(w.wallpaperId)} onApply={() => void apply(w.wallpaperId)} />)}
       </div>
       {!showPhotos && items.length === 0 && <div className="empty-state"><Images size={24} />No wallpapers match your search.</div>}
-      {showQueue && (
-        <>
-          <SectionTitle>{formatOfflinePhotoCount(queue.length)}</SectionTitle>
-          {queue.length > 0 && (
-            <div className="queue-strip">
-              {queue.map((photo) => (
-                <div key={photo.id} className="queue-item" title={`${photo.albumSlug} · ${formatBytes(photo.bytes)}`}>
-                  <Thumb src={photoPreviewSrc(photo)} alt={photo.albumSlug} height={80} lazy />
-                  <div className="queue-item-name">{photo.albumSlug.replace(/-/g, ' ')}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
     </div>
   );
 };

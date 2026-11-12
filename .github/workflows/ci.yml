@@ -120,7 +120,8 @@ jobs:
               cp "$b/macos/TruongPaper.app.tar.gz.sig" release-assets/TruongPaper-macOS.app.tar.gz.sig
             fi
           else
-            setup=$(ls "$b"/nsis/*-setup.exe | head -1)
+            installers=("$b"/nsis/*-setup.exe)
+            setup="${installers[0]}"
             cp "$setup" release-assets/TruongPaper-Windows-Setup.exe
             if [ -f "$setup.sig" ]; then cp "$setup.sig" release-assets/TruongPaper-Windows-Setup.exe.sig; fi
           fi
@@ -180,21 +181,25 @@ jobs:
           base=$(node -p "require('./src-tauri/tauri.conf.json').version.split('.').slice(0,2).join('.')")
           version="${base}.${GITHUB_RUN_NUMBER}"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          VERSION="$version" node -e '
+          VERSION="$version" node <<'NODE'
             const fs = require("fs");
             const v = process.env.VERSION;
             const url = (f) => `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/v${v}/${f}`;
             const sig = (f) => fs.readFileSync(`release-assets/${f}.sig`, "utf8").trim();
-            const platforms = {};
-            if (fs.existsSync("release-assets/TruongPaper-macOS.app.tar.gz.sig"))
-              platforms["darwin-aarch64"] = { signature: sig("TruongPaper-macOS.app.tar.gz"), url: url("TruongPaper-macOS.app.tar.gz") };
-            if (fs.existsSync("release-assets/TruongPaper-Windows-Setup.exe.sig"))
-              platforms["windows-x86_64"] = { signature: sig("TruongPaper-Windows-Setup.exe"), url: url("TruongPaper-Windows-Setup.exe") };
+            const platforms = Object.fromEntries([
+              ["darwin-aarch64", "TruongPaper-macOS.app.tar.gz"],
+              ["windows-x86_64", "TruongPaper-Windows-Setup.exe"],
+            ].map(([platform, file]) => {
+              if (!fs.existsSync(`release-assets/${file}`)) throw new Error(`Missing installer for ${platform}`);
+              const signature = sig(file);
+              if (!signature) throw new Error(`Missing updater signature for ${platform}`);
+              return [platform, { signature, url: url(file) }];
+            }));
             const notes = fs.readFileSync("release-notes.txt", "utf8").trim() || `TruongPaper ${v}`;
             const manifest = { version: v, notes, pub_date: new Date().toISOString(), platforms };
             fs.writeFileSync("release-assets/latest.json", JSON.stringify(manifest, null, 2));
             console.log(Object.keys(platforms));
-          '
+          NODE
           rm -f release-assets/*.sig
           (cd release-assets && sha256sum -- * > SHA256SUMS)
           ls -la release-assets

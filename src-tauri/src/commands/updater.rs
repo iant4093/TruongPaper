@@ -25,6 +25,7 @@ pub async fn update_feed_status(app: tauri::AppHandle) -> String {
     };
     match client.get(&url).send().await {
         Ok(res) if res.status().is_success() => "ok".into(),
+        Ok(res) if res.status() == reqwest::StatusCode::NOT_FOUND => "feed_not_found".into(),
         Ok(res) => format!("GitHub answered HTTP {}", res.status()),
         Err(e) if e.is_timeout() => "GitHub didn’t answer within 15 seconds".into(),
         Err(e) if e.is_connect() => "couldn’t connect to GitHub (offline, VPN or firewall?)".into(),

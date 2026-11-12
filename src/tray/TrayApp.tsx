@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { Thumb } from '../components/ui';
-import { formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { TransitionType } from '../types/ipc';
 
@@ -42,7 +42,6 @@ export const TrayApp: React.FC = () => {
   const activeMonitor = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
   const activeMonitorId = activeMonitor?.monitorId;
   const isPaused = activeMonitor?.userPaused ?? false;
-  const offlineCount = offlinePhotosForDisplay(photoStatus, activeMonitor, settings?.skipMismatchedOrientation ?? true).length;
   const { wallpaper: currentWallpaper, photo: currentPhoto } =
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const canRotate = !!currentPhoto || activeMonitor?.activeSource.kind === 'photo_api';
@@ -198,7 +197,7 @@ export const TrayApp: React.FC = () => {
 
       {photoStatus && (
         <div className="tray-cache-status">
-          {formatOfflinePhotoCount(offlineCount)} · {formatBytes(photoStatus.cachedBytes)} cached
+          {formatBytes(photoStatus.cachedBytes)} cached
         </div>
       )}
     </div>

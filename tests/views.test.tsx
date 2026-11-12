@@ -114,7 +114,7 @@ describe('Main studio window', () => {
     }
   });
 
-  it('shows the actual offline queue size and only filters for installed wallpaper types', async () => {
+  it('shows the offline queue only in Photography and filters Library by installed wallpaper types', async () => {
     await act(async () => { render(<App />); });
     await screen.findByRole('button', { name: 'Select Lo-fi Train Window' });
     const { photoStatus, wallpapers } = useAppStore.getState();
@@ -125,17 +125,22 @@ describe('Main studio window', () => {
         photoStatus: {
           ...photoStatus!,
           unusedQueue: [
-            ...Array.from({ length: 8 }, (_, i) => ({ ...queuedPhoto, id: `offline-${i}`, width: 6000, height: 4000 })),
+            ...Array.from({ length: 8 }, (_, i) => ({ ...queuedPhoto, id: `offline-${i}`, albumSlug: 'offline-landscape', width: 6000, height: 4000 })),
             { ...queuedPhoto, id: 'portrait-offline', width: 4000, height: 6000, albumSlug: 'portrait-only' },
           ],
         },
       });
     });
-    expect(screen.getByText('8 photos ready offline')).toBeTruthy();
-    expect(screen.queryByRole('img', { name: 'portrait-only' })).toBeNull();
+    expect(screen.queryByText(/photos ready offline/)).toBeNull();
+    expect(screen.queryByRole('img', { name: /offline.landscape/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Videos' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Scenes' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Web' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Photography' }));
+    expect(screen.getByText('8 photos ready offline')).toBeTruthy();
+    expect(screen.getAllByRole('img', { name: 'offline landscape' })).toHaveLength(8);
+    expect(screen.queryByRole('img', { name: 'portrait only' })).toBeNull();
   });
 
   it('applies the inspected wallpaper and keeps Studio and tray pause controls in sync', async () => {
@@ -193,12 +198,13 @@ describe('Main studio window', () => {
 });
 
 describe('Tray popover', () => {
-  it('renders current wallpaper, controls and queue footer', async () => {
+  it('renders current wallpaper, controls and cache size', async () => {
     const view = render(<TrayApp />);
     expect(await screen.findByText('Current Wallpaper')).toBeTruthy();
     expect(screen.getByText('Next Wallpaper')).toBeTruthy();
     expect(view.container.querySelector('.tray-wallpaper-preview img')).toBeTruthy();
-    expect(await screen.findByText(/^\d+ photos? ready offline ·/)).toBeTruthy();
+    expect(await screen.findByText(/MB cached$/)).toBeTruthy();
+    expect(screen.queryByText(/photos? ready offline/)).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(screen.getByRole('button', { name: /Favorite/ })).toBeTruthy();
   });

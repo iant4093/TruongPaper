@@ -163,7 +163,7 @@ export const SettingsView: React.FC = () => {
               <Download size={14} /> Install {update.version} & Restart
             </button>
           )}
-          {updateMsg && <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{updateMsg}</span>}
+          <span role="status" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{updateMsg}</span>
         </div>
         {update?.notes && (
           <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-sans)', marginTop: 12 }}>

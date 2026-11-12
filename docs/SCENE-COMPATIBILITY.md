@@ -80,3 +80,34 @@ Not yet bundled: `lightshafts`, audio-responsive variants (`AUDIOPROCESSING`) of
 - The bundled effects are written to the documented interface, not pixel-matched to Wallpaper Engine, so strengths and noise patterns differ slightly from the originals. `scene_probe` uses the bundled tree by default (`PROBE_NO_BUNDLED=1` disables it).
 - Particle textures and fonts that only ship with Wallpaper Engine are still replaced by fallbacks.
 - `engine.screenResolution` is the monitor size, so scripts that position layers as a percentage of it use that size, as in Wallpaper Engine.
+
+## Render sweep vs. Workshop preview (engine/parity2)
+
+Offscreen `scene_probe` renders (1280x720, default properties) compared by eye with each
+scene's preview image. Previews are often promo art or another animation frame, so "mostly"
+means the same scene content with small differences.
+
+| id | title | matches preview? | remaining issue |
+|---|---|---|---|
+| 1195626192 | Gaze | mostly | cloud/sun frame differs (animated) |
+| 1275921440 | 4K & 2K Aurora Lake | yes | |
+| 1994794519 | D.VA_OVERWATCH[X-Ray] | mostly | red left-hand panel/x-ray tint differs |
+| 2134765860 | Bunk | no | preview shows clock/audio-bars UI over a different room view; render lacks the UI layers |
+| 2370927443 | Lofi Cafe | no | glitched composite with black/blue blocks (render-target/effect mismatch) |
+| 2482408967 | Samurai Doge | mostly | |
+| 2854083091 | Kamisato Ayaka Maid X-Ray | mostly | preview is a close-up crop; x-ray effect not verified |
+| 2887099508 | TIM ear scene | no | render is blank white (layers hidden by script/visibility state) |
+| 2902406982 | Moon-half scene | mostly | stray rectangular panel artifacts in the centre |
+| 2981249186 | 4K SCI-FI Black Hole | mostly | bright dot artifact at the centre |
+| 2998757800 | Azur Lane Littorio | mostly | preview is a title card; scene content renders |
+| 3122339805 | Pixels | no | only black/white/magenta blocks; intended UI/imagery missing |
+| 3299228616 | Lonely Cat (audio visualizer) | no | water/background not drawn; dark scene with green dots only |
+| 833227004 | Nebula Transform | mostly | colours shifted towards orange vs. teal preview |
+| 1160682576 | Watching the Universe | mostly | |
+| 2359043440 | Persica | yes | clock drawn at script-computed origin, no placeholder |
+| 3129893601 | Clone trooper helmet in the snow | yes | |
+| 3521337568 | Cyberpunk: Edgerunner-Lucy | mostly | |
+
+SceneScript: all scripts in these scenes now load as real ES modules (0 skipped, 0 runtime
+errors in the sweep). `import` is limited to the WE modules `WEMath`, `WEVector`, `WEColor`.
+Layer animation / sound-layer methods (`getAnimationLayer`, `play`, ...) are accepted but inert.

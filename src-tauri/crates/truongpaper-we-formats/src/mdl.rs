@@ -147,8 +147,10 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
         }
         let vertex_count = v_bytes / layout.stride();
         if !bytes[i_start..i_start + i_bytes]
-            .chunks_exact(2)
-            .all(|i| usize::from(u16::from_le_bytes([i[0], i[1]])) < vertex_count)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|i| usize::from(u16::from_le_bytes(*i)) < vertex_count)
         {
             return None;
         }
@@ -215,8 +217,10 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
 
     let i_start = v_start + v_bytes + 4;
     let indices = bytes[i_start..i_start + i_bytes]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
 
     let sections = find_sections(bytes, i_start + i_bytes);

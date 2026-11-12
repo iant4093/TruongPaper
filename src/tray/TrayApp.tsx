@@ -4,9 +4,9 @@ import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { Thumb } from '../components/ui';
-import { formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { OFFLINE_NOTICE, formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
-import type { TransitionType } from '../types/ipc';
+import type { TransitionType, WallpaperSource } from '../types/ipc';
 
 export const TrayApp: React.FC = () => {
   const initAppListeners = useAppStore((s) => s.initAppListeners);
@@ -21,6 +21,9 @@ export const TrayApp: React.FC = () => {
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const selectMonitor = useAppStore((s) => s.selectMonitor);
+  const wallpaperErrors = useAppStore((s) => s.wallpaperErrors);
+  const dismissWallpaperError = useAppStore((s) => s.dismissWallpaperError);
   const refreshAll = useAppStore((s) => s.refreshAll);
   const [switching, setSwitching] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -79,6 +82,19 @@ export const TrayApp: React.FC = () => {
       ? `${currentPhoto.width} × ${currentPhoto.height} · ${formatBytes(currentPhoto.bytes)}`
       : null;
 
+  const loadFailure = activeMonitorId ? wallpaperErrors[activeMonitorId] : undefined;
+  const failedTitle = loadFailure
+    ? wallpapers.find((w) => w.wallpaperId === loadFailure.wallpaperId)?.title ?? 'Wallpaper'
+    : '';
+  const retryLoad = () => {
+    if (!activeMonitor || !loadFailure) return;
+    const source: WallpaperSource = loadFailure.wallpaperId
+      ? { kind: 'workshop', wallpaperId: loadFailure.wallpaperId }
+      : activeMonitor.activeSource;
+    dismissWallpaperError(activeMonitor.monitorId);
+    run(() => applyMonitorSource(activeMonitor.monitorId, source));
+  };
+
   const showPhotos = async () => {
     if (!activeMonitorId) return;
     setSwitching(true);
@@ -132,7 +148,7 @@ export const TrayApp: React.FC = () => {
             type="button"
             className={`button ${m.monitorId === activeMonitorId ? 'button-primary' : ''}`}
             style={{ fontSize: 11, padding: '4px 10px' }}
-            onClick={() => useAppStore.setState({ selectedMonitorId: m.monitorId })}
+            onClick={() => selectMonitor(m.monitorId)}
           >
             {m.name}
           </button>
@@ -164,7 +180,7 @@ export const TrayApp: React.FC = () => {
               disabled={!activeMonitorId}
               onClick={() => void togglePause()}
             >
-              {isPaused ? 'Resume' : 'Pause'}
+              {isPaused ? 'Resume this display' : 'Pause this display'}
             </button>
             <button
               type="button"
@@ -205,6 +221,15 @@ export const TrayApp: React.FC = () => {
               </button>
             </div>
           )}
+          {loadFailure && activeMonitorId && (
+            <div className="tray-load-error" role="alert">
+              <div title={loadFailure.message}>{failedTitle} could not load: {loadFailure.message}</div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <button type="button" className="button" style={{ fontSize: 11, padding: '3px 8px' }} onClick={retryLoad}>Try again</button>
+                <button type="button" className="button" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => dismissWallpaperError(activeMonitorId)}>Dismiss</button>
+              </div>
+            </div>
+          )}
           {actionError && <div className="tray-wallpaper-error" role="alert" title={actionError}>{actionError}</div>}
         </div>
       </div>
@@ -224,6 +249,7 @@ export const TrayApp: React.FC = () => {
       {photoStatus && (
         <div className="tray-cache-status">
           {formatBytes(photoStatus.cachedBytes)} cached
+          {photoStatus.offline && <div className="tray-offline" role="status">{OFFLINE_NOTICE}</div>}
         </div>
       )}
     </div>

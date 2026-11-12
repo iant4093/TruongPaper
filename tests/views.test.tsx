@@ -31,6 +31,7 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   useAppStore.setState(initial, true);
 });
 
@@ -174,11 +175,11 @@ describe('Main studio window', () => {
       await act(async () => { fireEvent.click(drawer.getByRole('button', { name: 'Apply wallpaper' })); });
       expect(drawer.getByText('Current on this display')).toBeTruthy();
 
-      await act(async () => { fireEvent.click(studioUi.getByRole('button', { name: 'Pause' })); });
-      expect(trayUi.getByRole('button', { name: 'Resume' })).toBeTruthy();
+      await act(async () => { fireEvent.click(studioUi.getByRole('button', { name: 'Pause this display' })); });
+      expect(trayUi.getByRole('button', { name: 'Resume this display' })).toBeTruthy();
       expect(useAppStore.getState().monitors[1].userPaused).toBe(false);
-      await act(async () => { fireEvent.click(trayUi.getByRole('button', { name: 'Resume' })); });
-      expect(studioUi.getByRole('button', { name: 'Pause' })).toBeTruthy();
+      await act(async () => { fireEvent.click(trayUi.getByRole('button', { name: 'Resume this display' })); });
+      expect(studioUi.getByRole('button', { name: 'Pause this display' })).toBeTruthy();
     } finally {
       await act(async () => {
         await useAppStore.getState().setPlaybackPaused(false, 'DISPLAY-1');

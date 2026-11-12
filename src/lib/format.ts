@@ -98,3 +98,6 @@ export const TRANSITION_LABEL = {
   blur_dissolve: 'Blur-Dissolve',
   liquid_glass: 'Liquid Glass Morph',
 } as const;
+
+/** Shown in Photography and the tray while the photo service is unreachable. */
+export const OFFLINE_NOTICE = 'Offline - showing cached photos';

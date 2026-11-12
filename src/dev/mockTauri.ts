@@ -344,6 +344,7 @@ export function createMockBackend(
       userPaused: false,
       activeSource: { kind: 'photo_api' },
       activeWallpaperId: null,
+      volume: 1,
     },
     {
       monitorId: 'DISPLAY-2',
@@ -357,6 +358,7 @@ export function createMockBackend(
       userPaused: false,
       activeSource: { kind: 'workshop', wallpaperId: 'workshop:2841928371' },
       activeWallpaperId: 'workshop:2841928371',
+      volume: 0.6,
     },
   ];
   let playlists: Playlist[] = [

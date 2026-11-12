@@ -1,9 +1,10 @@
 import { Dropdown } from './components/Dropdown';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal, X } from 'lucide-react';
 import { PresetBar } from './components/PresetBar';
 import { PhotoSourceInspector } from './components/PhotoSourceInspector';
 import { PropertyInspector } from './components/PropertyInspector';
+import { SceneReport } from './components/SceneReport';
 import { SteamAuthModal } from './components/SteamAuthModal';
 import { WindowControls } from './components/WindowControls';
 import { WorkshopPreviewModal } from './components/WorkshopPreviewModal';
@@ -51,6 +52,12 @@ export const App: React.FC = () => {
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setLocalWallpaperProperty = useAppStore((s) => s.setLocalWallpaperProperty);
   const setLocalWallpaperAdjustments = useAppStore((s) => s.setLocalWallpaperAdjustments);
+  const recoverFromWriteError = useAppStore((s) => s.recoverFromWriteError);
+  const wallpaperErrors = useAppStore((s) => s.wallpaperErrors);
+  const dismissWallpaperError = useAppStore((s) => s.dismissWallpaperError);
+  const diagnosticsByWallpaper = useAppStore((s) => s.diagnosticsByWallpaper);
+  const writeError = useAppStore((s) => s.writeError);
+  const dismissWriteError = useAppStore((s) => s.dismissWriteError);
   const [activeTab, setActiveTab] = useState<StudioTab>('all');
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -70,6 +77,15 @@ export const App: React.FC = () => {
     if (selectedWallpaperId) setDetailsOpen(true);
   }, [selectedWallpaperId]);
 
+  // The tile that opened the drawer gets focus back when it closes.
+  const openerRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const closeDetails = useCallback(() => {
+    setDetailsOpen(false);
+    const opener = openerRef.current;
+    if (opener?.isConnected) opener.focus();
+  }, []);
+
   useEffect(() => { setDetailsError(null); }, [selectedWallpaperId, selectedPhotoSource, selectedMonitorId]);
 
   const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0];
@@ -86,6 +102,20 @@ export const App: React.FC = () => {
   const canInspect = (selectedPhotoSource && activeTab === 'all') ||
     (!!selectedWallpaper && (activeTab === 'all' || activeTab === 'workshop'));
   const showInspector = detailsOpen && canInspect;
+  const wasInspectorOpen = useRef(false);
+  useEffect(() => {
+    if (showInspector && !wasInspectorOpen.current) closeButtonRef.current?.focus();
+    wasInspectorOpen.current = showInspector;
+  }, [showInspector]);
+  useEffect(() => {
+    if (!showInspector) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) closeDetails();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [showInspector, closeDetails]);
+
   const ActiveView = activeTab === 'all' ? null : VIEWS[activeTab];
   const activeLabel = STUDIO_TABS.find(([key]) => key === activeTab)?.[1];
   const autoPaused = systemPowerReasons.length > 0 || (activeMonitor && policyStateByMonitor[activeMonitor.monitorId] && policyStateByMonitor[activeMonitor.monitorId] !== 'playing');
@@ -94,6 +124,13 @@ export const App: React.FC = () => {
   const currentPreview = activeWallpaper?.previewPath ?? photoPreviewSrc(currentPhoto);
   const canRotate = activeMonitor?.activeSource.kind === 'photo_api' || !!currentPhoto;
   const [actionError, setActionError] = useState<string | null>(null);
+  const loadErrors = Object.entries(wallpaperErrors);
+  const retryLoad = (monitorId: string, wallpaperId: string | null) => {
+    const monitor = monitors.find((m) => m.monitorId === monitorId);
+    const source: WallpaperSource | undefined = wallpaperId ? { kind: 'workshop', wallpaperId } : monitor?.activeSource;
+    dismissWallpaperError(monitorId);
+    if (source) void runAction(() => applyMonitorSource(monitorId, source));
+  };
   const runAction = async (action: () => Promise<void>) => {
     setActionError(null);
     try { await action(); } catch (err) { setActionError(String(err)); }
@@ -144,20 +181,30 @@ export const App: React.FC = () => {
           </div>
         </header>
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
-          <main className="content-viewport">
+          <main className="content-viewport" onClickCapture={(event) => {
+            const tile = (event.target as Element).closest?.('.wallpaper-select');
+            if (tile instanceof HTMLElement) openerRef.current = tile;
+          }}>
             {(loadError || actionError) && <div role="alert" className="error-banner">{loadError ?? actionError}</div>}
+            {writeError && (
+              <div role="alert" className="error-banner error-banner-dismissible">
+                <span>{writeError}</span>
+                <button type="button" className="icon-button" aria-label="Dismiss save error" onClick={dismissWriteError}><X size={14} /></button>
+              </div>
+            )}
             <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}>
               {ActiveView ? <ActiveView /> : (
                 <AllWallpapersView onSelectPhotoSource={() => { selectPhotoSource(); setDetailsOpen(true); }} />
               )}
             </div>
           </main>
+          {showInspector && <div className="inspector-scrim" aria-hidden="true" onClick={closeDetails} />}
           <div className="inspector-slot" inert={!showInspector} aria-hidden={!showInspector}>
             {(selectedPhotoSource || selectedWallpaper) && (
               <aside className="inspector-drawer" aria-label="Wallpaper details">
                 <div className="inspector-heading">
                   <span>Wallpaper details</span>
-                  <button type="button" className="icon-button" aria-label="Close wallpaper details" onClick={() => setDetailsOpen(false)}><X size={16} /></button>
+                  <button type="button" ref={closeButtonRef} className="icon-button" aria-label="Close wallpaper details" onClick={closeDetails}><X size={16} /></button>
                 </div>
                 <div className="inspector-selection">
                   <h3>{detailsTitle}</h3>
@@ -173,9 +220,10 @@ export const App: React.FC = () => {
                 {selectedPhotoSource ? <PhotoSourceInspector monitor={activeMonitor} /> : selectedWallpaper && (
                   <>
                     <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
-                    <PresetBar key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId} />
-                    <PropertyInspector key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId}
-                      project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} presets={[]}
+                    <SceneReport messages={diagnosticsByWallpaper[selectedWallpaper.wallpaperId]} />
+                    <PresetBar key={`presets:${selectedWallpaper.wallpaperId}`} wallpaperId={selectedWallpaper.wallpaperId} />
+                    <PropertyInspector key={`properties:${selectedWallpaper.wallpaperId}`} wallpaperId={selectedWallpaper.wallpaperId}
+                      project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} onWriteError={(error) => void recoverFromWriteError(error)}
                       onPropertyChange={(k, v) => setLocalWallpaperProperty(selectedWallpaper.wallpaperId, k, v)}
                       onAdjustmentChange={(next) => setLocalWallpaperAdjustments(selectedWallpaper.wallpaperId, next)} />
                   </>
@@ -184,10 +232,21 @@ export const App: React.FC = () => {
             )}
           </div>
         </div>
+        {loadErrors.map(([monitorId, failure]) => {
+          const title = wallpapers.find((w) => w.wallpaperId === failure.wallpaperId)?.title ?? 'Wallpaper';
+          const monitorName = monitors.length > 1 ? monitors.find((m) => m.monitorId === monitorId)?.name : undefined;
+          return (
+            <div key={monitorId} role="alert" className="load-error-card">
+              <span className="load-error-text">{title} could not load: {failure.message}{monitorName ? ` (${monitorName})` : ''}</span>
+              <button type="button" className="button" onClick={() => retryLoad(monitorId, failure.wallpaperId)}>Try again</button>
+              <button type="button" className="button" onClick={() => dismissWallpaperError(monitorId)}>Dismiss</button>
+            </div>
+          );
+        })}
         <footer className="playback-bar">
           <div className="now-playing-image"><Thumb src={currentPreview} alt={currentTitle} height={36} /></div>
           <div className="now-playing-copy"><div className="now-playing-title">{currentTitle}</div><div className="now-playing-meta">{playingLabel}{activeMonitor ? ` on ${activeMonitor.name}` : ''}</div></div>
-          <button type="button" className="button playback-control" disabled={!activeMonitor} onClick={() => void runAction(() => setPlaybackPaused(!isPaused, activeMonitor?.monitorId))}>{isPaused ? <Play size={14} /> : <Pause size={14} />}{isPaused ? 'Resume' : 'Pause'}</button>
+          <button type="button" className="button playback-control" disabled={!activeMonitor} onClick={() => void runAction(() => setPlaybackPaused(!isPaused, activeMonitor?.monitorId))}>{isPaused ? <Play size={14} /> : <Pause size={14} />}{isPaused ? 'Resume this display' : 'Pause this display'}</button>
           <button type="button" className="button playback-control" disabled={!canRotate} title={canRotate ? 'Show the next photo' : 'Select Photography on this display to rotate photos'} onClick={() => void runAction(() => rotateNextPhoto(activeMonitor?.monitorId))}>Next<SkipForward size={14} /></button>
         </footer>
       </div>

@@ -51,7 +51,6 @@ function renderInspector(values: Record<string, string | number | boolean>) {
       project={project}
       values={values}
       adjustments={adjustments}
-      presets={[]}
       onPropertyChange={onPropertyChange}
       onAdjustmentChange={onAdjustmentChange}
     />
@@ -101,6 +100,8 @@ describe('<PropertyInspector />', () => {
     const volume = document.querySelectorAll('input[type="range"]')[0];
     fireEvent.change(volume, { target: { value: '0.8' } });
     expect(onAdjustmentChange).toHaveBeenCalledWith({ ...adjustments, volume: 0.8 });
+    expect(invokeMock).not.toHaveBeenCalled(); // debounced until the drag settles
+    fireEvent.pointerUp(volume);
     expect(invokeMock).toHaveBeenCalledWith('monitor_update_adjustments', {
       wallpaperId: 'workshop:1',
       adjustments: { ...adjustments, volume: 0.8 },

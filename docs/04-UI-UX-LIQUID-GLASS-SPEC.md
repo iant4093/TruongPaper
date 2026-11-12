@@ -2119,6 +2119,8 @@ invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: numb
 - `steam-auth://qr-matrix`: `{ matrix: boolean[][] }`
 - `steam-auth://need-2fa`: `{ kind: 'totp' | 'email', prompt: string }`
 - `policy://state-changed`: `{ monitorId: string, state: 'playing' | 'paused_fullscreen' | 'paused_maximized' | 'paused_battery' | 'paused_display_sleep' }`
+- `wallpaper://error`: `{ monitorId: string, wallpaperId: string | null, message: string }` (a wallpaper could not load).
+- `wallpaper://diagnostics`: `{ monitorId: string, wallpaperId: string | null, messages: string[] }` (scene report).
 - `playback://pause-changed`: `{ monitorId: string | null, paused: boolean }` (manual pause; null means all displays).
 - `system-power`: `{ kind: 'pause' | 'resume', reason: 'sleep' | 'display' | 'lock' }`
 

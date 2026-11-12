@@ -37,6 +37,45 @@ const BATTERY_OPTIONS = [
 const parseFps = (v: string): AppSettings['fpsCap'] =>
   v === 'display_native' ? 'display_native' : (Number(v) as 30 | 60 | 120);
 
+/** Two accelerator fields saved together; hidden when the backend does not report hotkeys. */
+const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = ({ nextHotkey, pauseHotkey }) => {
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const [next, setNext] = useState(nextHotkey);
+  const [pause, setPause] = useState(pauseHotkey);
+  const [status, setStatus] = useState<{ error: boolean; text: string } | null>(null);
+  useEffect(() => { setNext(nextHotkey); setPause(pauseHotkey); }, [nextHotkey, pauseHotkey]);
+  const dirty = next !== nextHotkey || pause !== pauseHotkey;
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setStatus(null);
+    try {
+      await updateSettings({ nextHotkey: next.trim(), pauseHotkey: pause.trim() });
+      setStatus({ error: false, text: 'Shortcuts saved' });
+    } catch (err) {
+      setStatus({ error: true, text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  return (
+    <>
+      <SectionTitle>Global shortcuts</SectionTitle>
+      <form className="card" style={{ padding: 16 }} onSubmit={(e) => void save(e)}>
+        <label className="settings-field">
+          <span>Next wallpaper</span>
+          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+Right" value={next} onChange={(e) => setNext(e.target.value)} />
+        </label>
+        <label className="settings-field">
+          <span>Pause / resume</span>
+          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+P" value={pause} onChange={(e) => setPause(e.target.value)} />
+        </label>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <button type="submit" className="button" disabled={!dirty}>Save shortcuts</button>
+          {status && <span role={status.error ? 'alert' : 'status'} style={{ fontSize: 12, color: status.error ? '#e3b1b1' : 'var(--text-secondary)' }}>{status.text}</span>}
+        </div>
+      </form>
+    </>
+  );
+};
+
 export const SettingsView: React.FC = () => {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
@@ -142,6 +181,10 @@ export const SettingsView: React.FC = () => {
           onChange={(next) => void updateSettings({ launchAtLogin: next })}
         />
       </div>
+
+      {(settings.nextHotkey !== undefined || settings.pauseHotkey !== undefined) && (
+        <GlobalShortcuts nextHotkey={settings.nextHotkey ?? ''} pauseHotkey={settings.pauseHotkey ?? ''} />
+      )}
 
       <SectionTitle>Steam Account</SectionTitle>
       <div className="card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>

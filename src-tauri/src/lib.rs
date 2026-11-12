@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 45, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 44, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

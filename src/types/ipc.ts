@@ -291,6 +291,8 @@ export const IPC_EVENTS = [
   'steam-auth://qr-matrix',
   'steam-auth://need-2fa',
   'policy://state-changed',
+  'wallpaper://error',
+  'wallpaper://diagnostics',
   'playback://pause-changed',
   'system-power',
   'tray://next-requested',
@@ -311,6 +313,18 @@ export interface WallpaperChangedPayload {
   source: WallpaperSource;
   currentItem: WallpaperItem | PhotoItem | null;
   transitionUsed: TransitionType;
+}
+
+export interface WallpaperErrorPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+  message: string;
+}
+
+export interface WallpaperDiagnosticsPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+  messages: string[];
 }
 
 export interface SystemPowerPayload {

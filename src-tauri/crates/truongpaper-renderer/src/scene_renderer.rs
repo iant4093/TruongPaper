@@ -2026,6 +2026,7 @@ impl SceneRenderer {
         }
 
         let mut steps = Vec::with_capacity(plan.steps.len());
+        let mut failed_effects = std::collections::HashSet::new();
         for step in &plan.steps {
             steps.push(match step {
                 EffectStep::DrawBase { .. } => GpuStep::DrawBase,
@@ -2070,6 +2071,7 @@ impl SceneRenderer {
                                 );
                                 tracing::warn!("{msg}");
                                 warnings.push(msg);
+                                failed_effects.insert(p.effect_index);
                                 local_diag.push(format!(
                                     "Effect {} skipped: shader {} failed to compile",
                                     short_name(&p.effect_file),
@@ -2105,6 +2107,31 @@ impl SceneRenderer {
                     source: source.clone(),
                 },
             });
+        }
+
+        // A multi-pass effect with one broken pass would feed its later passes empty or
+        // wrongly sized intermediates (tiled, shrunken copies of the layer). Skip it as a whole.
+        if !failed_effects.is_empty() {
+            for (step, gpu) in plan.steps.iter().zip(steps.iter_mut()) {
+                let EffectStep::Pass(p) = step else { continue };
+                if !failed_effects.contains(&p.effect_index) {
+                    continue;
+                }
+                *gpu = if p.swaps {
+                    let source = if p.target == RenderTargetId::FboA {
+                        RenderTargetId::FboB
+                    } else {
+                        RenderTargetId::FboA
+                    };
+                    GpuStep::Copy {
+                        draw: self
+                            .make_simple_draw(device, self.target_binding(&source, &targets).view),
+                        target: p.target.clone(),
+                    }
+                } else {
+                    GpuStep::Pass(None)
+                };
+            }
         }
 
         let base_quad = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

@@ -1042,4 +1042,37 @@ mod tests {
         rt.apply_user_properties(r#"{"fxon": false}"#).unwrap();
         assert!(rt.graph().render_epoch() > e1, "effect visibility too");
     }
+
+    /// Persica's clock: origin = screenResolution / 100 * percent, in a 3840x2160 scene.
+    #[test]
+    fn percent_of_screen_origin_scripts_stay_on_canvas_on_retina() {
+        let t = TempDir::new("percent-origin");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 100, "height": 50 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 3840, "height": 2160 } },
+            "objects": [ { "name": "Clock", "image": "models/solid.json",
+              "origin": { "script": "let ox = 960; let oy = 1035;\nexport function update(v) { return new Vec3(ox, oy, v.z); }\nexport function applyUserProperties(p) { if (p.cx != undefined) ox = (engine.screenResolution.x/100)*p.cx; if (p.cy != undefined) oy = (engine.screenResolution.y/100)*p.cy; }",
+                          "value": "1920 1080 0" } } ]
+            }"#,
+        );
+        let props = r#"{"cx":100,"cy":100}"#;
+        let origin = |monitor: [f32; 2]| {
+            let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", Some(props), monitor).unwrap();
+            step(&mut rt);
+            layer(&rt, "Clock").transform.origin.to_array()
+        };
+        // Physical pixels put the layer off the top of the 2160-high canvas...
+        assert_eq!(origin([3456.0, 2234.0])[1], 2234.0);
+        // ...the logical size the desktop host passes keeps it near the centre.
+        let logical = crate::desktop_host::scene_monitor_size(3456, 2234, 2.0);
+        assert_eq!(logical, [1728.0, 1117.0]);
+        let o = origin(logical);
+        assert_eq!((o[0], o[1]), (1728.0, 1117.0));
+        assert!(o[1] < 2160.0);
+    }
 }

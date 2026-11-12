@@ -20,6 +20,7 @@ pub const EVENT_STEAM_DOWNLOAD_PROGRESS: &str = "steam-download://progress";
 pub const EVENT_STEAM_QR_MATRIX: &str = "steam-auth://qr-matrix";
 pub const EVENT_STEAM_NEED_2FA: &str = "steam-auth://need-2fa";
 pub const EVENT_POLICY_STATE_CHANGED: &str = "policy://state-changed";
+pub const EVENT_PLAYBACK_PAUSE_CHANGED: &str = "playback://pause-changed";
 pub const EVENT_SYSTEM_POWER: &str = "system-power";
 
 // ---------------------------------------------------------------------------------------------
@@ -277,8 +278,16 @@ pub struct MonitorInfo {
     pub refresh_rate_hz: f64,
     pub is_primary: bool,
     pub is_portrait: bool,
+    pub user_paused: bool,
     pub active_source: WallpaperSource,
     pub active_wallpaper_id: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackPauseChanged {
+    pub monitor_id: Option<String>,
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

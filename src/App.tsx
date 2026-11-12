@@ -1,6 +1,6 @@
 import { Dropdown } from './components/Dropdown';
 import React, { useEffect, useState } from 'react';
-import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal } from 'lucide-react';
+import { Check, Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Pause, Play, Settings as SettingsIcon, SkipForward, SlidersHorizontal, X } from 'lucide-react';
 import { PresetBar } from './components/PresetBar';
 import { PhotoSourceInspector } from './components/PhotoSourceInspector';
 import { PropertyInspector } from './components/PropertyInspector';
@@ -17,6 +17,7 @@ import { Thumb } from './components/ui';
 import { ResourceUsage } from './components/ResourceUsage';
 import { currentWallpaperForMonitor, useAppStore } from './store/useAppStore';
 import { photoPreviewSrc } from './lib/format';
+import type { WallpaperSource } from './types/ipc';
 
 export type StudioTab = 'all' | 'photos' | 'workshop' | 'playlists' | 'monitors' | 'settings';
 export const STUDIO_TABS = [
@@ -42,17 +43,19 @@ export const App: React.FC = () => {
   const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
   const selectedPhotoSource = useAppStore((s) => s.selectedPhotoSource);
   const selectPhotoSource = useAppStore((s) => s.selectPhotoSource);
-  const isPaused = useAppStore((s) => s.isPaused);
   const systemPowerReasons = useAppStore((s) => s.systemPowerReasons);
   const policyStateByMonitor = useAppStore((s) => s.policyStateByMonitor);
   const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
   const selectMonitor = useAppStore((s) => s.selectMonitor);
+  const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setLocalWallpaperProperty = useAppStore((s) => s.setLocalWallpaperProperty);
   const setLocalWallpaperAdjustments = useAppStore((s) => s.setLocalWallpaperAdjustments);
   const [activeTab, setActiveTab] = useState<StudioTab>('all');
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [applyingDetails, setApplyingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,10 +70,19 @@ export const App: React.FC = () => {
     if (selectedWallpaperId) setDetailsOpen(true);
   }, [selectedWallpaperId]);
 
+  useEffect(() => { setDetailsError(null); }, [selectedWallpaperId, selectedPhotoSource, selectedMonitorId]);
+
   const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0];
+  const isPaused = activeMonitor?.userPaused ?? false;
   const { wallpaper: activeWallpaper, photo: currentPhoto } =
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const selectedWallpaper = wallpapers.find((w) => w.wallpaperId === selectedWallpaperId);
+  const detailsTitle = selectedPhotoSource ? 'Ian Truong Photography' : selectedWallpaper?.title;
+  const detailsSource: WallpaperSource | undefined = selectedPhotoSource ? { kind: 'photo_api' }
+    : selectedWallpaper ? { kind: 'workshop', wallpaperId: selectedWallpaper.wallpaperId } : undefined;
+  const detailsCurrent = detailsSource?.kind === 'photo_api'
+    ? activeMonitor?.activeSource.kind === 'photo_api'
+    : activeMonitor?.activeSource.kind === 'workshop' && activeMonitor.activeSource.wallpaperId === selectedWallpaperId;
   const canInspect = (selectedPhotoSource && activeTab === 'all') ||
     (!!selectedWallpaper && (activeTab === 'all' || activeTab === 'workshop'));
   const showInspector = detailsOpen && canInspect;
@@ -85,6 +97,14 @@ export const App: React.FC = () => {
   const runAction = async (action: () => Promise<void>) => {
     setActionError(null);
     try { await action(); } catch (err) { setActionError(String(err)); }
+  };
+  const applyDetails = async () => {
+    if (!activeMonitor || !detailsSource || detailsCurrent || applyingDetails) return;
+    setApplyingDetails(true);
+    setDetailsError(null);
+    try { await applyMonitorSource(activeMonitor.monitorId, detailsSource); }
+    catch (err) { setDetailsError(String(err)); }
+    finally { setApplyingDetails(false); }
   };
 
   return (
@@ -135,7 +155,21 @@ export const App: React.FC = () => {
           <div className="inspector-slot" inert={!showInspector} aria-hidden={!showInspector}>
             {(selectedPhotoSource || selectedWallpaper) && (
               <aside className="inspector-drawer" aria-label="Wallpaper details">
-                <div className="inspector-heading">Wallpaper details</div>
+                <div className="inspector-heading">
+                  <span>Wallpaper details</span>
+                  <button type="button" className="icon-button" aria-label="Close wallpaper details" onClick={() => setDetailsOpen(false)}><X size={16} /></button>
+                </div>
+                <div className="inspector-selection">
+                  <h3>{detailsTitle}</h3>
+                  {detailsCurrent ? (
+                    <span className="inspector-current"><Check size={14} /> Current on this display</span>
+                  ) : (
+                    <button type="button" className="button button-primary" disabled={!activeMonitor || applyingDetails} onClick={() => void applyDetails()}>
+                      {applyingDetails ? 'Applying…' : 'Apply wallpaper'}
+                    </button>
+                  )}
+                  {detailsError && <div role="alert" className="error-banner">{detailsError}</div>}
+                </div>
                 {selectedPhotoSource ? <PhotoSourceInspector monitor={activeMonitor} /> : selectedWallpaper && (
                   <>
                     <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
@@ -153,7 +187,7 @@ export const App: React.FC = () => {
         <footer className="playback-bar">
           <div className="now-playing-image"><Thumb src={currentPreview} alt={currentTitle} height={36} /></div>
           <div className="now-playing-copy"><div className="now-playing-title">{currentTitle}</div><div className="now-playing-meta">{playingLabel}{activeMonitor ? ` on ${activeMonitor.name}` : ''}</div></div>
-          <button type="button" className="button playback-control" onClick={() => void runAction(() => setPlaybackPaused(!isPaused))}>{isPaused ? <Play size={14} /> : <Pause size={14} />}{isPaused ? 'Resume' : 'Pause'}</button>
+          <button type="button" className="button playback-control" disabled={!activeMonitor} onClick={() => void runAction(() => setPlaybackPaused(!isPaused, activeMonitor?.monitorId))}>{isPaused ? <Play size={14} /> : <Pause size={14} />}{isPaused ? 'Resume' : 'Pause'}</button>
           <button type="button" className="button playback-control" disabled={!canRotate} title={canRotate ? 'Show the next photo' : 'Select Photography on this display to rotate photos'} onClick={() => void runAction(() => rotateNextPhoto(activeMonitor?.monitorId))}>Next<SkipForward size={14} /></button>
         </footer>
       </div>

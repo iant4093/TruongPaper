@@ -6,9 +6,9 @@ use crate::commands::photo::{rotate_photo_for_locked_monitor, PhotoServiceState}
 use crate::db;
 use crate::host::{ActiveRuntime, RenderEvent, SceneDescriptor, WebviewKind};
 use crate::models::{
-    validate_property_update, IpcFitMode, IpcTransitionType, MonitorInfo, Playlist, PlaylistItem,
-    UniversalAdjustments, WallpaperChangedPayload, WallpaperItem, WallpaperSource,
-    EVENT_WALLPAPER_CHANGED,
+    validate_property_update, IpcFitMode, IpcTransitionType, MonitorInfo, PlaybackPauseChanged,
+    Playlist, PlaylistItem, UniversalAdjustments, WallpaperChangedPayload, WallpaperItem,
+    WallpaperSource, EVENT_PLAYBACK_PAUSE_CHANGED, EVENT_WALLPAPER_CHANGED,
 };
 use crate::state::AppState;
 use crate::wallpaper_webview::{self, WebviewSpec};
@@ -307,7 +307,11 @@ async fn start_wallpaper_runtime(
                 (
                     WebviewKind::Web,
                     truongpaper_renderer::web_wallpaper_url(&project_file),
-                    web_properties_js(&props)?,
+                    format!(
+                        "{}{}",
+                        wallpaper_webview::web_volume_script(adjustments.volume, adjustments.muted),
+                        web_properties_js(&props)?
+                    ),
                 )
             } else {
                 let adj_json = serde_json::to_string(&adjustments).map_err(|e| e.to_string())?;
@@ -497,8 +501,7 @@ pub(crate) fn forward_properties(
     }
 }
 
-/// Applies new adjustments to the host (compositor uniforms, scene volume) and to the video
-/// pages of `wallpaper_id`.
+/// Applies new adjustments to the renderer and the active pages of `wallpaper_id`.
 pub(crate) fn forward_adjustments(
     state: &AppState,
     wallpaper_id: &str,
@@ -509,6 +512,11 @@ pub(crate) fn forward_adjustments(
         wallpaper_id,
         *adjustments,
         adjustments.compositor_uniforms(transition),
+    );
+    wallpaper_webview::eval_for_wallpaper(
+        wallpaper_id,
+        WebviewKind::Web,
+        &wallpaper_webview::web_volume_script(adjustments.volume, adjustments.muted),
     );
     match serde_json::to_string(adjustments)
         .map_err(|e| e.to_string())
@@ -732,6 +740,7 @@ pub async fn monitors_list(
                     .unwrap_or_default(),
                 active_wallpaper_id: runtime.and_then(|rt| rt.wallpaper_id),
                 is_portrait: m.is_portrait(),
+                user_paused: state.host.user_paused(&m.id),
                 monitor_id: m.id,
                 name: m.name,
                 width: m.width,
@@ -798,6 +807,7 @@ pub async fn monitor_update_adjustments(
 
 #[tauri::command]
 pub async fn playback_set_paused(
+    app: AppHandle,
     state: State<'_, AppState>,
     monitor_id: Option<String>,
     paused: bool,
@@ -806,6 +816,10 @@ pub async fn playback_set_paused(
         validate_monitor_id(id)?;
     }
     state.host.set_user_paused(monitor_id.as_deref(), paused);
+    let _ = app.emit(
+        EVENT_PLAYBACK_PAUSE_CHANGED,
+        PlaybackPauseChanged { monitor_id, paused },
+    );
     Ok(())
 }
 

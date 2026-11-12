@@ -28,7 +28,7 @@ const initial = useAppStore.getState();
 
 const responses: Record<string, unknown> = {
   photo_get_status: status,
-  monitors_list: [{ monitorId: 'M1' }],
+  monitors_list: [{ monitorId: 'M1', userPaused: false }],
   library_list_wallpapers: [{ wallpaperId: 'workshop:1', userProperties: {}, adjustments: {} }],
   settings_get: { transitionType: 'crossfade' },
   playlist_list: [],
@@ -53,16 +53,16 @@ const calls = () => invokeMock.mock.calls.map(([cmd, args]) => [cmd, args]);
 
 it('sleep and unlock keep manual pause and overlapping system pause reasons', async () => {
   await useAppStore.getState().initAppListeners();
-  await useAppStore.getState().setPlaybackPaused(true);
+  listeners.get('playback://pause-changed')!({ payload: { monitorId: 'M1', paused: true } });
   const power = listeners.get('system-power')!;
   power({ payload: { kind: 'pause', reason: 'lock' } });
   power({ payload: { kind: 'pause', reason: 'sleep' } });
   power({ payload: { kind: 'resume', reason: 'sleep' } });
   expect(useAppStore.getState().systemPowerReasons).toEqual(['lock']);
-  expect(useAppStore.getState().isPaused).toBe(true);
+  expect(useAppStore.getState().monitors[0].userPaused).toBe(true);
   power({ payload: { kind: 'resume', reason: 'lock' } });
   expect(useAppStore.getState().systemPowerReasons).toEqual([]);
-  expect(useAppStore.getState().isPaused).toBe(true);
+  expect(useAppStore.getState().monitors[0].userPaused).toBe(true);
 });
 
 describe('store → invoke() contract', () => {
@@ -138,6 +138,7 @@ describe('store → listen() event wiring', () => {
     expect([...listeners.keys()].sort()).toEqual(
       [
         'photo-queue://updated',
+        'playback://pause-changed',
         'policy://state-changed',
         'settings://changed',
         'steam-auth://need-2fa',
@@ -158,7 +159,7 @@ describe('store → listen() event wiring', () => {
     expect(useAppStore.getState().settings?.skipMismatchedOrientation).toBe(false);
 
     listeners.get('system-power')!({ payload: { kind: 'pause', reason: 'lock' } });
-    expect(useAppStore.getState().isPaused).toBe(false);
+    expect(useAppStore.getState().monitors[0].userPaused).toBe(false);
     expect(useAppStore.getState().systemPowerReasons).toEqual(['lock']);
 
     const photo = { id: 'x', albumSlug: 'a' };

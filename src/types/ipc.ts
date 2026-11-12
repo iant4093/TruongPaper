@@ -173,8 +173,14 @@ export interface MonitorInfo {
   refreshRateHz: number;
   isPrimary: boolean;
   isPortrait: boolean;
+  userPaused: boolean;
   activeSource: WallpaperSource;
   activeWallpaperId: string | null;
+}
+
+export interface PlaybackPauseChanged {
+  monitorId: string | null;
+  paused: boolean;
 }
 
 export type WallpaperSource =
@@ -269,6 +275,7 @@ export const IPC_EVENTS = [
   'steam-auth://qr-matrix',
   'steam-auth://need-2fa',
   'policy://state-changed',
+  'playback://pause-changed',
   'system-power',
   'tray://next-requested',
   'tray://toggle-pause-requested',

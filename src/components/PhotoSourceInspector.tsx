@@ -32,10 +32,7 @@ export function PhotoSourceInspector({ monitor }: { monitor?: MonitorInfo }) {
   return (
     <div className="photo-source-inspector">
       {photo && <Thumb src={photoPreviewSrc(photo)} alt={photo.albumSlug.replace(/-/g, ' ')} height={144} contain />}
-      <div className="photo-source-heading">
-        <h3>Ian Truong Photography</h3>
-        <p>These settings are shared across displays using Photography.</p>
-      </div>
+      <p className="photo-source-hint">These settings are shared across displays using Photography.</p>
       {error && <div role="alert" className="error-banner">{error}</div>}
       {settings && status ? (
         <>

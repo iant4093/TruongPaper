@@ -30,6 +30,7 @@
     cover.remove();
     if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
       root.animate([{ opacity: 0 }, { opacity: getComputedStyle(root).opacity }], {
+        id: 'truongpaper-reveal',
         duration: 180,
         easing: 'ease-out',
       });

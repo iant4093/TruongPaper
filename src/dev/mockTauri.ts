@@ -335,6 +335,7 @@ export function createMockBackend(
       refreshRateHz: 60,
       isPrimary: true,
       isPortrait: false,
+      userPaused: false,
       activeSource: { kind: 'photo_api' },
       activeWallpaperId: null,
     },
@@ -347,6 +348,7 @@ export function createMockBackend(
       refreshRateHz: 75,
       isPrimary: false,
       isPortrait: true,
+      userPaused: false,
       activeSource: { kind: 'workshop', wallpaperId: 'workshop:2841928371' },
       activeWallpaperId: 'workshop:2841928371',
     },
@@ -658,10 +660,10 @@ export function createMockBackend(
       return null;
     },
     playback_set_paused: (args) => {
-      const targets = args.monitorId ? [String(args.monitorId)] : monitors.map((m) => m.monitorId);
-      for (const monitorId of targets) {
-        emitEvent('policy://state-changed', { monitorId, state: args.paused ? 'paused_fullscreen' : 'playing' });
-      }
+      const monitorId = args.monitorId == null ? null : String(args.monitorId);
+      const paused = Boolean(args.paused);
+      monitors = monitors.map((m) => monitorId === null || m.monitorId === monitorId ? { ...m, userPaused: paused } : m);
+      emitEvent('playback://pause-changed', { monitorId, paused });
       return null;
     },
 

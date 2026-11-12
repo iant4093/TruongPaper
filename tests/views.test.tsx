@@ -138,6 +138,31 @@ describe('Main studio window', () => {
     expect(screen.queryByRole('button', { name: 'Web' })).toBeNull();
   });
 
+  it('applies the inspected wallpaper and keeps Studio and tray pause controls in sync', async () => {
+    const studio = await act(async () => render(<App />));
+    const tray = await act(async () => render(<TrayApp />));
+    const studioUi = within(studio.container);
+    const trayUi = within(tray.container);
+    const current = useAppStore.getState().monitors[0].activeSource;
+    try {
+      fireEvent.click(studioUi.getByRole('button', { name: 'Select Neon Rain City' }));
+      const drawer = within(studioUi.getByRole('complementary', { name: 'Wallpaper details' }));
+      await act(async () => { fireEvent.click(drawer.getByRole('button', { name: 'Apply wallpaper' })); });
+      expect(drawer.getByText('Current on this display')).toBeTruthy();
+
+      await act(async () => { fireEvent.click(studioUi.getByRole('button', { name: 'Pause' })); });
+      expect(trayUi.getByRole('button', { name: 'Resume' })).toBeTruthy();
+      expect(useAppStore.getState().monitors[1].userPaused).toBe(false);
+      await act(async () => { fireEvent.click(trayUi.getByRole('button', { name: 'Resume' })); });
+      expect(studioUi.getByRole('button', { name: 'Pause' })).toBeTruthy();
+    } finally {
+      await act(async () => {
+        await useAppStore.getState().setPlaybackPaused(false, 'DISPLAY-1');
+        await useAppStore.getState().applyMonitorSource('DISPLAY-1', current);
+      });
+    }
+  });
+
   it('rotates to the next photo through the mock backend', async () => {
     await act(async () => {
       render(<App />);

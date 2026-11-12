@@ -8,6 +8,7 @@ import type {
   MonitorInfo,
   PhotoItem,
   PhotoStatus,
+  PlaybackPauseChanged,
   Playlist,
   PublicCatalogAlbum,
   SavedAlbum,
@@ -67,7 +68,6 @@ export interface AppState {
   selectedPhotoSource: boolean;
   playlists: Playlist[];
   settings: AppSettings | null;
-  isPaused: boolean;
   systemPowerReasons: string[];
   policyStateByMonitor: Record<string, string>;
   presetsByWallpaper: Record<string, WallpaperPreset[]>;
@@ -172,7 +172,6 @@ export const useAppStore = create<AppState>((set, get) => {
     selectedPhotoSource: false,
     playlists: [],
     settings: null,
-    isPaused: false,
     systemPowerReasons: [],
     policyStateByMonitor: {},
     presetsByWallpaper: readJson<Record<string, WallpaperPreset[]>>(PRESETS_KEY, {}),
@@ -242,6 +241,13 @@ export const useAppStore = create<AppState>((set, get) => {
         listen<AppSettings>('settings://changed', ({ payload }) => {
           updateDisplay(() => set({ settings: payload }));
         }),
+        listen<PlaybackPauseChanged>('playback://pause-changed', ({ payload }) => {
+          updateDisplay(() => set((state) => ({
+            monitors: state.monitors.map((monitor) => payload.monitorId === null || monitor.monitorId === payload.monitorId
+              ? { ...monitor, userPaused: payload.paused }
+              : monitor),
+          })));
+        }),
 
         listen<SteamDownloadProgress>('steam-download://progress', (event) => {
           const prog = event.payload;
@@ -287,7 +293,7 @@ export const useAppStore = create<AppState>((set, get) => {
             void get().rotateNextPhoto(get().selectedMonitorId ?? undefined);
           }),
           listen('tray://toggle-pause-requested', () => {
-            void get().setPlaybackPaused(!get().isPaused);
+            void get().setPlaybackPaused(get().monitors.some((monitor) => !monitor.userPaused));
           })
         );
       }
@@ -449,7 +455,12 @@ export const useAppStore = create<AppState>((set, get) => {
     applyMonitorSource: async (monitorId, source) => {
       await invoke('monitor_apply_wallpaper', { monitorId, source });
       const monitors = await invoke<MonitorInfo[]>('monitors_list');
-      set({ monitors });
+      set((state) => ({
+        monitors: monitors.map((monitor) => ({
+          ...monitor,
+          userPaused: state.monitors.find((existing) => existing.monitorId === monitor.monitorId)?.userPaused ?? monitor.userPaused,
+        })),
+      }));
     },
 
     updateWallpaperProperty: async (wallpaperId, propKey, propValue) => {
@@ -515,7 +526,6 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setPlaybackPaused: async (paused, monitorId) => {
       await invoke('playback_set_paused', { monitorId, paused });
-      set({ isPaused: paused });
     },
 
     savePlaylist: async (playlist) => {

@@ -15,7 +15,6 @@ export const TrayApp: React.FC = () => {
   const wallpapers = useAppStore((s) => s.wallpapers);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const settings = useAppStore((s) => s.settings);
-  const isPaused = useAppStore((s) => s.isPaused);
   const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setPhotoFavorite = useAppStore((s) => s.setPhotoFavorite);
@@ -42,6 +41,7 @@ export const TrayApp: React.FC = () => {
 
   const activeMonitor = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
   const activeMonitorId = activeMonitor?.monitorId;
+  const isPaused = activeMonitor?.userPaused ?? false;
   const offlineCount = offlinePhotosForDisplay(photoStatus, activeMonitor, settings?.skipMismatchedOrientation ?? true).length;
   const { wallpaper: currentWallpaper, photo: currentPhoto } =
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
@@ -66,6 +66,12 @@ export const TrayApp: React.FC = () => {
     } finally {
       setSwitching(false);
     }
+  };
+  const togglePause = async () => {
+    if (!activeMonitorId) return;
+    setActionError(null);
+    try { await setPlaybackPaused(!isPaused, activeMonitorId); }
+    catch (error) { setActionError(String(error)); }
   };
 
   return (
@@ -131,7 +137,7 @@ export const TrayApp: React.FC = () => {
               className="button"
               style={{ flex: 1 }}
               disabled={!activeMonitorId}
-              onClick={() => void setPlaybackPaused(!isPaused, activeMonitorId)}
+              onClick={() => void togglePause()}
             >
               {isPaused ? 'Resume' : 'Pause'}
             </button>

@@ -29,11 +29,7 @@ use truongpaper_renderer::{
 };
 use truongpaper_we_formats::WeVirtualFileSystem;
 
-/// Pauses every media element of a Web wallpaper (docs/01 §6.1 item 3).
-pub const WEB_MEDIA_PAUSE_JS: &str =
-    "document.querySelectorAll('video, audio').forEach(el => el.pause());";
-/// Resumes the media elements paused by [`WEB_MEDIA_PAUSE_JS`].
-pub const WEB_MEDIA_RESUME_JS: &str = "document.querySelectorAll('video, audio').forEach(el => { const p = el.play(); if (p && p.catch) p.catch(() => {}); });";
+const WEB_PLAYBACK_PRELOAD_JS: &str = include_str!("web-wallpaper-playback.js");
 
 /// Minimum spacing of `__truongpaper_dispatch_audio` pushes (60 Hz).
 pub const AUDIO_PUSH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
@@ -71,9 +67,17 @@ pub fn wallpaper_window_label(monitor_id: &str) -> String {
 pub fn pause_script(kind: WebviewKind, paused: bool) -> String {
     match kind {
         WebviewKind::Video => video_set_paused_js(paused),
-        WebviewKind::Web if paused => WEB_MEDIA_PAUSE_JS.to_string(),
-        WebviewKind::Web => WEB_MEDIA_RESUME_JS.to_string(),
+        WebviewKind::Web => format!("window.__truongpaper_set_paused?.({paused});"),
     }
+}
+
+pub fn web_volume_script(volume: f32, muted: bool) -> String {
+    let level = if muted || !volume.is_finite() {
+        0.0
+    } else {
+        volume.clamp(0.0, 1.0)
+    };
+    format!("window.__truongpaper_set_volume?.({level});")
 }
 
 /// Pause state of one webview window as tracked by the bridge.
@@ -367,7 +371,9 @@ pub async fn show(
             });
     }
     if spec.kind == WebviewKind::Web {
-        builder = builder.initialization_script(truongpaper_platform::WEB_WALLPAPER_PRELOAD_JS);
+        builder = builder
+            .initialization_script(WEB_PLAYBACK_PRELOAD_JS)
+            .initialization_script(truongpaper_platform::WEB_WALLPAPER_PRELOAD_JS);
     }
     #[cfg(target_os = "windows")]
     {
@@ -436,7 +442,7 @@ pub async fn show(
             eval(
                 app,
                 &previous.label,
-                "document.querySelectorAll('audio,video').forEach(el => { el.muted = true; })",
+                "window.__truongpaper_set_volume?.(0); document.querySelectorAll('audio,video').forEach(el => { el.muted = true; })",
             );
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -816,9 +822,14 @@ mod tests {
             pause_script(WebviewKind::Video, false),
             "window.__truongpaper_set_paused(false);"
         );
-        assert_eq!(pause_script(WebviewKind::Web, true), WEB_MEDIA_PAUSE_JS);
-        assert!(WEB_MEDIA_PAUSE_JS.contains("document.querySelectorAll('video, audio')"));
-        assert!(pause_script(WebviewKind::Web, false).contains("el.play()"));
+        assert_eq!(
+            pause_script(WebviewKind::Web, true),
+            "window.__truongpaper_set_paused?.(true);"
+        );
+        assert_eq!(
+            pause_script(WebviewKind::Web, false),
+            "window.__truongpaper_set_paused?.(false);"
+        );
     }
 
     #[test]
@@ -845,7 +856,7 @@ mod tests {
                 ("wallpaper-A".to_string(), video_set_paused_js(false), false),
                 (
                     "wallpaper-B".to_string(),
-                    WEB_MEDIA_PAUSE_JS.to_string(),
+                    pause_script(WebviewKind::Web, true),
                     true
                 ),
                 ("wallpaper-D".to_string(), video_set_paused_js(false), false),

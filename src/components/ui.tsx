@@ -12,7 +12,7 @@ export const Badge: React.FC<{ children: React.ReactNode; tone?: 'cyan' | 'muted
 export const Thumb: React.FC<{
   src: string | null | undefined;
   alt: string;
-  height?: number;
+  height?: number | 'auto';
   contain?: boolean;
   lazy?: boolean;
 }> = ({ src, alt, height = 120, contain = false, lazy = false }) => {

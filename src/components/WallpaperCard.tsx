@@ -9,10 +9,10 @@ export const WallpaperCard: React.FC<{
 }> = ({ title, preview, kind, detail, active, selected, audioReactive, canApply, applying, onSelect, onApply, onDelete }) => (
   <article className="wallpaper-card">
     {onSelect ? <button type="button" className="wallpaper-select" aria-label={`Select ${title}`} aria-pressed={!!selected} onClick={onSelect}>
-      <Thumb src={preview} alt={title} height={142} lazy />
+      <Thumb src={preview} alt={title} height="auto" lazy />
       {active && <span className="wallpaper-active"><Check size={11} />Current</span>}
     </button> : <div className="wallpaper-select">
-      <Thumb src={preview} alt={title} height={142} lazy />
+      <Thumb src={preview} alt={title} height="auto" lazy />
       {active && <span className="wallpaper-active"><Check size={11} />Current</span>}
     </div>}
     <div className="wallpaper-info">

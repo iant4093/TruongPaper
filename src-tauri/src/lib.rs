@@ -245,6 +245,7 @@ mod tests {
             crate::models::EVENT_STEAM_QR_MATRIX,
             crate::models::EVENT_STEAM_NEED_2FA,
             crate::models::EVENT_POLICY_STATE_CHANGED,
+            crate::models::EVENT_PLAYBACK_PAUSE_CHANGED,
             crate::models::EVENT_SYSTEM_POWER,
         ] {
             assert!(

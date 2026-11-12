@@ -551,6 +551,13 @@ impl WallpaperHost {
         self.monitors.lock().get(monitor_id).cloned()
     }
 
+    pub fn user_paused(&self, monitor_id: &str) -> bool {
+        self.monitors
+            .lock()
+            .get(monitor_id)
+            .map_or_else(|| *self.global_paused.lock(), |rt| rt.user_paused)
+    }
+
     /// [`MonitorRuntime::should_render`] for `monitor_id`; a monitor without runtime state yet
     /// (nothing applied since launch) follows the global pause flag.
     pub fn monitor_should_render(&self, monitor_id: &str) -> bool {

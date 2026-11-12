@@ -2020,6 +2020,7 @@ export interface MonitorInfo {
   refreshRateHz: number;
   isPrimary: boolean;
   isPortrait: boolean;
+  userPaused: boolean;
   activeSource: WallpaperSource;
   activeWallpaperId: string | null;
 }
@@ -2113,6 +2114,7 @@ invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: numb
 - `steam-auth://qr-matrix`: `{ matrix: boolean[][] }`
 - `steam-auth://need-2fa`: `{ kind: 'totp' | 'email', prompt: string }`
 - `policy://state-changed`: `{ monitorId: string, state: 'playing' | 'paused_fullscreen' | 'paused_maximized' | 'paused_battery' | 'paused_display_sleep' }`
+- `playback://pause-changed`: `{ monitorId: string | null, paused: boolean }` (manual pause; null means all displays).
 - `system-power`: `{ kind: 'pause' | 'resume', reason: 'sleep' | 'display' | 'lock' }`
 
 ---

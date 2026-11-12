@@ -226,22 +226,21 @@ export const PhotosApiView: React.FC = () => {
 
       {/* Saved albums Grid */}
       <SectionTitle>Saved albums</SectionTitle>
-      <form onSubmit={submitAlbum} style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+      <form onSubmit={submitAlbum} className="saved-album-form">
         <input
           type="text"
           aria-label="Ian Truong Photography album link or slug"
           value={albumInput}
           onChange={(e) => setAlbumInput(e.target.value)}
-          placeholder="Paste an Ian Truong Photography album link or slug"
+          placeholder="Paste an album link or slug"
           className="button"
-          style={{ flex: 1, textAlign: 'left', cursor: 'text', justifyContent: 'flex-start' }}
         />
         <button type="submit" className="button">
           <Plus size={14} /> Add Album
         </button>
       </form>
       {albumMsg && <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{albumMsg}</div>}
-      <div style={cardGrid}>
+      {savedAlbums.length ? <div style={cardGrid}>
         {savedAlbums.map((album) => (
           <div key={album.albumSlug} className="card" style={{ padding: 12 }}>
             <Thumb src={album.coverThumbnailUrl} alt={album.displayName} height={90} />
@@ -278,12 +277,7 @@ export const PhotosApiView: React.FC = () => {
             </div>
           </div>
         ))}
-        {savedAlbums.length === 0 && (
-          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            No saved albums yet. Paste an album link above or browse the official catalog.
-          </div>
-        )}
-      </div>
+      </div> : <p className="saved-album-hint">No saved albums yet. Add a link above or browse the catalog.</p>}
 
       {/* Current wallpaper Photo Card */}
       <SectionTitle>Current wallpaper</SectionTitle>

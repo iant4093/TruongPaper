@@ -170,10 +170,6 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
 
   return (
     <div className="property-inspector">
-      <h3>
-        {project.title}
-      </h3>
-
       {/* Universal Color & Audio Adjustments */}
       <section>
         <h4>Playback &amp; audio</h4>

@@ -53,6 +53,7 @@
     "allow-steam-sync-local-folders",
     "allow-library-list-wallpapers",
     "allow-library-delete-wallpaper",
+    "allow-library-set-favorite",
     "allow-monitors-list",
     "allow-monitor-apply-wallpaper",
     "allow-wallpaper-set-lock-screen",
@@ -64,10 +65,13 @@
     "allow-monitor-set-volume",
     "allow-playlist-list",
     "allow-playlist-save",
+    "allow-playlist-delete",
     "allow-settings-get",
     "allow-settings-update",
     "allow-update-feed-status",
     "allow-runtime-shutdown-for-update",
+    "allow-backup-export",
+    "allow-backup-import",
     "allow-runtime-get-memory-usage"
   ]
 }

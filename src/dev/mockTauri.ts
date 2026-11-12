@@ -161,6 +161,7 @@ function initialWallpapers(): WallpaperItem[] {
       projectJson: scene,
       userProperties: { weather_mode: 1, enable_rain: true, rain_speed: 1.2, schemecolor: '0.14902 0.45098 0.85098', show_clock: true, clock_label: 'Seattle' },
       adjustments: { ...DEFAULT_ADJUSTMENTS },
+      isFavorite: false,
     },
     {
       wallpaperId: 'workshop:1966389027',
@@ -175,6 +176,7 @@ function initialWallpapers(): WallpaperItem[] {
       projectJson: { title: 'Lo-fi Train Window', type: 'video', file: 'train.mp4', tags: ['Video', 'Relaxing'], general: { properties: {} } },
       userProperties: {},
       adjustments: { ...DEFAULT_ADJUSTMENTS, volume: 0.3 },
+      isFavorite: false,
     },
     {
       wallpaperId: 'workshop:2504133121',
@@ -201,6 +203,7 @@ function initialWallpapers(): WallpaperItem[] {
       },
       userProperties: { orb_size: 55, orb_color: '0.2 0.8 1.0' },
       adjustments: { ...DEFAULT_ADJUSTMENTS },
+      isFavorite: false,
     },
     {
       wallpaperId: 'workshop:1100550912',
@@ -215,6 +218,7 @@ function initialWallpapers(): WallpaperItem[] {
       projectJson: { title: 'Desktop Aquarium (EXE)', type: 'application', file: 'aquarium.exe', tags: ['Application'], general: { properties: {} } },
       userProperties: {},
       adjustments: { ...DEFAULT_ADJUSTMENTS },
+      isFavorite: false,
     },
   ];
 }
@@ -592,6 +596,7 @@ export function createMockBackend(
                 projectJson: { title: preview.title, type: 'scene', file: 'scene.json', tags: preview.tags, general: { properties: {} } },
                 userProperties: {},
                 adjustments: { ...DEFAULT_ADJUSTMENTS },
+                isFavorite: false,
               },
             ];
           }
@@ -650,12 +655,19 @@ export function createMockBackend(
         projectJson: { title: stem, type: isVideo ? 'video' : 'scene', file: isVideo ? name : 'scene.json', general: { properties: {} } },
         userProperties: {},
         adjustments: { ...DEFAULT_ADJUSTMENTS },
+        isFavorite: false,
       };
       wallpapers = [...wallpapers.filter((w) => w.wallpaperId !== wallpaperId), item];
       return item;
     },
     library_delete_wallpaper: (args) => {
       wallpapers = wallpapers.filter((w) => w.wallpaperId !== args.wallpaperId);
+      return null;
+    },
+    library_set_favorite: (args) => {
+      const id = String(args.wallpaperId);
+      if (!wallpapers.some((w) => w.wallpaperId === id)) throw new Error(`Wallpaper '${id}' is not in the library`);
+      wallpapers = wallpapers.map((w) => (w.wallpaperId === id ? { ...w, isFavorite: Boolean(args.favorite) } : w));
       return null;
     },
 
@@ -729,6 +741,14 @@ export function createMockBackend(
       playlists = [...playlists.filter((p) => p.playlistId !== playlist.playlistId), playlist];
       return playlist;
     },
+    playlist_delete: (args) => {
+      const id = String(args.playlistId);
+      playlists = playlists.filter((p) => p.playlistId !== id);
+      monitors = monitors.map((m) =>
+        m.activeSource.kind === 'playlist' && m.activeSource.playlistId === id
+          ? { ...m, activeSource: { kind: 'photo_api' }, activeWallpaperId: null } : m);
+      return null;
+    },
     settings_get: () => settings,
     settings_update: (args) => {
       settings = { ...settings, ...(args.settings as Partial<AppSettings>) };
@@ -738,6 +758,8 @@ export function createMockBackend(
     update_feed_status: () => 'ok',
     runtime_shutdown_for_update: () => null,
     runtime_get_memory_usage: () => ({ residentBytes: 164 * MB }),
+    backup_export: () => ({ settings: true, playlists: playlists.length, favorites: wallpapers.filter((w) => w.isFavorite).length, wallpapers: wallpapers.length, missingWorkshopIds: [] }),
+    backup_import: () => ({ settings: true, playlists: playlists.length, favorites: wallpapers.filter((w) => w.isFavorite).length, wallpapers: wallpapers.length, missingWorkshopIds: ['1234567890'] }),
   };
 
   const handlePlugin = (cmd: string, args: Args): unknown => {

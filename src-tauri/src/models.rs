@@ -255,6 +255,8 @@ pub struct WallpaperItem {
     pub project_json: Value,
     pub user_properties: Map<String, Value>,
     pub adjustments: UniversalAdjustments,
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,6 +601,7 @@ mod tests {
             project_json: json!({}),
             user_properties: Map::new(),
             adjustments: UniversalAdjustments::default(),
+            is_favorite: false,
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["type"], "video");

@@ -40,6 +40,7 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   steam_login_credentials: { username: 'ian', password: 'secret' },
   steam_submit_2fa_code: { code: 'AB12C' },
   library_delete_wallpaper: { wallpaperId: 'workshop:1100550912' },
+  library_set_favorite: { wallpaperId: 'workshop:2841928371', favorite: true },
   monitor_apply_wallpaper: { monitorId: 'DISPLAY-1', source: { kind: 'workshop', wallpaperId: 'workshop:2841928371' } },
   wallpaper_set_lock_screen: { monitorId: 'DISPLAY-1' },
   monitor_update_property: { wallpaperId: 'workshop:2841928371', propKey: 'rain_speed', propValue: 1.7 },

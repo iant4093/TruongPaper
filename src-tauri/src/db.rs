@@ -45,6 +45,7 @@ pub struct WallpaperRow {
     pub audio_reactive: bool,
     pub user_properties_json: String,
     pub adjustments_json: String,
+    pub is_favorite: bool,
 }
 
 impl WallpaperRow {
@@ -77,6 +78,7 @@ impl WallpaperRow {
             project_json,
             user_properties: self.user_properties(),
             adjustments: self.adjustments(default_fit),
+            is_favorite: self.is_favorite,
         })
     }
 }
@@ -88,7 +90,8 @@ pub fn read_project_json(install_dir: &Path) -> Option<Value> {
 }
 
 const WALLPAPER_COLUMNS: &str = "wallpaper_id, workshop_id, title, wallpaper_type, install_dir,
-    preview_path, bytes, audio_reactive, user_properties_json, adjustments_json";
+    preview_path, bytes, audio_reactive, user_properties_json, adjustments_json,
+    EXISTS(SELECT 1 FROM wallpaper_favorites f WHERE f.wallpaper_id = wallpaper_configs.wallpaper_id)";
 
 fn wallpaper_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WallpaperRow> {
     Ok(WallpaperRow {
@@ -102,6 +105,7 @@ fn wallpaper_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WallpaperRow> {
         audio_reactive: r.get::<_, i64>(7)? != 0,
         user_properties_json: r.get(8)?,
         adjustments_json: r.get(9)?,
+        is_favorite: r.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -209,6 +213,11 @@ pub fn delete_wallpaper(conn: &Connection, wallpaper_id: &str) -> DbResult<Optio
     )
     .map_err(e)?;
     conn.execute(
+        "DELETE FROM wallpaper_favorites WHERE wallpaper_id = ?1",
+        params![wallpaper_id],
+    )
+    .map_err(e)?;
+    conn.execute(
         "DELETE FROM wallpaper_configs WHERE wallpaper_id = ?1",
         params![wallpaper_id],
     )
@@ -223,6 +232,45 @@ pub fn delete_wallpaper(conn: &Connection, wallpaper_id: &str) -> DbResult<Optio
     )
     .map_err(e)?;
     Ok(row)
+}
+
+// ---------------------------------------------------------------------------------------------
+// wallpaper_favorites
+// ---------------------------------------------------------------------------------------------
+
+/// Marks / unmarks any library wallpaper as a favorite. Unknown ids are rejected.
+pub fn set_wallpaper_favorite(
+    conn: &Connection,
+    wallpaper_id: &str,
+    favorite: bool,
+) -> DbResult<()> {
+    if favorite {
+        require_wallpaper(conn, wallpaper_id)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO wallpaper_favorites (wallpaper_id, added_at) VALUES (?1, ?2)",
+            params![wallpaper_id, now_ms()],
+        )
+        .map_err(e)?;
+    } else {
+        conn.execute(
+            "DELETE FROM wallpaper_favorites WHERE wallpaper_id = ?1",
+            params![wallpaper_id],
+        )
+        .map_err(e)?;
+    }
+    Ok(())
+}
+
+pub fn list_wallpaper_favorites(conn: &Connection) -> DbResult<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT wallpaper_id FROM wallpaper_favorites ORDER BY wallpaper_id")
+        .map_err(e)?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(e)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(e)?;
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -363,6 +411,82 @@ pub fn save_playlist(conn: &Connection, mut playlist: Playlist) -> DbResult<Play
     )
     .map_err(e)?;
     Ok(playlist)
+}
+
+/// Deletes a playlist. Monitors using it fall back to the Photo API (their persisted source is
+/// rewritten); returns their ids so the caller can refresh what they show.
+pub fn delete_playlist(conn: &Connection, playlist_id: &str) -> DbResult<Vec<String>> {
+    let affected: Vec<String> = monitor_sources(conn)?
+        .into_iter()
+        .filter(|(_, src)| {
+            matches!(src, WallpaperSource::Playlist { playlist_id: id } if id == playlist_id)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in &affected {
+        set_monitor_source(conn, id, &WallpaperSource::PhotoApi)?;
+    }
+    conn.execute(
+        "DELETE FROM playlist_positions WHERE playlist_id = ?1",
+        params![playlist_id],
+    )
+    .map_err(e)?;
+    conn.execute(
+        "DELETE FROM playlists WHERE playlist_id = ?1",
+        params![playlist_id],
+    )
+    .map_err(e)?;
+    Ok(affected)
+}
+
+// ---------------------------------------------------------------------------------------------
+// playlist_positions (per-display rotation position, survives restarts)
+// ---------------------------------------------------------------------------------------------
+
+/// `monitor_id -> (playlist_id, item index)`.
+pub fn load_playlist_positions(conn: &Connection) -> DbResult<HashMap<String, (String, usize)>> {
+    let mut stmt = conn
+        .prepare("SELECT monitor_id, playlist_id, item_index FROM playlist_positions")
+        .map_err(e)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(e)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(e)?;
+    Ok(rows
+        .into_iter()
+        .map(|(m, p, i)| (m, (p, i.max(0) as usize)))
+        .collect())
+}
+
+pub fn save_playlist_position(
+    conn: &Connection,
+    monitor_id: &str,
+    playlist_id: &str,
+    index: usize,
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO playlist_positions (monitor_id, playlist_id, item_index, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(monitor_id) DO UPDATE SET
+            playlist_id = excluded.playlist_id,
+            item_index = excluded.item_index,
+            updated_at = excluded.updated_at",
+        params![
+            monitor_id,
+            playlist_id,
+            index.min(i64::MAX as usize) as i64,
+            now_ms()
+        ],
+    )
+    .map_err(e)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -509,6 +633,7 @@ mod tests {
                 audio_reactive: false,
                 user_properties_json: "{}".into(),
                 adjustments_json: "{}".into(),
+                is_favorite: false,
             };
             let item = row.to_item(IpcFitMode::FitBlur).unwrap();
             assert_eq!(item.windows_only, expected, "{ty}");
@@ -620,5 +745,74 @@ mod tests {
                 playlist_id: "x".into()
             }
         );
+    }
+
+    fn add_row(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO wallpaper_configs (wallpaper_id, title, wallpaper_type, install_dir, updated_at)
+             VALUES (?1, 'T', 'scene', '/x', 1)",
+            [id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn favorites_set_clear_and_cleanup_on_delete() {
+        let conn = test_db();
+        add_row(&conn, "workshop:1");
+        assert!(set_wallpaper_favorite(&conn, "workshop:9", true).is_err());
+        set_wallpaper_favorite(&conn, "workshop:1", true).unwrap();
+        set_wallpaper_favorite(&conn, "workshop:1", true).unwrap();
+        assert!(
+            get_wallpaper(&conn, "workshop:1")
+                .unwrap()
+                .unwrap()
+                .is_favorite
+        );
+        assert_eq!(list_wallpaper_favorites(&conn).unwrap().len(), 1);
+        set_wallpaper_favorite(&conn, "workshop:1", false).unwrap();
+        assert!(
+            !get_wallpaper(&conn, "workshop:1")
+                .unwrap()
+                .unwrap()
+                .is_favorite
+        );
+        set_wallpaper_favorite(&conn, "workshop:1", true).unwrap();
+        delete_wallpaper(&conn, "workshop:1").unwrap();
+        assert!(list_wallpaper_favorites(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn playlist_delete_falls_back_to_photo_api_and_clears_positions() {
+        let conn = test_db();
+        let mk = |name: &str| Playlist {
+            playlist_id: String::new(),
+            name: name.into(),
+            mode: PlaylistMode::Mixed,
+            interval_seconds: 60,
+            items: vec![PlaylistItem::PhotoApiDraw],
+        };
+        let a = save_playlist(&conn, mk("A")).unwrap();
+        let b = save_playlist(&conn, mk("B")).unwrap();
+        assert_ne!(a.playlist_id, b.playlist_id);
+        let src = |p: &Playlist| WallpaperSource::Playlist {
+            playlist_id: p.playlist_id.clone(),
+        };
+        set_monitor_source(&conn, "M1", &src(&a)).unwrap();
+        set_monitor_source(&conn, "M2", &src(&b)).unwrap();
+        save_playlist_position(&conn, "M1", &a.playlist_id, 2).unwrap();
+        assert_eq!(
+            load_playlist_positions(&conn).unwrap()["M1"],
+            (a.playlist_id.clone(), 2)
+        );
+        assert_eq!(
+            delete_playlist(&conn, &a.playlist_id).unwrap(),
+            vec!["M1".to_string()]
+        );
+        let sources = monitor_sources(&conn).unwrap();
+        assert_eq!(sources["M1"], WallpaperSource::PhotoApi);
+        assert_eq!(sources["M2"], src(&b));
+        assert_eq!(list_playlists(&conn).unwrap().len(), 1);
+        assert!(load_playlist_positions(&conn).unwrap().is_empty());
     }
 }

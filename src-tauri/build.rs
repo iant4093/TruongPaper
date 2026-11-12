@@ -34,6 +34,7 @@ const APP_COMMANDS: &[&str] = &[
     "library_list_wallpapers",
     "library_delete_wallpaper",
     "library_import_local",
+    "library_set_favorite",
     "monitors_list",
     "monitor_apply_wallpaper",
     "wallpaper_set_lock_screen",
@@ -45,11 +46,14 @@ const APP_COMMANDS: &[&str] = &[
     "monitor_set_volume",
     "playlist_list",
     "playlist_save",
+    "playlist_delete",
     "settings_get",
     "settings_update",
     "update_feed_status",
     "runtime_shutdown_for_update",
     "runtime_get_memory_usage",
+    "backup_export",
+    "backup_import",
 ];
 
 fn attributes() -> tauri_build::Attributes {

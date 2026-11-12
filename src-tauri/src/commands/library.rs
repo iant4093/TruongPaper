@@ -138,6 +138,17 @@ pub async fn library_delete_wallpaper(
     .map_err(|e| e.to_string())?
 }
 
+/// Marks / unmarks any library wallpaper as a favorite.
+#[tauri::command]
+pub async fn library_set_favorite(
+    state: State<'_, AppState>,
+    wallpaper_id: String,
+    favorite: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::set_wallpaper_favorite(&conn, &wallpaper_id, favorite)
+}
+
 #[tauri::command]
 pub async fn wallpaper_save_preset(
     state: State<'_, AppState>,

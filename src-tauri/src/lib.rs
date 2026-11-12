@@ -174,6 +174,7 @@ pub fn run() {
             commands::library::library_list_wallpapers,
             commands::library::library_delete_wallpaper,
             commands::library::library_import_local,
+            commands::library::library_set_favorite,
             // --- Monitor, Playback & Property Customization ---
             commands::monitor::monitors_list,
             commands::monitor::monitor_apply_wallpaper,
@@ -187,11 +188,14 @@ pub fn run() {
             // --- Playlists, Auto-Updater & Global Settings ---
             commands::playlist::playlist_list,
             commands::playlist::playlist_save,
+            commands::playlist::playlist_delete,
             commands::settings::settings_get,
             commands::settings::settings_update,
             commands::updater::update_feed_status,
             commands::updater::runtime_shutdown_for_update,
             commands::runtime::runtime_get_memory_usage,
+            commands::backup::backup_export,
+            commands::backup::backup_import,
         ])
         .build(context)
         .expect("error while building TruongPaper Tauri application");
@@ -252,7 +256,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 44, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 48, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

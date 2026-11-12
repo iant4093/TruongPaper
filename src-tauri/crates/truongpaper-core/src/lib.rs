@@ -117,6 +117,18 @@ CREATE TABLE IF NOT EXISTS settings (
     key                 TEXT PRIMARY KEY,
     value_json          TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS wallpaper_favorites (
+    wallpaper_id        TEXT PRIMARY KEY,
+    added_at            INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS playlist_positions (
+    monitor_id          TEXT PRIMARY KEY,
+    playlist_id         TEXT NOT NULL,
+    item_index          INTEGER NOT NULL DEFAULT 0,
+    updated_at          INTEGER NOT NULL
+);
 "#
     };
 }
@@ -144,8 +156,10 @@ const PRAGMAS_SQL: &str = pragmas_sql!();
 const TABLES_SQL: &str = tables_sql!();
 const INDEXES_SQL: &str = indexes_sql!();
 
-/// `PRAGMA user_version` written by this build. Version 1 is the schema above.
-pub const SCHEMA_VERSION: i64 = 1;
+/// `PRAGMA user_version` written by this build. Version 1 is the original schema; version 2 adds
+/// `wallpaper_favorites` and `playlist_positions`. All tables are `CREATE IF NOT EXISTS`, so
+/// [`migrate`] upgrades a v1 database by re-running the table batch.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Every non-primary-key column of every table, with a definition valid for
 /// `ALTER TABLE ... ADD COLUMN` (NOT NULL columns carry a default). Used to upgrade databases
@@ -493,6 +507,35 @@ mod tests {
         assert!(backup.exists());
         let old = Connection::open(&backup).unwrap();
         assert_eq!(columns(&old, "photos_cache").len(), 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn v1_database_migrates_to_v2_and_keeps_data() {
+        let path = temp_db_path("v1");
+        {
+            // A v1 database: only the original tables exist.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE playlists (
+                    playlist_id TEXT PRIMARY KEY, name TEXT NOT NULL, mode TEXT NOT NULL,
+                    interval_seconds INTEGER NOT NULL DEFAULT 900,
+                    items_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL);
+                 INSERT INTO playlists (playlist_id, name, mode, updated_at) VALUES ('p', 'P', 'mixed', 1);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let conn = open_and_initialize_db(&path).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 2);
+        for table in ["wallpaper_favorites", "playlist_positions"] {
+            assert!(!columns(&conn, table).is_empty(), "{table} missing");
+        }
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(path.with_file_name("truongpaper.db.bak-v1").exists());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

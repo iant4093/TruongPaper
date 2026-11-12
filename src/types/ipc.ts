@@ -123,6 +123,15 @@ export interface WallpaperItem {
   projectJson: ProjectJsonSchema;
   userProperties: Record<string, string | number | boolean>;
   adjustments: UniversalAdjustments;
+  isFavorite: boolean;
+}
+
+export interface BackupSummary {
+  settings: boolean;
+  playlists: number;
+  favorites: number;
+  wallpapers: number;
+  missingWorkshopIds: string[];
 }
 
 export interface WallpaperPreset {
@@ -260,6 +269,7 @@ export const IPC_COMMANDS = [
   'library_list_wallpapers',
   'library_import_local',
   'library_delete_wallpaper',
+  'library_set_favorite',
   // Monitor, Playback & Property Customization
   'monitors_list',
   'monitor_apply_wallpaper',
@@ -273,11 +283,14 @@ export const IPC_COMMANDS = [
   // Playlists, Auto-Updater & Global Settings
   'playlist_list',
   'playlist_save',
+  'playlist_delete',
   'settings_get',
   'settings_update',
   'update_feed_status',
   'runtime_shutdown_for_update',
   'runtime_get_memory_usage',
+  'backup_export',
+  'backup_import',
 ] as const;
 
 export type IpcCommand = (typeof IPC_COMMANDS)[number];

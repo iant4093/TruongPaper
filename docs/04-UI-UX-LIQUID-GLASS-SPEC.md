@@ -2089,6 +2089,7 @@ invoke<WallpaperItem[]>('steam_sync_local_folders');
 invoke<WallpaperItem[]>('library_list_wallpapers');
 invoke<WallpaperItem>('library_import_local', { path: string }); // Copies a Wallpaper Engine item folder (project.json) or a .mp4/.webm/.mov/.mkv file into the library as `local:<slug>`; max 4 GB, no symlinks
 invoke<void>('library_delete_wallpaper', { wallpaperId: string });
+invoke<void>('library_set_favorite', { wallpaperId: string, favorite: boolean }); // WallpaperItem.isFavorite
 
 // --- Monitor, Playback & Property Customization Commands ---
 invoke<MonitorInfo[]>('monitors_list');
@@ -2103,12 +2104,15 @@ invoke<void>('monitor_set_volume', { monitorId: string, volume: number }); // 0.
 
 // --- Playlists, Auto-Updater & Global Settings Commands ---
 invoke<Playlist[]>('playlist_list');
-invoke<Playlist>('playlist_save', { playlist: Playlist });
+invoke<Playlist>('playlist_save', { playlist: Playlist }); // empty playlistId creates a new playlist
+invoke<void>('playlist_delete', { playlistId: string }); // displays using it fall back to photo_api
 invoke<AppSettings>('settings_get');
 invoke<void>('settings_update', { settings: Partial<AppSettings> });
 invoke<string>('update_feed_status');
 invoke<void>('runtime_shutdown_for_update');
 invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: number }, main process RAM only
+invoke<BackupSummary>('backup_export', { path: string }); // one JSON file, no secrets / Steam account data
+invoke<BackupSummary>('backup_import', { path: string }); // validates format/version, <= 10 MB; BackupSummary { settings: boolean, playlists: number, favorites: number, wallpapers: number, missingWorkshopIds: string[] }
 ```
 
 #### Rust $\to$ Frontend Event Channels (`app.emit(...)`)

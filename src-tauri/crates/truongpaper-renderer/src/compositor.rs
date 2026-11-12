@@ -33,6 +33,12 @@ pub struct CompositorUniforms {
     pub hue_shift: f32,
     pub time: f32,
     pub _pad: f32,
+    /// Span mode: this monitor's sub-rectangle of the shared canvas (`uv = offset + uv * scale`).
+    /// Identity (`0,0` / `1,1`) for independent monitors.
+    pub span_offset_x: f32,
+    pub span_offset_y: f32,
+    pub span_scale_x: f32,
+    pub span_scale_y: f32,
 }
 
 impl Default for CompositorUniforms {
@@ -54,6 +60,10 @@ impl Default for CompositorUniforms {
             hue_shift: 0.0,
             time: 0.0,
             _pad: 0.0,
+            span_offset_x: 0.0,
+            span_offset_y: 0.0,
+            span_scale_x: 1.0,
+            span_scale_y: 1.0,
         }
     }
 }

@@ -144,7 +144,7 @@ fn blur_uniforms_layout_matches_wgsl() {
 
 #[test]
 fn compositor_uniforms_layout_matches_wgsl() {
-    assert_eq!(size_of::<CompositorUniforms>(), 64);
+    assert_eq!(size_of::<CompositorUniforms>(), 80);
     assert_eq!(size_of::<CompositorUniforms>() % 16, 0);
     let (m, _) = parse_and_validate(COMPOSITOR_WGSL);
     let (span, members) = struct_layout(&m, "CompositorUniforms");
@@ -176,6 +176,10 @@ fn compositor_uniforms_layout_matches_wgsl() {
             off!(hue_shift),
             off!(time),
             off!(_pad),
+            off!(span_offset_x),
+            off!(span_offset_y),
+            off!(span_scale_x),
+            off!(span_scale_y),
         ]
     );
 }
@@ -189,7 +193,16 @@ fn compositor_uniform_defaults_are_neutral() {
         (u.brightness, u.contrast, u.saturation, u.hue_shift),
         (0.0, 1.0, 1.0, 0.0)
     );
-    assert_eq!(bytemuck::bytes_of(&u).len(), 64);
+    assert_eq!(bytemuck::bytes_of(&u).len(), 80);
+    assert_eq!(
+        (
+            u.span_offset_x,
+            u.span_offset_y,
+            u.span_scale_x,
+            u.span_scale_y
+        ),
+        (0.0, 0.0, 1.0, 1.0)
+    );
 }
 
 #[test]

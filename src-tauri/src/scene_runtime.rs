@@ -714,31 +714,31 @@ mod tests {
         assert_eq!(rt.skipped_script_slots(), ["Broken/scale"]);
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
-            [960.0, 540.0, 0.0]
-        );
-
-        assert!(step(&mut rt));
-        assert_eq!(
-            layer(&rt, "Hero").transform.origin.to_array(),
             [970.0, 540.0, 0.0]
         );
-        // thisLayer / thisScene writes come back into the graph.
-        assert_eq!(
-            layer(&rt, "Mover").transform.origin.to_array(),
-            [100.0, 105.0, 0.0]
-        );
-        assert_eq!(layer(&rt, "Hero").color.to_array(), [1.0, 0.0, 0.0]);
-        let hero_world = layer(&rt, "Hero").world_matrix.w_axis;
-        assert_eq!((hero_world.x, hero_world.y), (970.0, 540.0));
 
         assert!(step(&mut rt));
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
             [980.0, 540.0, 0.0]
         );
+        // thisLayer / thisScene writes come back into the graph.
         assert_eq!(
             layer(&rt, "Mover").transform.origin.to_array(),
             [100.0, 110.0, 0.0]
+        );
+        assert_eq!(layer(&rt, "Hero").color.to_array(), [1.0, 0.0, 0.0]);
+        let hero_world = layer(&rt, "Hero").world_matrix.w_axis;
+        assert_eq!((hero_world.x, hero_world.y), (980.0, 540.0));
+
+        assert!(step(&mut rt));
+        assert_eq!(
+            layer(&rt, "Hero").transform.origin.to_array(),
+            [990.0, 540.0, 0.0]
+        );
+        assert_eq!(
+            layer(&rt, "Mover").transform.origin.to_array(),
+            [100.0, 115.0, 0.0]
         );
         assert!((rt.elapsed() - 0.032).abs() < 1e-6);
     }
@@ -752,7 +752,7 @@ mod tests {
         assert!(!step(&mut rt));
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
-            [960.0, 540.0, 0.0]
+            [970.0, 540.0, 0.0]
         );
         assert_eq!(rt.elapsed(), 0.0);
         assert_eq!(rt.camera().time, 0.0);
@@ -760,7 +760,7 @@ mod tests {
         assert!(step(&mut rt));
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
-            [970.0, 540.0, 0.0]
+            [980.0, 540.0, 0.0]
         );
     }
 
@@ -819,12 +819,13 @@ mod tests {
             ] }"#,
         );
         let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
-        assert_eq!(text_of(&rt, "Clock"), "init");
-        step(&mut rt);
+        // The editor placeholder ("init") is never exposed: scripts settle before the first draw.
         assert_eq!(text_of(&rt, "Clock"), "tick 1");
         assert_eq!(text_of(&rt, "Other"), "set by script");
         step(&mut rt);
         assert_eq!(text_of(&rt, "Clock"), "tick 2");
+        step(&mut rt);
+        assert_eq!(text_of(&rt, "Clock"), "tick 3");
     }
 
     #[test]

@@ -170,3 +170,34 @@ fn wallpaper_files_still_win_over_bundled_effects() {
         .unwrap()
         .contains("TruongPaper clean-room"));
 }
+
+#[test]
+fn bundled_particle_sprites_resolve_and_have_shaped_alpha() {
+    let t = TempDir::new("bundled-particles");
+    let vfs = vfs(&t);
+    for tex in [
+        "halo",
+        "halo_2",
+        "halo_3",
+        "halo_6",
+        "drop",
+        "misc/wave",
+        "chromaticdot",
+        "light/light_shafts_0",
+        "fog/fog1",
+        "smoke/smoke2",
+        "bubbles/bubble3",
+        "beam/beam_1",
+        "beam/beam_2_fade",
+        "nature/snow",
+        "nature/rosepetals",
+    ] {
+        let bytes = vfs
+            .read_bytes(&format!("materials/particle/{tex}.tex"))
+            .unwrap_or_else(|e| panic!("{tex}: {e}"));
+        let parsed =
+            truongpaper_we_formats::parse_tex(&bytes).unwrap_or_else(|e| panic!("{tex}: {e}"));
+        assert!(parsed.header.texture_width >= 32, "{tex}");
+        assert!(parsed.header.texture_height >= 32, "{tex}");
+    }
+}

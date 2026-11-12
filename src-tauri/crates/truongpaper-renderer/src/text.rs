@@ -545,4 +545,40 @@ mod tests {
         let bmp = rasterize(&font, "Hi", w, h, &style);
         assert!(bmp.rgba.chunks_exact(4).any(|p| p[3] > 128));
     }
+
+    #[test]
+    fn text_bitmap_uses_the_layer_box_not_the_pointsize() {
+        // A text layer's texture is its scene-unit size; `pointsize` only scales the glyphs in it.
+        let vfs = WeVirtualFileSystem::mount(
+            std::env::temp_dir().join("tp-no-wallpaper"),
+            std::env::temp_dir().join("tp-no-wallpaper-core"),
+        );
+        let Ok(font) = load_font(&vfs, None) else {
+            return; // no system font on this machine
+        };
+        let small = TextStyle {
+            pointsize: 20.0,
+            ..TextStyle::default()
+        };
+        let large = TextStyle {
+            pointsize: 80.0,
+            ..TextStyle::default()
+        };
+        assert_eq!(
+            bitmap_size(&font, "12:34", &small, (626.0, 366.0)),
+            (626, 366)
+        );
+        assert_eq!(
+            bitmap_size(&font, "12:34", &large, (626.0, 366.0)),
+            (626, 366)
+        );
+        let ink = |style: &TextStyle| {
+            rasterize(&font, "12:34", 626, 366, style)
+                .rgba
+                .chunks_exact(4)
+                .map(|p| p[3] as u64)
+                .sum::<u64>()
+        };
+        assert!(ink(&large) > ink(&small) * 4);
+    }
 }

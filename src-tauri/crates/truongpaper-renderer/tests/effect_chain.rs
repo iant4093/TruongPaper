@@ -380,3 +380,56 @@ fn bloom_wgsl_validates_with_naga() {
     }
     assert!(names.contains(&"vs_main"));
 }
+
+#[test]
+fn unknown_render_targets_skip_the_effect_and_are_reported() {
+    let t = TempDir::new("fx-unknown-target");
+    t.write(
+        "effects/badtarget/effect.json",
+        r#"{ "passes": [ { "material": "materials/fx/a1.json", "target": "_rt_Nope" } ] }"#,
+    );
+    t.write(
+        "effects/badbind/effect.json",
+        r#"{ "passes": [ { "material": "materials/fx/b1.json" },
+                         { "material": "materials/fx/b2.json",
+                           "bind": [ { "name": "_rt_Missing", "index": 1 } ] } ] }"#,
+    );
+    let p = plan(
+        &t,
+        r#"[ { "file": "effects/a/effect.json" }, { "file": "effects/badtarget/effect.json" },
+             { "file": "effects/badbind/effect.json" }, { "file": "effects/missing/effect.json" } ]"#,
+        None,
+    );
+    // Only the good effect's passes survive; the chain is not corrupted by guessed targets.
+    let shaders: Vec<String> = p.passes().map(|p| p.shader.clone()).collect();
+    assert_eq!(shaders, ["effects/a1", "effects/a2"]);
+    assert_eq!(p.final_source(), &RenderTargetId::FboA);
+    assert_eq!(
+        p.diagnostics,
+        [
+            "Effect badtarget/effect.json skipped: unknown render target '_rt_Nope'",
+            "Effect badbind/effect.json skipped: unknown render target '_rt_Missing'",
+            "Effect missing/effect.json skipped: file missing or invalid",
+        ]
+    );
+}
+
+#[test]
+fn unknown_blend_modes_are_reported() {
+    assert_eq!(BlendMode::try_parse("weird"), None);
+    assert_eq!(BlendMode::try_parse("Additive"), Some(BlendMode::Additive));
+    let t = TempDir::new("fx-blend");
+    t.write(
+        "materials/fx/wobble.json",
+        r#"{ "passes": [ { "shader": "effects/w", "blending": "wobble", "textures": [null] } ] }"#,
+    );
+    t.write(
+        "effects/wobble/effect.json",
+        r#"{ "passes": [ { "material": "materials/fx/wobble.json" } ] }"#,
+    );
+    let p = plan(&t, r#"[ { "file": "effects/wobble/effect.json" } ]"#, None);
+    assert!(p
+        .diagnostics
+        .iter()
+        .any(|d| d == "Effect wobble/effect.json: unknown blend mode 'wobble' treated as normal"));
+}

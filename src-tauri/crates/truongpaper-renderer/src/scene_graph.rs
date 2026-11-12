@@ -30,6 +30,7 @@ use truongpaper_we_formats::{
     SceneObject, UserBoundValue, UserConditionSpec, UserPropertyMap, WeVirtualFileSystem,
 };
 
+use crate::diagnostics::DiagnosticsLog;
 use crate::json::Value;
 use crate::particles::{ParticleFile, ParticleSystemInstance};
 use crate::scene_assets::{material_texture_path, MaterialFile, ModelJsonFile};
@@ -37,6 +38,7 @@ use crate::scene_math::{
     build_pass_matrices, layer_model_matrix, parallax_eye_offset, scene_orthographic_projection,
     LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
 };
+use crate::text::{HAlign, TextStyle, VAlign, DEFAULT_POINT_SIZE};
 
 pub const DEFAULT_PERSPECTIVE_FOV_DEGREES: f32 = 50.0;
 pub const DEFAULT_PERSPECTIVE_NEARZ: f32 = 0.01;
@@ -268,9 +270,10 @@ pub enum SceneLayerKind {
         mintime: f32,
         maxtime: f32,
     },
-    /// Kept for SceneScript `thisLayer` access, not drawn.
+    /// Rasterized by the renderer; the string may be rewritten by SceneScript every frame.
     Text {
         text: String,
+        style: TextStyle,
     },
 }
 
@@ -345,10 +348,12 @@ pub enum ScriptProperty {
     Color,
     Size,
     Brightness,
+    /// Text layers only.
+    Text,
 }
 
 impl ScriptProperty {
-    pub const ALL: [ScriptProperty; 8] = [
+    pub const ALL: [ScriptProperty; 9] = [
         ScriptProperty::Origin,
         ScriptProperty::Scale,
         ScriptProperty::Angles,
@@ -357,6 +362,7 @@ impl ScriptProperty {
         ScriptProperty::Color,
         ScriptProperty::Size,
         ScriptProperty::Brightness,
+        ScriptProperty::Text,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -369,6 +375,7 @@ impl ScriptProperty {
             ScriptProperty::Color => "color",
             ScriptProperty::Size => "size",
             ScriptProperty::Brightness => "brightness",
+            ScriptProperty::Text => "text",
         }
     }
 
@@ -414,6 +421,8 @@ pub struct SceneGraph {
     pub layers: Vec<SceneLayer>,
     /// Non-fatal problems found while loading (missing assets, bad parents, ...).
     pub warnings: Vec<String>,
+    /// Short user-facing notes about content that is skipped or approximated.
+    pub diagnostics: DiagnosticsLog,
     nodes: Vec<SceneNode>,
     particles: Vec<(usize, ParticleSystemInstance)>,
 }
@@ -495,6 +504,22 @@ fn opt_f32(b: &Option<UserBoundValue<f32>>, props: &UserPropertyMap, default: f3
     b.as_ref()
         .map(|b| resolve_bound_value(b, props))
         .unwrap_or(default)
+}
+
+/// Text-layer style from the scene object (bound values resolved).
+fn text_style(obj: &SceneObject, props: &UserPropertyMap) -> TextStyle {
+    let pointsize = opt_f32(&obj.pointsize, props, DEFAULT_POINT_SIZE);
+    TextStyle {
+        pointsize: if pointsize.is_finite() && pointsize > 0.0 {
+            pointsize
+        } else {
+            DEFAULT_POINT_SIZE
+        },
+        font: obj.font.clone().filter(|f| !f.trim().is_empty()),
+        halign: HAlign::parse(obj.horizontalalign.as_deref()),
+        valign: VAlign::parse(obj.verticalalign.as_deref()),
+        padding: opt_f32(&obj.padding, props, 0.0).max(0.0),
+    }
 }
 
 fn normalize_path(p: &str) -> String {
@@ -632,6 +657,7 @@ impl SceneGraph {
             clear_enabled: true,
             layers: Vec::new(),
             warnings,
+            diagnostics: DiagnosticsLog::default(),
             nodes: Vec::new(),
             particles: Vec::new(),
         };
@@ -770,9 +796,8 @@ impl SceneGraph {
             }
         }
 
-        let mut warned_text = false;
         for (i, obj) in objects.iter().enumerate() {
-            let loaded = self.load_layer_kind(vfs, obj, &mut warned_text);
+            let loaded = self.load_layer_kind(vfs, obj);
             let fallback_size = loaded.as_ref().map(|l| l.1).unwrap_or(Vec2::ZERO);
             let transform = resolve_transform(obj, &self.user_props, fallback_size);
             let mut node = SceneNode {
@@ -823,7 +848,6 @@ impl SceneGraph {
         &mut self,
         vfs: &WeVirtualFileSystem,
         obj: &SceneObject,
-        warned_text: &mut bool,
     ) -> Option<LoadedKind> {
         let label = if obj.name.is_empty() {
             obj.id.map(|i| i.to_string()).unwrap_or_default()
@@ -835,6 +859,8 @@ impl SceneGraph {
                 Ok(k) => Some(k),
                 Err(e) => {
                     self.warn(format!("layer '{label}' skipped: {e}"));
+                    self.diagnostics
+                        .push(format!("Layer '{label}' skipped: asset missing or invalid"));
                     None
                 }
             };
@@ -857,6 +883,8 @@ impl SceneGraph {
                 )),
                 Err(e) => {
                     self.warn(format!("layer '{label}' skipped: {e}"));
+                    self.diagnostics
+                        .push(format!("Layer '{label}' skipped: asset missing or invalid"));
                     None
                 }
             };
@@ -874,15 +902,10 @@ impl SceneGraph {
             ));
         }
         if let Some(text) = &obj.text {
-            if !*warned_text {
-                *warned_text = true;
-                self.warn(format!(
-                    "text layer '{label}' is not drawn (text layers are not supported yet)"
-                ));
-            }
             return Some((
                 SceneLayerKind::Text {
                     text: resolve_bound_value(text, &self.user_props),
+                    style: text_style(obj, &self.user_props),
                 },
                 Vec2::ZERO,
             ));
@@ -1013,10 +1036,11 @@ impl SceneGraph {
         match &mut layer.kind {
             SceneLayerKind::Solid { color } => *color = layer.color,
             SceneLayerKind::Sound { volume, .. } => *volume = opt_f32(&obj.volume, props, 1.0),
-            SceneLayerKind::Text { text } => {
+            SceneLayerKind::Text { text, style } => {
                 if let Some(t) = &obj.text {
                     *text = resolve_bound_value(t, props);
                 }
+                *style = text_style(obj, props);
             }
             _ => {}
         }
@@ -1196,6 +1220,13 @@ impl SceneGraph {
                 obj.brightness.script(),
                 obj.brightness.default_value().to_string(),
             );
+            if let Some(text) = &obj.text {
+                push(
+                    ScriptProperty::Text,
+                    text.script(),
+                    text.default_value().clone(),
+                );
+            }
         }
         out
     }
@@ -1212,6 +1243,10 @@ impl SceneGraph {
             ScriptProperty::Color => fmt_vec3(l.color),
             ScriptProperty::Size => fmt_vec2(l.transform.size),
             ScriptProperty::Brightness => l.brightness.to_string(),
+            ScriptProperty::Text => match &l.kind {
+                SceneLayerKind::Text { text, .. } => text.clone(),
+                _ => return None,
+            },
         })
     }
 
@@ -1229,6 +1264,15 @@ impl SceneGraph {
         };
         let raw = value.trim().trim_matches('"');
         let layer = &mut self.layers[li];
+        if prop == ScriptProperty::Text {
+            return match &mut layer.kind {
+                SceneLayerKind::Text { text, .. } => {
+                    *text = value.to_string();
+                    true
+                }
+                _ => false,
+            };
+        }
         let mut transform_changed = false;
         match prop {
             ScriptProperty::Origin | ScriptProperty::Scale | ScriptProperty::Angles => {
@@ -1275,6 +1319,7 @@ impl SceneGraph {
                     layer.brightness = n;
                 }
             }
+            ScriptProperty::Text => return false,
             ScriptProperty::Visible => {
                 layer.visible = match raw {
                     "true" => true,
@@ -1321,6 +1366,21 @@ impl SceneGraph {
         }
         self.recompute_world();
         true
+    }
+
+    /// `thisLayer.text` write-back from SceneScript. Returns `true` when the layer is a text
+    /// layer and the string changed.
+    pub fn apply_layer_text(&mut self, name: &str, new_text: &str) -> bool {
+        let Some(li) = self.find_layer(name) else {
+            return false;
+        };
+        match &mut self.layers[li].kind {
+            SceneLayerKind::Text { text, .. } if text != new_text => {
+                *text = new_text.to_string();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Merges changed user-property values (JSON object) into the current set and re-resolves

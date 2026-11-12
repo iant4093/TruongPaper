@@ -344,7 +344,8 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
 
             let width = r.read_i32_le()?;
             let height = r.read_i32_le()?;
-            if !(0..=MAX_TEX_DIMENSION).contains(&width) || !(0..=MAX_TEX_DIMENSION).contains(&height)
+            if !(0..=MAX_TEX_DIMENSION).contains(&width)
+                || !(0..=MAX_TEX_DIMENSION).contains(&height)
             {
                 return Err(invalid(format!(
                     "Mipmap dimensions {width}x{height} outside 0..={MAX_TEX_DIMENSION}"

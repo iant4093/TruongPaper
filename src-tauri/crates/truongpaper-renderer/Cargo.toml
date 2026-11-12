@@ -16,3 +16,7 @@ glam.workspace = true
 image.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
+ab_glyph.workspace = true
+
+[dev-dependencies]
+pollster = "0.4"

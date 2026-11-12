@@ -25,7 +25,8 @@ use truongpaper_steam::{
     core_assets_bootstrap_args, core_assets_bootstrapped, fetch_workshop_preview,
     find_local_we_core_assets_dir, parse_workshop_url_or_id, password_login_args,
     pubfile_download_args, qr_login_args, run_depot_downloader_sidecar, scan_workshop_directories,
-    write_core_assets_filelist, SidecarEvent, WorkshopPreview, DEFAULT_MAX_DOWNLOADS,
+    validate_password, write_core_assets_filelist, SidecarEvent, WorkshopPreview,
+    DEFAULT_MAX_DOWNLOADS,
 };
 
 const SECRET_STEAM_USERNAME: &str = "steam_username";
@@ -183,6 +184,7 @@ async fn run_sidecar(
     session: &Arc<SteamSession>,
     args: Vec<String>,
     signing_in: bool,
+    password: Option<String>,
     mut on_event: impl FnMut(SidecarEvent) + Send,
 ) -> Result<(), String> {
     let bin = resolve_sidecar()?;
@@ -199,6 +201,8 @@ async fn run_sidecar(
             &working_dir,
             &args,
             signing_in.then_some(two_fa_rx),
+            password,
+            signing_in.then_some(SIGN_IN_TIMEOUT + std::time::Duration::from_secs(5)),
             event_tx,
         )
         .await
@@ -321,7 +325,7 @@ async fn bootstrap_core_assets_if_needed(session: Arc<SteamSession>, root: PathB
             return;
         }
     };
-    if let Err(err) = run_sidecar(&session, args, false, |_| {}).await {
+    if let Err(err) = run_sidecar(&session, args, false, None, |_| {}).await {
         tracing::warn!("core assets bootstrap failed: {err}");
     }
 }
@@ -375,7 +379,7 @@ pub async fn steam_download_workshop_item(
             let args =
                 pubfile_download_args(&workshop_id, username, &out_dir, DEFAULT_MAX_DOWNLOADS)
                     .map_err(|e| e.to_string())?;
-            run_sidecar(&state.steam, args, false, |ev| match &ev {
+            run_sidecar(&state.steam, args, false, None, |ev| match &ev {
                 SidecarEvent::ProgressPercent(pct) => {
                     emit_progress(&app, &workshop_id, &title, *pct, "downloading", None);
                 }
@@ -426,7 +430,7 @@ pub async fn steam_download_workshop_item(
 #[tauri::command]
 pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let mut account = None;
-    let run = run_sidecar(&state.steam, qr_login_args(), true, |ev| match &ev {
+    let run = run_sidecar(&state.steam, qr_login_args(), true, None, |ev| match &ev {
         SidecarEvent::LoggedInUsername(user) => account = Some(user.clone()),
         other => emit_auth(&app, other),
     });
@@ -464,9 +468,18 @@ pub async fn steam_login_credentials(
     username: String,
     password: String,
 ) -> Result<String, String> {
-    let args = password_login_args(&username, &password).map_err(|e| e.to_string())?;
-    drop(password);
-    run_sidecar(&state.steam, args, true, |ev| emit_auth(&app, &ev)).await?;
+    validate_password(&password).map_err(|e| e.to_string())?;
+    let args = password_login_args(&username).map_err(|e| e.to_string())?;
+    let run = run_sidecar(&state.steam, args, true, Some(password), |ev| {
+        emit_auth(&app, &ev)
+    });
+    match tokio::time::timeout(SIGN_IN_TIMEOUT, run).await {
+        Ok(result) => result?,
+        Err(_) => {
+            state.steam.cancel_logins();
+            return Err("Steam sign-in timed out. Try again.".into());
+        }
+    }
     let account = username.trim().to_string();
     VAULT.put(SECRET_STEAM_USERNAME, Some(&account))?;
     Ok(account)
@@ -475,7 +488,7 @@ pub async fn steam_login_credentials(
 #[tauri::command]
 pub async fn steam_submit_2fa_code(state: State<'_, AppState>, code: String) -> Result<(), String> {
     let code = code.trim().to_string();
-    if code.is_empty() || code.len() > 32 || code.chars().any(char::is_whitespace) {
+    if !truongpaper_steam::sidecar::is_valid_guard_code(&code) {
         return Err("Invalid Steam Guard code".into());
     }
     let tx = state

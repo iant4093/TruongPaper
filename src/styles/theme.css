@@ -84,6 +84,8 @@ input.button { cursor: text; }
 .badge-warn { color: #d0b881; background: #39352c; }
 .thumbnail { position: relative; overflow: hidden; border-radius: 5px; background: #2a2a2a; }
 .thumbnail img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumbnail-contain { display: flex; align-items: center; justify-content: center; background: transparent; }
+.thumbnail-contain img { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
 .thumbnail-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #656565; background: #2a2a2a; }
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 5px 0; font-size: 13px; margin-bottom: 12px; }
 .toggle-description { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
@@ -132,8 +134,20 @@ input.button { cursor: text; }
 .tray-wallpaper-card { position: relative; z-index: 1; padding: 14px; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .tray-wallpaper-content { min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .tray-wallpaper-preview { flex: 1; min-height: 0; margin-top: 8px; overflow: hidden; }
-.tray-wallpaper-preview .thumbnail { display: flex; align-items: center; justify-content: center; height: 100% !important; background: transparent; }
-.tray-wallpaper-preview img { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+.tray-wallpaper-preview .thumbnail { height: 100% !important; }
+.photo-current { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); align-items: center; gap: 20px; padding: 16px; }
+.photo-current-details, .photo-tile { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.photo-tile { padding: 12px; }
+.photo-badges, .photo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.photo-badges .badge:first-child { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.photo-meta, .photo-section-description { color: var(--text-secondary); font-size: 12px; }
+.photo-current-details .photo-actions { margin-top: 4px; }
+.photo-tile .photo-actions { margin-top: auto; padding-top: 2px; }
+.photo-tile .photo-actions .button { padding: 5px 8px; font-size: 11px; }
+.photo-favorites { scroll-margin-top: 16px; }
+.photo-favorites .section-title { margin-bottom: 4px; }
+.photo-section-description { margin: 0 0 12px; }
+@media (max-width: 720px) { .photo-current { grid-template-columns: minmax(0, 1fr); } }
 .tray-cache-status { color: var(--text-muted); font-size: 11px; text-align: center; }
 .tray-transition { max-width: 185px; }
 .lock-screen-card { display: grid; gap: 8px; justify-items: start; padding: 14px 16px; }

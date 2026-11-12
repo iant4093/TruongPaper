@@ -9,11 +9,19 @@ export const SectionTitle: React.FC<{ children: React.ReactNode }> = ({ children
 export const Badge: React.FC<{ children: React.ReactNode; tone?: 'cyan' | 'muted' | 'warn' }> = ({ children, tone }) => <span className={`badge ${tone === 'warn' ? 'badge-warn' : ''}`}>{children}</span>;
 
 /** A missing thumbnail remains neutral; changing the URL retries a failed image. */
-export const Thumb: React.FC<{ src: string | null | undefined; alt: string; height?: number }> = ({ src, alt, height = 120 }) => {
+export const Thumb: React.FC<{
+  src: string | null | undefined;
+  alt: string;
+  height?: number;
+  contain?: boolean;
+  lazy?: boolean;
+}> = ({ src, alt, height = 120, contain = false, lazy = false }) => {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = toAssetUrl(src);
-  return <div className="thumbnail" style={{ height }}>
-    {url && failedUrl !== url ? <img src={url} alt={alt} draggable={false} onError={() => setFailedUrl(url)} /> : <div className="thumbnail-placeholder" role="img" aria-label={alt}><ImageIcon size={22} strokeWidth={1.2} /></div>}
+  return <div className={contain ? 'thumbnail thumbnail-contain' : 'thumbnail'} style={{ height }}>
+    {url && failedUrl !== url
+      ? <img src={url} alt={alt} decoding="async" loading={lazy ? 'lazy' : 'eager'} draggable={false} onError={() => setFailedUrl(url)} />
+      : <div className="thumbnail-placeholder" role="img" aria-label={alt}><ImageIcon size={22} strokeWidth={1.2} /></div>}
   </div>;
 };
 export const ToggleRow: React.FC<{ label: string; description?: string; checked: boolean; onChange: (next: boolean) => void }> = ({ label, description, checked, onChange }) => (

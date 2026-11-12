@@ -2067,6 +2067,7 @@ invoke<void>('photo_toggle_album', { albumSlug: string, enabled: boolean });
 invoke<void>('photo_remove_album', { albumSlug: string });
 invoke<void>('photo_set_filter', { mode: FilterMode, featuredOnly: boolean });
 invoke<void>('photo_set_favorite', { photoId: string, favorite: boolean });
+invoke<void>('photo_apply_favorite', { monitorId: string, photoId: string });
 invoke<void>('photo_blacklist_and_skip', { photoId: string });
 invoke<void>('photo_set_cache_limit', { maxBytes: number });
 invoke<void>('photo_clear_cache'); // Deletes non-favorited .jpg files, NEVER deletes photos_history

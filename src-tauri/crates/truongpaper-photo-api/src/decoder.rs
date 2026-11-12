@@ -66,11 +66,7 @@ pub fn effective_max_dimension(device_max_texture_dim_2d: u32) -> u32 {
     device_max_texture_dim_2d.clamp(MIN_TEXTURE_DIMENSION, MAX_TEXTURE_DIMENSION)
 }
 
-fn decode_from_reader<R: BufRead + Seek>(
-    reader: R,
-    device_max_texture_dim_2d: u32,
-) -> PhotoApiResult<DecodedGpuPhoto> {
-    let max_dim = effective_max_dimension(device_max_texture_dim_2d);
+fn decode_oriented<R: BufRead + Seek>(reader: R) -> PhotoApiResult<DynamicImage> {
     let reader = ImageReader::new(reader)
         .with_guessed_format()
         .map_err(PhotoApiError::Io)?;
@@ -82,7 +78,15 @@ fn decode_from_reader<R: BufRead + Seek>(
     let mut dyn_img =
         DynamicImage::from_decoder(decoder).map_err(|e| PhotoApiError::Decode(e.to_string()))?;
     dyn_img.apply_orientation(orientation);
+    Ok(dyn_img)
+}
 
+fn decode_from_reader<R: BufRead + Seek>(
+    reader: R,
+    device_max_texture_dim_2d: u32,
+) -> PhotoApiResult<DecodedGpuPhoto> {
+    let max_dim = effective_max_dimension(device_max_texture_dim_2d);
+    let mut dyn_img = decode_oriented(reader)?;
     let (w, h) = (dyn_img.width(), dyn_img.height());
     if w > max_dim || h > max_dim {
         dyn_img = dyn_img.resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3);
@@ -95,6 +99,21 @@ fn decode_from_reader<R: BufRead + Seek>(
         width,
         height,
     })
+}
+
+/// Encodes a display-oriented JPEG for the app UI, capped at 800 pixels on either edge.
+pub fn encode_photo_preview(path: &Path) -> PhotoApiResult<Vec<u8>> {
+    let image = decode_oriented(BufReader::new(File::open(path)?))?;
+    let image = if image.width().max(image.height()) > 800 {
+        image.thumbnail(800, 800)
+    } else {
+        image
+    };
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85)
+        .encode_image(&image.into_rgb8())
+        .map_err(|err| PhotoApiError::Decode(err.to_string()))?;
+    Ok(bytes)
 }
 
 /// Decodes a baseline or progressive JPEG (or any enabled format) from disk, applies EXIF

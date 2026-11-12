@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Images, Search } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { WALLPAPER_TYPE_LABEL, formatBytes, formatOfflinePhotoCount } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, formatBytes, formatOfflinePhotoCount, photoPreviewSrc } from '../../lib/format';
 import type { WallpaperType } from '../../types/ipc';
 import { SectionTitle, Thumb, ViewHeader, SegmentedControl } from '../ui';
 import { WallpaperCard } from '../WallpaperCard';
@@ -54,7 +54,7 @@ export const AllWallpapersView: React.FC = () => {
       </div>
       {error && <div role="alert" className="error-banner">{error}</div>}
       <div className="wallpaper-grid">
-        {showPhotos && <WallpaperCard title="Ian Truong Photography" preview={currentPhoto?.filePath} kind="Photography" detail="Photo API" active={activeMonitor?.activeSource.kind === 'photo_api'} canApply={!!activeMonitor} onApply={() => void apply()} />}
+        {showPhotos && <WallpaperCard title="Ian Truong Photography" preview={photoPreviewSrc(currentPhoto)} kind="Photography" detail="Photo API" active={activeMonitor?.activeSource.kind === 'photo_api'} canApply={!!activeMonitor} onApply={() => void apply()} />}
         {items.map((w) => <WallpaperCard key={w.wallpaperId} title={w.title} preview={w.previewPath} kind={WALLPAPER_TYPE_LABEL[w.type]} detail={w.windowsOnly ? 'Windows only' : formatBytes(w.bytes)} audioReactive={w.audioReactive} selected={w.wallpaperId === selectedWallpaperId} active={activeMonitor?.activeSource.kind === 'workshop' && activeMonitor.activeSource.wallpaperId === w.wallpaperId} canApply={!!activeMonitor} onSelect={() => selectWallpaper(w.wallpaperId)} onApply={() => void apply(w.wallpaperId)} />)}
       </div>
       {!showPhotos && items.length === 0 && <div className="empty-state"><Images size={24} />No wallpapers match your search.</div>}
@@ -65,7 +65,7 @@ export const AllWallpapersView: React.FC = () => {
             <div className="queue-strip">
               {queue.map((photo) => (
                 <div key={photo.id} className="queue-item" title={`${photo.albumSlug} · ${formatBytes(photo.bytes)}`}>
-                  <Thumb src={photo.filePath} alt={photo.albumSlug} height={80} />
+                  <Thumb src={photoPreviewSrc(photo)} alt={photo.albumSlug} height={80} lazy />
                   <div className="queue-item-name">{photo.albumSlug.replace(/-/g, ' ')}</div>
                 </div>
               ))}

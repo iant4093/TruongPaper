@@ -282,6 +282,7 @@ export function createMockBackend(
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });
   const current2 = makePhoto({ lastShownAt: Date.now() - 200_000 });
+  const favorites = new Map([[current1.id, current1]]);
   let queue: PhotoItem[] = Array.from({ length: 5 }, () => makePhoto());
   let currentByMonitor: Record<string, PhotoItem | null> = { 'DISPLAY-1': current1, 'DISPLAY-2': current2 };
   let filterMode: FilterMode = 'featured';
@@ -365,6 +366,7 @@ export function createMockBackend(
     filterMode,
     featuredOnly,
     unusedQueue: queue,
+    favoritePhotos: [...favorites.values()],
     currentPhotoByMonitor: currentByMonitor,
     cachedBytes,
     maxCacheBytes: settings.maxPhotoCacheBytes,
@@ -484,12 +486,36 @@ export function createMockBackend(
       return null;
     },
     photo_set_favorite: (args) => {
-      updatePhoto(String(args.photoId), { isFavorite: Boolean(args.favorite) });
+      const id = String(args.photoId);
+      const favorite = Boolean(args.favorite);
+      const photo = favorites.get(id) ?? queue.find((p) => p.id === id) ??
+        Object.values(currentByMonitor).find((p) => p?.id === id);
+      if (photo && favorite) favorites.set(id, { ...photo, isFavorite: true });
+      else favorites.delete(id);
+      updatePhoto(id, { isFavorite: favorite });
+      emitEvent('photo-queue://updated', photoStatus());
+      return null;
+    },
+    photo_apply_favorite: (args) => {
+      const photo = favorites.get(String(args.photoId));
+      const monitorId = String(args.monitorId);
+      if (!photo) throw new Error('This favorite is no longer available on disk');
+      const shown = { ...photo, lastShownAt: Date.now() };
+      const source: WallpaperSource = { kind: 'photo_api' };
+      currentByMonitor = { ...currentByMonitor, [monitorId]: shown };
+      monitors = monitors.map((m) => m.monitorId === monitorId
+        ? { ...m, activeSource: source, activeWallpaperId: null }
+        : m);
+      queue = queue.filter((p) => p.id !== photo.id);
+      favorites.set(photo.id, shown);
+      emitEvent('wallpaper://changed', { monitorId, source, currentItem: shown, transitionUsed: settings.transitionType });
+      emitEvent('photo-queue://updated', photoStatus());
       return null;
     },
     photo_blacklist_and_skip: (args) => {
       const id = String(args.photoId);
       blacklistCount += 1;
+      favorites.delete(id);
       queue = queue.filter((p) => p.id !== id);
       for (const [monitorId, p] of Object.entries(currentByMonitor)) {
         if (p?.id === id) rotate(monitorId);
@@ -501,8 +527,9 @@ export function createMockBackend(
       return null;
     },
     photo_clear_cache: () => {
-      const kept = [...queue, ...Object.values(currentByMonitor)].filter((p): p is PhotoItem => !!p);
-      cachedBytes = kept.reduce((sum, p) => sum + p.bytes, 0);
+      queue = queue.filter((p) => p.isFavorite);
+      const kept = [...favorites.values(), ...Object.values(currentByMonitor)].filter((p): p is PhotoItem => !!p);
+      cachedBytes = [...new Map(kept.map((p) => [p.id, p])).values()].reduce((sum, p) => sum + p.bytes, 0);
       return null;
     },
     photo_reset_history: () => {

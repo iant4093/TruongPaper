@@ -249,6 +249,32 @@ pub fn list_unused_queue(
     Ok(items)
 }
 
+/// Favorites belong to the local collection regardless of the active rotation filter.
+pub fn list_favorite_photos(conn: &Connection, app_data_dir: &Path) -> CoreResult<Vec<PhotoItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM photos_cache WHERE file_present = 1 AND is_favorite = 1
+         ORDER BY last_shown_at DESC, downloaded_at DESC, id",
+    )?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut photos = Vec::new();
+    for id in ids {
+        if let Some(photo) = query_photo_item_by_id(conn, app_data_dir, &id?)? {
+            photos.push(photo);
+        }
+    }
+    Ok(photos)
+}
+
+/// A derived thumbnail stays beside its cached original and follows the same eviction rules.
+pub fn photo_preview_path(path: &Path) -> PathBuf {
+    path.with_extension("preview-v1.jpg")
+}
+
+pub fn remove_cached_photo_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(photo_preview_path(path));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Queue writes
 // ---------------------------------------------------------------------------------------------
@@ -291,8 +317,17 @@ pub fn upsert_cached_photo(conn: &Connection, photo: &NewCachedPhoto) -> CoreRes
 /// Step 2: call ONLY AFTER the wallpaper change / GPU transition succeeded on the desktop.
 /// Marks the cache row shown and upserts the persistent history row in one transaction.
 pub fn mark_photo_shown(conn: &mut Connection, photo_id: &str) -> CoreResult<()> {
-    let ts = now_ms();
     let tx = conn.transaction()?;
+    mark_photo_shown_in_transaction(&tx, photo_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn mark_photo_shown_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    photo_id: &str,
+) -> CoreResult<()> {
+    let ts = now_ms();
     let meta: Option<(String, i64, String)> = tx
         .query_row(
             "SELECT album_slug, featured, orientation FROM photos_cache WHERE id = ?1",
@@ -315,7 +350,6 @@ pub fn mark_photo_shown(conn: &mut Connection, photo_id: &str) -> CoreResult<()>
             params![photo_id, album_slug, featured, orientation, ts],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -494,7 +528,7 @@ pub fn evict_old_cached_files_preserving_history(
     )?;
     let mut evicted = Vec::with_capacity(plan.len());
     for (id, path) in plan {
-        let _ = std::fs::remove_file(&path);
+        remove_cached_photo_files(&path);
         mark_file_evicted(conn, &id)?;
         evicted.push(id);
     }
@@ -522,7 +556,7 @@ pub fn evict_old_cached_files_preserving_history_unlocked(
     };
     let mut evicted = Vec::with_capacity(plan.len());
     for (id, path) in plan {
-        let _ = std::fs::remove_file(&path);
+        remove_cached_photo_files(&path);
         let conn = db.lock();
         mark_file_evicted(&conn, &id)?;
         evicted.push(id);
@@ -1199,13 +1233,18 @@ mod tests {
 
     #[test]
     fn blacklist_clear_cache_and_favorites() {
-        let conn = db();
+        let mut conn = db();
         let dir = TempDir::new();
         add(&conn, &dir, &photo("keep", "s", 1, 1, 5, 1));
         add(&conn, &dir, &photo("fav", "s", 1, 1, 5, 2));
         add(&conn, &dir, &photo("screen", "s", 1, 1, 5, 3));
         add(&conn, &dir, &photo("junk", "s", 1, 1, 5, 4));
         set_favorite(&conn, "fav", true).unwrap();
+        mark_photo_shown(&mut conn, "fav").unwrap();
+        let favorites = list_favorite_photos(&conn, &dir.0).unwrap();
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].id, "fav");
+        assert!(favorites[0].last_shown_at.is_some());
 
         let path = blacklist_photo(&conn, &dir.0, "junk").unwrap().unwrap();
         assert!(path.ends_with("junk.jpg"));

@@ -28,6 +28,7 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   photo_remove_album: { albumSlug: 'bald-mountain-11-1' },
   photo_set_filter: { mode: 'albums', featuredOnly: true },
   photo_set_favorite: { photoId: 'demo-photo-0003', favorite: true },
+  photo_apply_favorite: { monitorId: 'DISPLAY-1', photoId: 'demo-photo-0001' },
   photo_blacklist_and_skip: { photoId: 'demo-photo-0003' },
   photo_set_cache_limit: { maxBytes: 500 * 1024 * 1024 },
   photo_reset_history: { albumSlug: 'bald-mountain-11-1' },

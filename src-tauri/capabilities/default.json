@@ -45,6 +45,7 @@
     "allow-photo-remove-album",
     "allow-photo-set-filter",
     "allow-photo-set-favorite",
+    "allow-photo-apply-favorite",
     "allow-photo-blacklist-and-skip",
     "allow-photo-set-cache-limit",
     "allow-photo-clear-cache",

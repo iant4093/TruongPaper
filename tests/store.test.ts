@@ -23,7 +23,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 import { useAppStore } from '../src/store/useAppStore';
 import { IPC_COMMANDS } from '../src/types/ipc';
 
-const status = { filterMode: 'all', featuredOnly: false, unusedQueue: [], currentPhotoByMonitor: {}, cachedBytes: 0, maxCacheBytes: 1, historyCount: 0, blacklistCount: 0, isRefilling: false, rateLimitRemaining: 100 };
+const status = { filterMode: 'all', featuredOnly: false, unusedQueue: [], favoritePhotos: [], currentPhotoByMonitor: {}, cachedBytes: 0, maxCacheBytes: 1, historyCount: 0, blacklistCount: 0, isRefilling: false, rateLimitRemaining: 100 };
 const initial = useAppStore.getState();
 
 const responses: Record<string, unknown> = {

@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { Thumb } from '../components/ui';
-import { formatBytes, formatOfflinePhotoCount, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { formatBytes, formatOfflinePhotoCount, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { TransitionType } from '../types/ipc';
 
@@ -46,6 +46,7 @@ export const TrayApp: React.FC = () => {
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const canRotate = !!currentPhoto || activeMonitor?.activeSource.kind === 'photo_api';
   const currentTitle = currentWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
+  const currentPreview = currentWallpaper?.previewPath || photoPreviewSrc(currentPhoto);
   const currentDetails = currentWallpaper
     ? `${WALLPAPER_TYPE_LABEL[currentWallpaper.type]} · ${formatBytes(currentWallpaper.bytes)}`
     : currentPhoto?.width && currentPhoto?.height
@@ -115,9 +116,9 @@ export const TrayApp: React.FC = () => {
             {currentTitle}
           </div>
           {currentDetails && <div className="tray-wallpaper-meta">{currentDetails}</div>}
-          {(currentWallpaper?.previewPath || currentPhoto?.filePath) && (
+          {currentPreview && (
             <div className="tray-wallpaper-preview">
-              <Thumb src={currentWallpaper?.previewPath || currentPhoto?.filePath} alt="" height={84} />
+              <Thumb src={currentPreview} alt="" height={84} contain />
             </div>
           )}
         </div>

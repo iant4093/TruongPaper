@@ -15,6 +15,7 @@ import { SteamWorkshopView } from './components/views/SteamWorkshopView';
 import { Thumb } from './components/ui';
 import { ResourceUsage } from './components/ResourceUsage';
 import { currentWallpaperForMonitor, useAppStore } from './store/useAppStore';
+import { photoPreviewSrc } from './lib/format';
 
 export type StudioTab = 'all' | 'photos' | 'workshop' | 'playlists' | 'monitors' | 'settings';
 export const STUDIO_TABS = [
@@ -73,7 +74,7 @@ export const App: React.FC = () => {
   const autoPaused = systemPowerReasons.length > 0 || (activeMonitor && policyStateByMonitor[activeMonitor.monitorId] && policyStateByMonitor[activeMonitor.monitorId] !== 'playing');
   const playingLabel = isPaused ? 'Paused' : autoPaused ? 'Auto-paused' : 'Playing';
   const currentTitle = activeWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
-  const currentPreview = activeWallpaper?.previewPath ?? currentPhoto?.filePath;
+  const currentPreview = activeWallpaper?.previewPath ?? photoPreviewSrc(currentPhoto);
   const canRotate = activeMonitor?.activeSource.kind === 'photo_api' || !!currentPhoto;
   const [actionError, setActionError] = useState<string | null>(null);
   const runAction = async (action: () => Promise<void>) => {

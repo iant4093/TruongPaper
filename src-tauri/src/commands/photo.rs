@@ -1,4 +1,4 @@
-//! All 13 `photo_*` Tauri IPC commands (docs/02 §6).
+//! Photo API and local photo cache IPC commands.
 //!
 //! The doc's inline types (`FilterMode`, `PhotoItem`, `SavedAlbum`, `PublicCatalogAlbum`,
 //! `PhotoStatus`) and SQL helpers (`query_photo_item_by_id`,
@@ -7,7 +7,8 @@
 //! bind every value as a SQL parameter instead of interpolating strings.
 
 use crate::commands::monitor::{
-    live_monitor_orientations, lock_monitor_applies, set_photo_host_source,
+    live_monitor_orientations, lock_monitor_applies, lock_monitor_apply, set_photo_host_source,
+    validate_monitor_id,
 };
 use crate::host::WallpaperHost;
 use crate::models::{
@@ -88,6 +89,7 @@ impl PhotoServiceState {
             filter_mode: mode,
             featured_only: filter.featured_only,
             unused_queue: list_unused_queue(&conn, &self.app_data_dir, &filter).map_err(e)?,
+            favorite_photos: list_favorite_photos(&conn, &self.app_data_dir).map_err(e)?,
             current_photo_by_monitor: current_photo_by_monitor(&conn, &self.app_data_dir)
                 .map_err(e)?,
             cached_bytes: cached_bytes_total(&conn).map_err(e)?,
@@ -274,7 +276,7 @@ async fn drop_undecodable_photo(state: &PhotoServiceState, item: &PhotoItem) {
     };
     match evicted {
         Ok(path) => {
-            let _ = tokio::fs::remove_file(path).await;
+            let _ = tokio::task::spawn_blocking(move || remove_cached_photo_files(&path)).await;
         }
         Err(err) => tracing::warn!("could not evict undecodable photo {}: {err}", item.id),
     }
@@ -747,6 +749,45 @@ pub async fn photo_set_favorite(
     Ok(())
 }
 
+/// Explicitly reuses a pinned photo on one display, without drawing from the rotation pool.
+#[tauri::command]
+pub async fn photo_apply_favorite(
+    app: AppHandle,
+    state: State<'_, PhotoServiceState>,
+    runtime: State<'_, AppState>,
+    monitor_id: String,
+    photo_id: String,
+) -> Result<(), String> {
+    validate_monitor_id(&monitor_id)?;
+    let _apply = lock_monitor_apply(&monitor_id).await;
+    let item = {
+        let conn = state.db.lock();
+        let item = query_photo_item_by_id(&conn, &state.app_data_dir, &photo_id)
+            .map_err(e)?
+            .filter(|photo| photo.is_favorite && Path::new(&photo.file_path).is_file());
+        item.ok_or("This favorite is no longer available on disk")?
+    };
+    let decoded = prepare_photo(Some(&runtime.host), &item).await?;
+    {
+        let mut conn = state.db.lock();
+        let tx = conn.transaction().map_err(e)?;
+        let still_available = get_cached_photo(&tx, &photo_id)
+            .map_err(e)?
+            .is_some_and(|photo| photo.file_present && photo.is_favorite);
+        if !still_available {
+            return Err("This favorite is no longer available on disk".into());
+        }
+        crate::db::set_monitor_source(&tx, &monitor_id, &WallpaperSource::PhotoApi)?;
+        mark_photo_shown_in_transaction(&tx, &photo_id).map_err(e)?;
+        assign_photo_to_monitor(&tx, &monitor_id, &photo_id).map_err(e)?;
+        tx.commit().map_err(e)?;
+    }
+    state.show_prepared(&app, &monitor_id, &item, decoded)?;
+    crate::scheduler::note_manual_rotation(Some(&monitor_id), true);
+    state.emit_status(&app);
+    Ok(())
+}
+
 /// 10. `photo_blacklist_and_skip`
 #[tauri::command]
 pub async fn photo_blacklist_and_skip(
@@ -762,7 +803,7 @@ pub async fn photo_blacklist_and_skip(
     };
 
     if let Some(path) = file_to_delete {
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = tokio::task::spawn_blocking(move || remove_cached_photo_files(&path)).await;
     }
 
     for mid in affected_monitors {
@@ -813,7 +854,7 @@ pub async fn photo_clear_cache(
     };
 
     for (id, full_path) in files_to_remove {
-        let _ = tokio::fs::remove_file(&full_path).await;
+        let _ = tokio::task::spawn_blocking(move || remove_cached_photo_files(&full_path)).await;
         let conn = state.db.lock();
         let _ = mark_file_evicted(&conn, &id);
     }
@@ -906,6 +947,7 @@ mod tests {
             "filterMode",
             "featuredOnly",
             "unusedQueue",
+            "favoritePhotos",
             "currentPhotoByMonitor",
             "cachedBytes",
             "maxCacheBytes",

@@ -88,6 +88,7 @@ export interface AppState {
   removeAlbum: (albumSlug: string) => Promise<void>;
   setPhotoFilter: (mode: FilterMode, featuredOnly: boolean) => Promise<void>;
   setPhotoFavorite: (photoId: string, favorite: boolean) => Promise<void>;
+  applyFavoritePhoto: (monitorId: string, photoId: string) => Promise<void>;
   blacklistAndSkipPhoto: (photoId: string) => Promise<void>;
   setCacheLimit: (maxBytes: number) => Promise<void>;
   clearPhotoCache: () => Promise<void>;
@@ -345,6 +346,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setPhotoFavorite: async (photoId, favorite) => {
       await invoke('photo_set_favorite', { photoId, favorite });
+      await refreshPhotoStatus();
+    },
+
+    applyFavoritePhoto: async (monitorId, photoId) => {
+      await invoke('photo_apply_favorite', { monitorId, photoId });
       await refreshPhotoStatus();
     },
 

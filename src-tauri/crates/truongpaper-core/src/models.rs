@@ -313,6 +313,7 @@ pub struct PhotoStatus {
     pub filter_mode: FilterMode,
     pub featured_only: bool,
     pub unused_queue: Vec<PhotoItem>,
+    pub favorite_photos: Vec<PhotoItem>,
     pub current_photo_by_monitor: HashMap<String, Option<PhotoItem>>,
     pub cached_bytes: u64,
     pub max_cache_bytes: u64,

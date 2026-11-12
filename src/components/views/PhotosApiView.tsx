@@ -1,6 +1,6 @@
 // src/components/views/PhotosApiView.tsx
 // §2.2 View 1: "Ian's Photos API" Studio View
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { open as openExternal } from '@tauri-apps/plugin-shell';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { parseImportLink } from '../../lib/importLinks';
-import { GB, MB, formatBytes, formatOfflinePhotoCount } from '../../lib/format';
+import { GB, MB, formatBytes, formatOfflinePhotoCount, photoPreviewSrc } from '../../lib/format';
 import type { FilterMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 
@@ -32,6 +32,24 @@ const POOL_OPTIONS = [
 const photoDims = (p: PhotoItem) =>
   p.width && p.height ? `${p.width} × ${p.height}` : 'Full Resolution';
 
+const photoAlbumName = (photo: PhotoItem) => photo.albumSlug.replace(/-/g, ' ');
+
+const PhotoBadges: React.FC<{ photo: PhotoItem }> = ({ photo }) => (
+  <div className="photo-badges" title={photoAlbumName(photo)}>
+    <Badge>{photoAlbumName(photo)}</Badge>
+    {photo.featured && <Badge tone="warn">Featured</Badge>}
+  </div>
+);
+
+const PhotoTile: React.FC<{ photo: PhotoItem; children: React.ReactNode }> = ({ photo, children }) => (
+  <article className="card photo-tile">
+    <Thumb src={photoPreviewSrc(photo)} alt={photoAlbumName(photo)} height={112} lazy contain />
+    <PhotoBadges photo={photo} />
+    <div className="photo-meta">{photoDims(photo)} · {formatBytes(photo.bytes)}</div>
+    <div className="photo-actions">{children}</div>
+  </article>
+);
+
 export const PhotosApiView: React.FC = () => {
   const photoStatus = useAppStore((s) => s.photoStatus);
   const settings = useAppStore((s) => s.settings);
@@ -46,6 +64,7 @@ export const PhotosApiView: React.FC = () => {
   const removeAlbum = useAppStore((s) => s.removeAlbum);
   const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
   const setPhotoFavorite = useAppStore((s) => s.setPhotoFavorite);
+  const applyFavoritePhoto = useAppStore((s) => s.applyFavoritePhoto);
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
   const setCacheLimit = useAppStore((s) => s.setCacheLimit);
   const clearPhotoCache = useAppStore((s) => s.clearPhotoCache);
@@ -58,6 +77,9 @@ export const PhotosApiView: React.FC = () => {
   const [albumInput, setAlbumInput] = useState('');
   const [albumMsg, setAlbumMsg] = useState<string | null>(null);
   const [cacheDraft, setCacheDraft] = useState<number | null>(null);
+  const [photoActionPending, setPhotoActionPending] = useState(false);
+  const [photoActionError, setPhotoActionError] = useState<string | null>(null);
+  const favoritesSection = useRef<HTMLElement>(null);
 
   const mode = photoStatus?.filterMode ?? 'all';
   const featuredOnly = photoStatus?.featuredOnly ?? false;
@@ -67,6 +89,19 @@ export const PhotosApiView: React.FC = () => {
   const currentPhoto =
     (activeMonitorId ? photoStatus?.currentPhotoByMonitor?.[activeMonitorId] : null) ?? null;
   const queue = photoStatus?.unusedQueue ?? [];
+  const favorites = photoStatus?.favoritePhotos ?? [];
+
+  const runPhotoAction = async (action: () => Promise<void>) => {
+    setPhotoActionPending(true);
+    setPhotoActionError(null);
+    try {
+      await action();
+    } catch (error) {
+      setPhotoActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPhotoActionPending(false);
+    }
+  };
 
   // Debounce cache-limit slider commits so we don't spam the backend while dragging.
   useEffect(() => {
@@ -115,9 +150,14 @@ export const PhotosApiView: React.FC = () => {
         title="Ian Truong Photography"
         subtitle="Photo wallpapers from the Ian Truong Photography API."
         actions={
-          <button type="button" className="button" onClick={() => void openCatalog()}>
-            <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Browse albums'}
-          </button>
+          <>
+            <button type="button" className="button" onClick={() => favoritesSection.current?.scrollIntoView({ block: 'start' })}>
+              <Heart size={14} /> Favorites
+            </button>
+            <button type="button" className="button" onClick={() => void openCatalog()}>
+              <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Browse albums'}
+            </button>
+          </>
         }
       />
 
@@ -252,31 +292,34 @@ export const PhotosApiView: React.FC = () => {
 
       {/* Current wallpaper Photo Card */}
       <SectionTitle>Current wallpaper</SectionTitle>
+      {photoActionError && <div role="alert" className="error-banner">{photoActionError}</div>}
       {currentPhoto ? (
-        <div className="card" style={{ padding: 14, display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
-          <Thumb src={currentPhoto.filePath} alt={currentPhoto.albumSlug} height={200} />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <Badge>{currentPhoto.albumSlug}</Badge>
-              {currentPhoto.featured && <Badge tone="warn">Featured</Badge>}
+        <div className="card photo-current">
+          <Thumb src={photoPreviewSrc(currentPhoto)} alt={photoAlbumName(currentPhoto)} height={260} contain lazy />
+          <div className="photo-current-details">
+            <PhotoBadges photo={currentPhoto} />
+            <div className="photo-meta">
+              {photoDims(currentPhoto)} · {formatBytes(currentPhoto.bytes)}
             </div>
-            <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-              {photoDims(currentPhoto)} • {formatBytes(currentPhoto.bytes)}
+            <div className="photo-actions">
+              <button
+                type="button"
+                className="button"
+                aria-pressed={currentPhoto.isFavorite}
+                disabled={photoActionPending}
+                onClick={() => void runPhotoAction(() => setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite))}
+              >
+                <Heart size={14} fill={currentPhoto.isFavorite ? 'currentColor' : 'none'} />
+                {currentPhoto.isFavorite ? 'Favorited' : 'Add to favorites'}
+              </button>
+              <button type="button" className="button" disabled={photoActionPending}
+                onClick={() => void runPhotoAction(() => blacklistAndSkipPhoto(currentPhoto.id))}>
+                <EyeOff size={14} /> Hide photo
+              </button>
+              <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
+                <ExternalLink size={14} /> View album
+              </button>
             </div>
-            <button
-              type="button"
-              className="button"
-              onClick={() => void setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite)}
-            >
-              <Heart size={14} fill={currentPhoto.isFavorite ? 'currentColor' : 'none'} />
-              {currentPhoto.isFavorite ? 'Favorited' : 'Favorite / Keep on Disk'}
-            </button>
-            <button type="button" className="button" onClick={() => void blacklistAndSkipPhoto(currentPhoto.id)}>
-              <EyeOff size={14} /> Hide photo
-            </button>
-            <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
-              <ExternalLink size={14} /> View album
-            </button>
           </div>
         </div>
       ) : (
@@ -285,26 +328,42 @@ export const PhotosApiView: React.FC = () => {
         </div>
       )}
 
+      <section ref={favoritesSection} className="photo-favorites" aria-labelledby="photo-favorites-title">
+        <h3 className="section-title" id="photo-favorites-title">Favorites{favorites.length ? ` · ${favorites.length}` : ''}</h3>
+        <p className="photo-section-description">Favorited photos stay on disk when the cache is cleared.</p>
+        {favorites.length ? (
+          <div style={cardGrid}>
+            {favorites.map((photo) => (
+              <PhotoTile key={photo.id} photo={photo}>
+                <button type="button" className="button button-primary"
+                  disabled={!activeMonitorId || photoActionPending || currentPhoto?.id === photo.id}
+                  onClick={() => {
+                    if (activeMonitorId) void runPhotoAction(() => applyFavoritePhoto(activeMonitorId, photo.id));
+                  }}>
+                  {currentPhoto?.id === photo.id ? 'Current' : 'Apply'}
+                </button>
+                <button type="button" className="icon-button" disabled={photoActionPending}
+                  aria-label={`Remove ${photoAlbumName(photo)} from favorites`}
+                  onClick={() => void runPhotoAction(() => setPhotoFavorite(photo.id, false))}>
+                  <Heart size={14} fill="currentColor" />
+                </button>
+              </PhotoTile>
+            ))}
+          </div>
+        ) : <div className="view-subtitle">Add a wallpaper to favorites to find it here later.</div>}
+      </section>
+
       {/* Up Next Queue */}
       <SectionTitle>{formatOfflinePhotoCount(queue.length)}</SectionTitle>
       <div style={cardGrid}>
         {queue.map((photo, idx) => (
-          <div key={photo.id} className="card" style={{ padding: 12 }}>
-            <Thumb src={photo.filePath} alt={photo.albumSlug} height={100} />
-            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-              <Badge>{photo.albumSlug}</Badge>
-              {photo.featured && <Badge tone="warn">Featured</Badge>}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>
-              {photoDims(photo)} • {formatBytes(photo.bytes)}
-            </div>
-            <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+          <PhotoTile key={photo.id} photo={photo}>
               {idx === 0 && (
                 <button
                   type="button"
                   className="button button-primary"
-                  style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                  onClick={() => void rotateNextPhoto(activeMonitorId)}
+                  disabled={photoActionPending}
+                  onClick={() => void runPhotoAction(() => rotateNextPhoto(activeMonitorId))}
                 >
                   <SkipForward size={12} /> Apply Now
                 </button>
@@ -312,13 +371,12 @@ export const PhotosApiView: React.FC = () => {
               <button
                 type="button"
                 className="button"
-                style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                onClick={() => void blacklistAndSkipPhoto(photo.id)}
+                disabled={photoActionPending}
+                onClick={() => void runPhotoAction(() => blacklistAndSkipPhoto(photo.id))}
               >
-                <EyeOff size={12} /> Skip/Blacklist
+                <EyeOff size={12} /> Hide photo
               </button>
-            </div>
-          </div>
+          </PhotoTile>
         ))}
         {queue.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Queue is empty. Refill to download new photos.</div>

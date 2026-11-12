@@ -50,6 +50,7 @@ export interface PhotoStatus {
   filterMode: FilterMode;
   featuredOnly: boolean;
   unusedQueue: PhotoItem[];
+  favoritePhotos: PhotoItem[];
   currentPhotoByMonitor: Record<string, PhotoItem | null>;
   cachedBytes: number;
   maxCacheBytes: number;
@@ -222,6 +223,7 @@ export const IPC_COMMANDS = [
   'photo_remove_album',
   'photo_set_filter',
   'photo_set_favorite',
+  'photo_apply_favorite',
   'photo_blacklist_and_skip',
   'photo_set_cache_limit',
   'photo_clear_cache',

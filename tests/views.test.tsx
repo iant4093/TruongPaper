@@ -114,6 +114,22 @@ describe('Main studio window', () => {
     });
     await vi.waitFor(() => expect(useAppStore.getState().photoStatus!.historyCount).toBe(before + 1));
   });
+
+  it('shows a saved photo after rotation and reapplies it from Photography favorites', async () => {
+    await act(async () => { render(<App />); });
+    const before = useAppStore.getState().photoStatus!.currentPhotoByMonitor['DISPLAY-1']!;
+    await act(async () => {
+      await invoke('photo_set_favorite', { photoId: before.id, favorite: true });
+      await invoke('photo_rotate_next', { monitorId: 'DISPLAY-1' });
+      fireEvent.click(screen.getByRole('button', { name: 'Photography' }));
+    });
+    const favorites = screen.getByRole('region', { name: /^Favorites/ });
+    const preview = within(favorites).getByRole('img', { name: before.albumSlug.replace(/-/g, ' ') });
+    const tile = within(preview.closest('article')!);
+    await act(async () => { fireEvent.click(tile.getByRole('button', { name: 'Apply' })); });
+    expect(useAppStore.getState().photoStatus!.currentPhotoByMonitor['DISPLAY-1']?.id).toBe(before.id);
+    expect(tile.getByRole('button', { name: 'Current' })).toBeTruthy();
+  });
 });
 
 describe('Tray popover', () => {

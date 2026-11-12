@@ -5,6 +5,7 @@ pub mod db;
 pub mod desktop_host;
 pub mod host;
 pub mod models;
+mod photo_preview;
 pub mod power;
 pub mod protocol;
 pub mod scene_runtime;
@@ -80,6 +81,21 @@ pub fn run() {
                 });
             },
         )
+        .register_asynchronous_uri_scheme_protocol(
+            photo_preview::SCHEME,
+            |ctx, request, responder| {
+                let state = if matches!(ctx.webview_label(), "main" | "tray-popover") {
+                    ctx.app_handle()
+                        .try_state::<PhotoServiceState>()
+                        .map(|state| state.inner().clone())
+                } else {
+                    None
+                };
+                tauri::async_runtime::spawn(async move {
+                    responder.respond(photo_preview::serve(state, request).await);
+                });
+            },
+        )
         .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
             // --- Photo API & Cache ---
@@ -92,6 +108,7 @@ pub fn run() {
             commands::photo::photo_remove_album,
             commands::photo::photo_set_filter,
             commands::photo::photo_set_favorite,
+            commands::photo::photo_apply_favorite,
             commands::photo::photo_blacklist_and_skip,
             commands::photo::photo_set_cache_limit,
             commands::photo::photo_clear_cache,
@@ -184,7 +201,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 38, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 39, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

@@ -86,9 +86,12 @@ jobs:
       - name: Rust format and lint
         if: matrix.os == 'macos-latest'
         working-directory: src-tauri
+        # Pinned so a new stable release cannot add lints that fail unrelated changes.
+        # Raise it on purpose after running clippy with the new version locally.
         run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
+          rustup toolchain install 1.94.0 --profile minimal -c clippy,rustfmt
+          cargo +1.94.0 fmt --all -- --check
+          cargo +1.94.0 clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Rust tests
         working-directory: src-tauri

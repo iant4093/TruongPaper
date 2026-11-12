@@ -118,7 +118,7 @@ pub fn plan_video_upload(frame: &VideoFrame, width: u32, height: u32) -> Option<
         }
     }
     let mut bgra = video_frame_to_rgba(frame, width, height)?;
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     Some(VideoUpload::Converted(bgra))

@@ -46,66 +46,29 @@ describe('parseImportLink classification', () => {
   );
 });
 
-describe('<WorkshopImport /> dispatch', () => {
+describe('<WorkshopImport />', () => {
   const initial = useAppStore.getState();
-
   beforeEach(() => {
     invokeMock.mockReset();
     localStorage.clear();
     useAppStore.setState(initial, true);
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'steam_inspect_url') return { workshopId: '2841928371', title: 'Neon Rain', description: '', previewUrl: '', fileSizeBytes: 1, tags: [], timeUpdated: 0 };
-      return null;
-    });
+    invokeMock.mockResolvedValue(null);
   });
   afterEach(cleanup);
 
-  const submit = async (value: string) => {
+  it('is only the import menu: no link field, no second search box', () => {
     render(<WorkshopImport />);
-    const input = screen.getByRole('textbox', { name: 'Steam Workshop link or item ID' });
-    fireEvent.change(input, { target: { value } });
-    await act(async () => {
-      fireEvent.submit(input.closest('form')!);
-    });
-  };
-
-  it('opens a preview from a direct Workshop URL so the user can choose the source', async () => {
-    await submit('https://steamcommunity.com/sharedfiles/filedetails/?id=2841928371');
-    expect(invokeMock.mock.calls).toEqual([
-      ['steam_inspect_url', { urlOrId: '2841928371' }],
-    ]);
-    expect(useAppStore.getState().inspectedWorkshop?.title).toBe('Neon Rain');
+    expect(screen.getByRole('button', { name: /Import from computer/ })).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
   });
 
-  it('keeps photo album imports out of Workshop', async () => {
-    await submit('bald-mountain-11-1');
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(screen.getByRole('status').textContent).toBe('Enter a Steam Workshop link or item ID.');
-  });
-
-  it('shows a hint for unrecognised input and never invokes', async () => {
-    await submit('not a link');
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(screen.getByText('Enter a Steam Workshop link or item ID.')).toBeTruthy();
-  });
-
-  it('opens the Steam sign-in sheet when the backend reports an auth error', async () => {
-    invokeMock.mockImplementation(async () => {
-      throw new Error('Steam login required');
-    });
-    await submit('2841928371');
-    expect(useAppStore.getState().authModalOpen).toBe(true);
-  });
-
-  it('handles Cmd/Ctrl+V in Workshop when no input is focused', async () => {
+  it('ignores pasted Workshop links and never opens the sign-in sheet on its own', async () => {
     render(<WorkshopImport />);
-    (document.activeElement as HTMLElement | null)?.blur();
     const evt = new Event('paste', { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
     evt.clipboardData = { getData: () => 'steam://url/CommunityFilePage/2841928371' };
-    await act(async () => {
-      window.dispatchEvent(evt);
-    });
-    expect(evt.defaultPrevented).toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith('steam_inspect_url', { urlOrId: '2841928371' });
+    await act(async () => { window.dispatchEvent(evt); });
+    expect(evt.defaultPrevented).toBe(false);
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().authModalOpen).toBe(false);
   });
 });

@@ -2,12 +2,14 @@
 // §2.5 View 4: "Monitors & Fit" View
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Copy, Image as ImageIcon, Lock } from 'lucide-react';
+import { Copy, Lock } from 'lucide-react';
 import { currentWallpaperForMonitor, useAppStore } from '../../store/useAppStore';
-import { FIT_MODE_LABEL } from '../../lib/format';
-import type { FitMode, MonitorInfo, WallpaperSource } from '../../types/ipc';
+import { sourceFromKey, sourceKey } from '../../lib/format';
+import { toast } from '../../store/feedback';
+import { Dropdown } from '../Dropdown';
+import type { MonitorInfo, WallpaperSource } from '../../types/ipc';
 import { wallpaperWrites } from '../../lib/writeQueue';
-import { Badge, SectionTitle, SegmentedControl, ToggleRow, ViewHeader } from '../ui';
+import { Badge, SectionTitle, ToggleRow, ViewHeader } from '../ui';
 
 export function describeSource(
   source: WallpaperSource,
@@ -15,7 +17,7 @@ export function describeSource(
 ): string {
   switch (source.kind) {
     case 'photo_api':
-      return "Ian's Photo API";
+      return 'Photos';
     case 'workshop':
       return lookup.wallpaperTitle(source.wallpaperId) ?? source.wallpaperId;
     case 'playlist':
@@ -61,11 +63,23 @@ export const MonitorsView: React.FC = () => {
   const wallpapers = useAppStore((s) => s.wallpapers);
   const photoStatus = useAppStore((s) => s.photoStatus);
   const playlists = useAppStore((s) => s.playlists);
-  const policyStateByMonitor = useAppStore((s) => s.policyStateByMonitor);
   const selectMonitor = useAppStore((s) => s.selectMonitor);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const [msg, setMsg] = useState<string | null>(null);
+  const showsOptions = [
+    ['photo_api', 'Photos'] as const,
+    ...wallpapers.filter((w) => w.type !== 'photo').map((w) => [`w:${w.wallpaperId}`, w.title] as const),
+    ...playlists.map((p) => [`p:${p.playlistId}`, `Playlist: ${p.name}`] as const),
+  ];
+  const setShows = (monitor: MonitorInfo, key: string) => {
+    const source = sourceFromKey(key);
+    const label = showsOptions.find(([k]) => k === key)?.[1] ?? 'Photos';
+    applyMonitorSource(monitor.monitorId, source).then(
+      () => toast.success(`${monitor.name} now shows ${label}`),
+      (err) => toast.error(err, `Could not change ${monitor.name}`),
+    );
+  };
   const [lockScreenPending, setLockScreenPending] = useState(false);
   const [lockScreenStatus, setLockScreenStatus] = useState<string | null>(null);
 
@@ -91,14 +105,14 @@ export const MonitorsView: React.FC = () => {
       for (const m of monitors) {
         if (m.monitorId !== active.monitorId) await applyMonitorSource(m.monitorId, active.activeSource);
       }
-      setMsg(`Applied "${describeSource(active.activeSource, lookup)}" to ${monitors.length - 1} other monitor(s)`);
+      toast.success(`Showing ${describeSource(active.activeSource, lookup)} on all displays`);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     }
   };
   const report = (action: Promise<unknown>) => {
     setMsg(null);
-    action.catch((err) => setMsg(err instanceof Error ? err.message : String(err)));
+    action.then(() => toast.success('Saved'), (err) => toast.error(err));
   };
   const setLockScreen = async () => {
     if (!active) return;
@@ -160,54 +174,34 @@ export const MonitorsView: React.FC = () => {
         {monitors.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No displays detected.</div>}
       </div>
 
-      {active && (
+      {monitors.length > 0 && (
         <>
-          <SectionTitle>{active.name}</SectionTitle>
-          <div className="card" style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12, fontSize: 13 }}>
-            <div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Resolution</div>
-              {active.width} × {active.height}
-            </div>
-            <div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>DPI Scale</div>
-              {Math.round(active.scaleFactor * 100)}%
-            </div>
-            <div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Refresh Rate</div>
-              {active.refreshRateHz} Hz
-            </div>
-            <div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Orientation</div>
-              {active.isPortrait ? 'Portrait' : 'Landscape'}
-            </div>
-            <div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Playback</div>
-              {(policyStateByMonitor[active.monitorId] ?? 'playing').replace(/_/g, ' ')}
-            </div>
-            <div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Active Source</div>
-              {describeSource(active.activeSource, lookup)}
-            </div>
+          <SectionTitle>What each display shows</SectionTitle>
+          <div className="card shows-list">
+            {monitors.map((m) => (
+              <div key={m.monitorId} className="shows-row">
+                <div className="shows-name">
+                  <strong>{m.name}</strong>
+                  <span className="view-subtitle">{m.width} × {m.height}</span>
+                </div>
+                <Dropdown label={`Shows on ${m.name}`} className="shows-picker" value={sourceKey(m.activeSource)}
+                  options={showsOptions} placeholder="Choose what to show" onChange={(key) => setShows(m, key)} />
+              </div>
+            ))}
           </div>
-          {active.volume !== undefined && (
-            <div className="card" style={{ padding: 16, marginTop: 10 }}>
-              <VolumeSlider key={active.monitorId} monitor={active} onError={setMsg} />
-            </div>
-          )}
-          {active.activeSource.kind !== 'photo_api' && (
-            <button
-              type="button"
-              className="button"
-              style={{ marginTop: 10 }}
-              onClick={() => report(applyMonitorSource(active.monitorId, { kind: 'photo_api' }))}
-            >
-              <ImageIcon size={14} /> Switch to Ian's Photo API
-            </button>
-          )}
         </>
       )}
 
-      <SectionTitle>Lock Screen</SectionTitle>
+      {active && active.volume !== undefined && (
+        <>
+          <SectionTitle>{active.name}</SectionTitle>
+          <div className="card" style={{ padding: 16 }}>
+            <VolumeSlider key={active.monitorId} monitor={active} onError={setMsg} />
+          </div>
+        </>
+      )}
+
+      <SectionTitle>Lock screen</SectionTitle>
       <div className="card lock-screen-card">
         {windows && (
           <ToggleRow
@@ -231,26 +225,10 @@ export const MonitorsView: React.FC = () => {
         {lockScreenStatus && <div role="status">{lockScreenStatus}</div>}
       </div>
 
-      <SectionTitle>Orientation Matching for Photo API</SectionTitle>
-      <div className="card" style={{ padding: 16 }}>
-        <ToggleRow
-          label="Skip portrait photos on landscape monitors (and vice-versa)"
-          checked={settings?.skipMismatchedOrientation ?? true}
-          onChange={(next) => report(updateSettings({ skipMismatchedOrientation: next }))}
-        />
-        <div style={{ fontSize: 13, marginBottom: 8 }}>Photo fit mode</div>
-        <SegmentedControl
-          value={settings?.defaultFitMode ?? 'fill'}
-          options={(Object.keys(FIT_MODE_LABEL) as FitMode[]).map((k) => [k, FIT_MODE_LABEL[k]] as const)}
-          onChange={(next) => report(updateSettings({ defaultFitMode: next }))}
-        />
-      </div>
-
-      <SectionTitle>Multi-Monitor Mode</SectionTitle>
+      <SectionTitle>Several displays</SectionTitle>
       <div className="card" style={{ padding: 16, fontSize: 13 }}>
         <div style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>
-          Each display keeps its own source. Apply the selected source to all displays to share a Workshop
-          wallpaper or photo pool. Photo draws remain independent.
+          Each display keeps its own wallpaper unless you choose otherwise. Photo settings (fit, orientation) are in Photography.
         </div>
         {settings?.multiMonitorMode !== undefined && (
           <div style={{ marginBottom: 14 }}>
@@ -260,6 +238,7 @@ export const MonitorsView: React.FC = () => {
               checked={settings.multiMonitorMode === 'span'}
               onChange={(span) => report(updateSettings({ multiMonitorMode: span ? 'span' : 'independent' }))}
             />
+            <div className="view-subtitle" style={{ marginTop: -6 }}>Works for photos and scenes. Videos and web wallpapers show on each display.</div>
           </div>
         )}
         <button
@@ -268,7 +247,7 @@ export const MonitorsView: React.FC = () => {
           disabled={!active || monitors.length < 2}
           onClick={() => void cloneToAll()}
         >
-          <Copy size={14} /> Use source on all displays
+          <Copy size={14} /> Show the same on all displays
         </button>
       </div>
     </div>

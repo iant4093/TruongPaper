@@ -923,12 +923,6 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = main_win.set_focus();
                 }
             }
-            "next_wallpaper" => {
-                let _ = app.emit("tray://next-requested", ());
-            }
-            "toggle_pause" => {
-                let _ = app.emit("tray://toggle-pause-requested", ());
-            }
             "quit" => {
                 app.exit(0);
             }
@@ -2121,6 +2115,7 @@ invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: numb
 - `policy://state-changed`: `{ monitorId: string, state: 'playing' | 'paused_fullscreen' | 'paused_maximized' | 'paused_battery' | 'paused_display_sleep' }`
 - `wallpaper://error`: `{ monitorId: string, wallpaperId: string | null, message: string }` (a wallpaper could not load).
 - `wallpaper://diagnostics`: `{ monitorId: string, wallpaperId: string | null, messages: string[] }` (scene report).
+- `wallpaper://loaded`: `{ monitorId: string, wallpaperId: string | null }` (a wallpaper finished loading; clears that display's error card).
 - `playback://pause-changed`: `{ monitorId: string | null, paused: boolean }` (manual pause; null means all displays).
 - `system-power`: `{ kind: 'pause' | 'resume', reason: 'sleep' | 'display' | 'lock' }`
 

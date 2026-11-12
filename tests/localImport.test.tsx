@@ -24,8 +24,8 @@ it('imports a chosen video and selects it', async () => {
   const status = vi.fn();
   openMock.mockResolvedValue('/Users/me/clip.mp4');
   render(<LocalImport onStatus={status} />);
-  fireEvent.click(screen.getByRole('button', { name: /Import Folder or Video/ }));
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Video file' })); });
+  fireEvent.click(screen.getByRole('button', { name: /Import from computer/ }));
+  await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Video file' })); });
   expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: false, filters: [{ name: 'Video', extensions: ['mp4', 'webm', 'mov', 'mkv'] }] }));
   expect(invokeMock).toHaveBeenCalledWith('library_import_local', { path: '/Users/me/clip.mp4' });
   const state = useAppStore.getState();
@@ -37,8 +37,8 @@ it('imports a chosen video and selects it', async () => {
 it('opens a directory picker for folders and does nothing when cancelled', async () => {
   openMock.mockResolvedValue(null);
   render(<LocalImport />);
-  fireEvent.click(screen.getByRole('button', { name: /Import Folder or Video/ }));
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Folder with project.json' })); });
+  fireEvent.click(screen.getByRole('button', { name: /Import from computer/ }));
+  await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Folder with project.json' })); });
   expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: true }));
   expect(invokeMock).not.toHaveBeenCalled();
 });
@@ -48,7 +48,17 @@ it('reports import errors', async () => {
   openMock.mockResolvedValue('/bad');
   invokeMock.mockRejectedValue('That folder has no project.json.');
   render(<LocalImport onStatus={status} />);
-  fireEvent.click(screen.getByRole('button', { name: /Import Folder or Video/ }));
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Folder with project.json' })); });
+  fireEvent.click(screen.getByRole('button', { name: /Import from computer/ }));
+  await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Folder with project.json' })); });
   expect(status).toHaveBeenLastCalledWith('That folder has no project.json.');
+});
+
+it('shows the two choices in a menu that closes on Escape', () => {
+  render(<LocalImport />);
+  const trigger = screen.getByRole('button', { name: /Import from computer/ });
+  expect(screen.queryByRole('menu')).toBeNull();
+  fireEvent.click(trigger);
+  expect(screen.getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Folder with project.json', 'Video file']);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(screen.queryByRole('menu')).toBeNull();
 });

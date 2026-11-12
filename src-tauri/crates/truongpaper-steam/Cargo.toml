@@ -19,3 +19,6 @@ url.workspace = true
 tracing.workspace = true
 tempfile = "3"
 zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"

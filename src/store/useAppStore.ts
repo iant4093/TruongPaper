@@ -7,6 +7,7 @@ import type {
   FilterMode,
   MonitorInfo,
   PhotoItem,
+  GuestAvailability,
   PhotoStatus,
   PlaybackPauseChanged,
   Playlist,
@@ -73,6 +74,8 @@ export interface AppState {
   presetsByWallpaper: Record<string, WallpaperPreset[]>;
 
   inspectedWorkshop: WorkshopPreview | null;
+  /** GGNetwork (third-party mirror) availability by Workshop id; absent = not checked yet. */
+  guestAvailability: Record<string, GuestAvailability>;
   downloadsById: Record<string, SteamDownloadProgress>;
   authModalOpen: boolean;
   qrMatrix: boolean[][] | null;
@@ -102,6 +105,8 @@ export interface AppState {
   closeWorkshopPreview: () => void;
   downloadWorkshopItem: (urlOrId: string, source?: WorkshopDownloadSource) => Promise<void>;
   syncLocalSteamFolders: () => Promise<void>;
+  loadGuestAvailability: (workshopIds: string[]) => Promise<void>;
+  importLocalWallpaper: (path: string) => Promise<WallpaperItem>;
   deleteWallpaper: (wallpaperId: string) => Promise<void>;
   openSteamAuthModal: () => void;
   closeSteamAuthModal: () => void;
@@ -182,6 +187,7 @@ export const useAppStore = create<AppState>((set, get) => {
     presetsByWallpaper: readJson<Record<string, WallpaperPreset[]>>(PRESETS_KEY, {}),
 
     inspectedWorkshop: null,
+    guestAvailability: {},
     downloadsById: {},
     authModalOpen: false,
     qrMatrix: null,
@@ -414,6 +420,29 @@ export const useAppStore = create<AppState>((set, get) => {
     syncLocalSteamFolders: async () => {
       const wallpapers = await invoke<WallpaperItem[]>('steam_sync_local_folders');
       set({ wallpapers });
+    },
+
+    // --- GGNetwork availability & local import (self-contained) ---
+    loadGuestAvailability: async (workshopIds) => {
+      const known = get().guestAvailability;
+      const wanted = [...new Set(workshopIds)].filter((id) => known[id] !== 'available' && known[id] !== 'unavailable').slice(0, 30);
+      if (wanted.length === 0) return;
+      try {
+        const result = await invoke<Record<string, GuestAvailability>>('steam_guest_availability', { workshopIds: wanted });
+        set((state) => ({ guestAvailability: { ...state.guestAvailability, ...result } }));
+      } catch {
+        // The badge is a hint only; a failed check leaves the item unmarked.
+      }
+    },
+
+    importLocalWallpaper: async (path) => {
+      const item = await invoke<WallpaperItem>('library_import_local', { path });
+      set((state) => ({
+        wallpapers: [...state.wallpapers.filter((w) => w.wallpaperId !== item.wallpaperId), item],
+        selectedWallpaperId: item.wallpaperId,
+        selectedPhotoSource: false,
+      }));
+      return item;
     },
 
     deleteWallpaper: async (wallpaperId) => {

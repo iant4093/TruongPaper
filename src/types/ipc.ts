@@ -132,6 +132,8 @@ export interface WallpaperPreset {
 }
 
 export type WorkshopDownloadSource = 'steam' | 'ggnetwork';
+export type GuestAvailability = 'available' | 'unavailable' | 'unknown';
+export type GuestAvailabilityMap = Record<string, GuestAvailability>;
 
 export type WorkshopSort = 'trending' | 'most_subscribed' | 'newest' | 'top_rated';
 export interface WorkshopBrowseQuery {
@@ -236,6 +238,7 @@ export const IPC_COMMANDS = [
   'photo_reset_history',
   // Steam Workshop & Wallpaper Engine
   'steam_browse_workshop',
+  'steam_guest_availability',
   'steam_inspect_url',
   'steam_download_workshop_item',
   'steam_login_qr',
@@ -246,6 +249,7 @@ export const IPC_COMMANDS = [
   'steam_account',
   'steam_sync_local_folders',
   'library_list_wallpapers',
+  'library_import_local',
   'library_delete_wallpaper',
   // Monitor, Playback & Property Customization
   'monitors_list',

@@ -6497,6 +6497,7 @@ dependencies = [
  "tracing",
  "truongpaper-core",
  "url",
+ "winreg",
  "zip",
 ]
 

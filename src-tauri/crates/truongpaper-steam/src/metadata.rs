@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 pub const PUBLISHED_FILE_DETAILS_URL: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 
+/// Largest metadata response that is read (1 MiB).
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkshopPreview {
@@ -51,6 +54,16 @@ pub fn parse_published_file_details(
         }
     }
 
+    // The response must describe the item that was asked for.
+    let returned_id = details.get("publishedfileid").and_then(|v| {
+        v.as_str()
+            .map(String::from)
+            .or_else(|| v.as_u64().map(|n| n.to_string()))
+    });
+    if returned_id.as_deref() != Some(workshop_id) {
+        bail!("Steam returned details for a different Workshop item");
+    }
+
     let consumer_app_id = u64_field(details, "consumer_app_id").unwrap_or(0) as u32;
     if consumer_app_id != WALLPAPER_ENGINE_APP_ID {
         bail!(
@@ -73,7 +86,9 @@ pub fn parse_published_file_details(
         title: str_field(details, "title")
             .unwrap_or_else(|| "Untitled Workshop Wallpaper".to_string()),
         description: str_field(details, "description").unwrap_or_default(),
-        preview_url: str_field(details, "preview_url").unwrap_or_default(),
+        preview_url: crate::browse::trusted_image_url(
+            &str_field(details, "preview_url").unwrap_or_default(),
+        ),
         file_size_bytes: u64_field(details, "file_size").unwrap_or(0),
         tags,
         time_updated: u64_field(details, "time_updated").unwrap_or(0),
@@ -91,14 +106,28 @@ pub async fn fetch_workshop_preview(
         ("publishedfileids[0]", workshop_id.as_str()),
     ];
 
-    let resp: serde_json::Value = client
+    let mut response = client
         .post(PUBLISHED_FILE_DETAILS_URL)
+        .timeout(std::time::Duration::from_secs(20))
         .form(&form)
         .send()
         .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        .error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_RESPONSE_BYTES)
+    {
+        bail!("Steam returned an oversized response");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() as u64 + chunk.len() as u64 > MAX_RESPONSE_BYTES {
+            bail!("Steam returned an oversized response");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let resp: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| anyhow!("Steam returned an unreadable response"))?;
 
     parse_published_file_details(&workshop_id, &resp)
 }
@@ -133,6 +162,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_mismatched_id_and_untrusted_preview_host() {
+        assert!(parse_published_file_details("999", &sample(431960)).is_err());
+        let mut body = sample(431960);
+        body["response"]["publishedfiledetails"][0]["preview_url"] =
+            json!("https://evil.example.com/x.png");
+        let p = parse_published_file_details("2841928371", &body).unwrap();
+        assert_eq!(p.preview_url, "");
+        let ok = parse_published_file_details("2841928371", &sample(431960)).unwrap();
+        assert_eq!(ok.preview_url, "https://images.steamusercontent.com/x/");
+    }
+
+    #[test]
     fn rejects_other_apps() {
         let err = parse_published_file_details("2841928371", &sample(730))
             .unwrap_err()
@@ -150,7 +191,7 @@ mod tests {
     #[test]
     fn numeric_file_size_and_defaults() {
         let body = json!({"response": {"publishedfiledetails": [
-            {"consumer_app_id": 431960, "file_size": 42}
+            {"publishedfileid": 1234567u64, "consumer_app_id": 431960, "file_size": 42}
         ]}});
         let p = parse_published_file_details("1234567", &body).unwrap();
         assert_eq!(p.file_size_bytes, 42);

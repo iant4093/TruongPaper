@@ -290,13 +290,22 @@ fn emit_progress(
 /// Scans `<app_data>/wallpapers/workshop` + local Steam `431960` folders into the library.
 pub async fn sync_library(state: &AppState) -> Result<Vec<WallpaperItem>, String> {
     let root = state.workshop_dir();
-    let found = tokio::task::spawn_blocking(move || scan_workshop_directories(&root))
-        .await
-        .map_err(|e| e.to_string())?;
+    let local_root = crate::commands::library::local_dir(state);
+    let (found, local) = tokio::task::spawn_blocking(move || {
+        (
+            scan_workshop_directories(&root),
+            truongpaper_steam::local_import::scan_local_root(&local_root),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     {
         let conn = state.db.lock();
         for w in &found {
             db::upsert_discovered(&conn, w)?;
+        }
+        for w in &local {
+            crate::commands::library::upsert_local(&conn, w)?;
         }
     }
     list_items(state).await
@@ -512,6 +521,21 @@ pub async fn steam_sync_local_folders(
     state: State<'_, AppState>,
 ) -> Result<Vec<WallpaperItem>, String> {
     sync_library(&state).await
+}
+
+/// One availability batch at a time, so a fast UI cannot hammer the third-party mirror.
+static AVAILABILITY_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether the third-party GGNetwork mirror can serve each item as a guest. Max 30 ids; results
+/// are cached for ten minutes. `unknown` means GGNetwork could not be reached or answered oddly.
+#[tauri::command]
+pub async fn steam_guest_availability(
+    workshop_ids: Vec<String>,
+) -> Result<HashMap<String, truongpaper_steam::guest_download::GuestAvailability>, String> {
+    let _turn = AVAILABILITY_GATE.lock().await;
+    truongpaper_steam::guest_download::guest_availability(&workshop_ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -555,6 +555,12 @@ export function createMockBackend(
       return { items: page === 1 ? items : [...items].reverse(), page, totalPages: items.length ? 3 : 1, totalItems: items.length * 3,
         tagGroups: [{name: 'Type', tags: ['Scene','Video','Web','Application'].map((tag) => ({tag, label: tag}))}, {name:'Genre', tags:['Nature','City','Abstract'].map((tag) => ({tag,label:tag}))}, {name:'Resolution', tags:[{tag:'1920 x 1080',label:'1920 x 1080'}]}, {name:'Miscellaneous', tags:[{tag:'Audio responsive',label:'Audio responsive'}]}, {name:'Age Rating', tags:[{tag:'Everyone',label:'Everyone'}]}] };
     },
+    steam_guest_availability: (args) => {
+      const ids = (args.workshopIds ?? []) as string[];
+      if (ids.length > 30) throw new Error('Check at most 30 wallpapers at a time.');
+      // Browser preview: odd last digit is on GGNetwork, 8 is unreachable, the rest are not.
+      return Object.fromEntries(ids.map((id) => [id, id.endsWith('8') ? 'unknown' : Number(id.slice(-1)) % 2 === 1 ? 'available' : 'unavailable']));
+    },
     steam_inspect_url: (args) => previewFor(parseWorkshopId(args.urlOrId)),
     steam_download_workshop_item: (args) => {
       const workshopId = parseWorkshopId(args.urlOrId);
@@ -617,6 +623,30 @@ export function createMockBackend(
     steam_account: () => steamAccount,
     steam_sync_local_folders: () => wallpapers,
     library_list_wallpapers: () => wallpapers,
+    library_import_local: (args) => {
+      const path = String(args.path ?? '');
+      if (!path) throw new Error('Choose a folder or a video file.');
+      const name = path.split(/[\\/]/).pop() ?? 'item';
+      const stem = name.replace(/\.[^.]+$/, '');
+      const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(name);
+      const slug = stem.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'item';
+      const wallpaperId = `local:${slug}-00000000`;
+      const item: WallpaperItem = {
+        wallpaperId,
+        title: stem,
+        type: isVideo ? 'video' : 'scene',
+        previewPath: svgThumb('#0ea5e9', '#0f172a', stem.slice(0, 12)),
+        installDir: `/mock/TruongPaper/local/${slug}-00000000`,
+        bytes: 24 * MB,
+        audioReactive: false,
+        windowsOnly: false,
+        projectJson: { title: stem, type: isVideo ? 'video' : 'scene', file: isVideo ? name : 'scene.json', general: { properties: {} } },
+        userProperties: {},
+        adjustments: { ...DEFAULT_ADJUSTMENTS },
+      };
+      wallpapers = [...wallpapers.filter((w) => w.wallpaperId !== wallpaperId), item];
+      return item;
+    },
     library_delete_wallpaper: (args) => {
       wallpapers = wallpapers.filter((w) => w.wallpaperId !== args.wallpaperId);
       return null;

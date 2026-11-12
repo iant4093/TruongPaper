@@ -25,6 +25,8 @@ export const WorkshopBrowser: React.FC = () => {
   const inspect = useAppStore((s) => s.inspectWorkshopUrl);
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
   const wallpapers = useAppStore((s) => s.wallpapers);
+  const guest = useAppStore((s) => s.guestAvailability);
+  const loadGuestAvailability = useAppStore((s) => s.loadGuestAvailability);
   const previewRequest = useRef(0);
   const top = useRef<HTMLDivElement>(null);
 
@@ -46,6 +48,10 @@ export const WorkshopBrowser: React.FC = () => {
     });
     return () => { cancelled = true; };
   }, [query, retry]);
+
+  useEffect(() => {
+    if (data?.items.length) void loadGuestAvailability(data.items.map((item) => item.workshopId));
+  }, [data, loadGuestAvailability]);
 
   useEffect(() => () => { previewRequest.current++; }, []);
   const preview = async (id: string) => {
@@ -118,7 +124,7 @@ export const WorkshopBrowser: React.FC = () => {
     <div className="wallpaper-grid workshop-browse-grid" aria-busy={loading}>
       {!loading && !error && data?.items.map((item) => <button key={item.workshopId} type="button" className="workshop-result card" aria-label={`Preview ${item.title}`} onClick={() => void preview(item.workshopId)} disabled={!!previewing}>
         <Thumb src={item.previewUrl} alt={item.title} height={150} />
-        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{wallpapers.some((w) => w.workshopId === item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
+        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{guest[item.workshopId] === 'available' && <span className="workshop-mirror-badge" title="Available on GGNetwork, a third-party mirror">GGNetwork</span>}{wallpapers.some((w) => w.workshopId === item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
           <div className="workshop-result-title" title={item.title}>{item.title}</div>
           <div className="workshop-result-author">{item.author || 'Workshop creator'}</div>
           <div className="workshop-result-stats"><span>{count(item.subscribers)} subscribers</span>{item.rating > 0 && <span aria-label={`${item.rating} out of 5 stars`}><Star size={11} fill="currentColor" />{item.rating}/5</span>}</div>

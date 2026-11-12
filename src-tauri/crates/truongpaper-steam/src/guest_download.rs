@@ -4,10 +4,12 @@ use crate::WALLPAPER_ENGINE_APP_ID;
 use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::{self, Read},
     path::{Component, Path, PathBuf},
-    time::Duration,
+    sync::OnceLock,
+    time::{Duration, Instant},
 };
 use tokio::io::AsyncWriteExt;
 use url::Url;
@@ -70,6 +72,133 @@ fn cdn_url(reply: ProviderReply, id: &str) -> Result<Url> {
     Ok(Url::parse(CDN)?.join(key)?)
 }
 
+fn guest_client(timeout: Duration) -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("TruongPaper/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(timeout)
+        .build()?)
+}
+
+/// Whether GGNetwork can serve an item to guests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestAvailability {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+/// Most ids accepted by one availability check.
+pub const MAX_AVAILABILITY_IDS: usize = 30;
+const AVAILABILITY_TTL: Duration = Duration::from_secs(10 * 60);
+const UNKNOWN_TTL: Duration = Duration::from_secs(60);
+const PROBE_CONCURRENCY: usize = 4;
+
+type AvailabilityCache = HashMap<String, (Instant, GuestAvailability)>;
+
+fn availability_cache() -> &'static parking_lot::Mutex<AvailabilityCache> {
+    static CACHE: OnceLock<parking_lot::Mutex<AvailabilityCache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn classify(reply: ProviderReply, id: &str) -> GuestAvailability {
+    if reply.result == 10 {
+        return GuestAvailability::Unavailable;
+    }
+    if cdn_url(reply, id).is_ok() {
+        GuestAvailability::Available
+    } else {
+        GuestAvailability::Unavailable
+    }
+}
+
+/// One cheap lookup request (no download), 8 s timeout, 64 KiB body cap.
+async fn probe(client: &reqwest::Client, id: &str) -> GuestAvailability {
+    let workshop_url = format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}");
+    let Ok(mut resp) = client
+        .post(LOOKUP)
+        .header(reqwest::header::ORIGIN, "https://ggntw.com")
+        .json(&serde_json::json!({ "url": workshop_url }))
+        .send()
+        .await
+    else {
+        return GuestAvailability::Unknown;
+    };
+    if !resp.status().is_success() {
+        return GuestAvailability::Unknown;
+    }
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        if body.len() + chunk.len() > 64 * 1024 {
+            return GuestAvailability::Unknown;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    match serde_json::from_slice::<ProviderReply>(&body) {
+        Ok(reply) => classify(reply, id),
+        Err(_) => GuestAvailability::Unknown,
+    }
+}
+
+/// Checks up to [`MAX_AVAILABILITY_IDS`] distinct Workshop ids. Results are cached for ten
+/// minutes (one minute for `Unknown`) and at most four lookups run at once. Invalid ids are
+/// reported as `Unknown`.
+pub async fn guest_availability(ids: &[String]) -> Result<HashMap<String, GuestAvailability>> {
+    ensure!(
+        ids.len() <= MAX_AVAILABILITY_IDS,
+        "Check at most {MAX_AVAILABILITY_IDS} wallpapers at a time."
+    );
+    let mut out = HashMap::new();
+    let mut todo = Vec::new();
+    {
+        let cache = availability_cache().lock();
+        for id in ids {
+            if out.contains_key(id) || todo.contains(id) {
+                continue;
+            }
+            if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_digit()) {
+                out.insert(id.clone(), GuestAvailability::Unknown);
+            } else if let Some((at, value)) = cache.get(id) {
+                let ttl = if *value == GuestAvailability::Unknown {
+                    UNKNOWN_TTL
+                } else {
+                    AVAILABILITY_TTL
+                };
+                if at.elapsed() < ttl {
+                    out.insert(id.clone(), *value);
+                    continue;
+                }
+                todo.push(id.clone());
+            } else {
+                todo.push(id.clone());
+            }
+        }
+    }
+    if todo.is_empty() {
+        return Ok(out);
+    }
+    let client = guest_client(Duration::from_secs(8))?;
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(PROBE_CONCURRENCY));
+    let mut set = tokio::task::JoinSet::new();
+    for id in todo {
+        let (client, gate) = (client.clone(), gate.clone());
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await;
+            let value = probe(&client, &id).await;
+            (id, value)
+        });
+    }
+    while let Some(Ok((id, value))) = set.join_next().await {
+        availability_cache()
+            .lock()
+            .insert(id.clone(), (Instant::now(), value));
+        out.insert(id, value);
+    }
+    Ok(out)
+}
+
 /// Downloads into private staging and installs only a complete wallpaper project.
 pub async fn download_guest_workshop(
     id: &str,
@@ -80,12 +209,7 @@ pub async fn download_guest_workshop(
         !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()),
         "Invalid Workshop ID"
     );
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("TruongPaper/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(12))
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = guest_client(Duration::from_secs(30))?;
     let workshop_url = format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}");
     let mut lookup = client
         .post(LOOKUP)
@@ -325,6 +449,48 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::{write::SimpleFileOptions, ZipWriter};
+
+    #[test]
+    fn classifies_provider_replies() {
+        let reply = |result: u32, status: &str| ProviderReply {
+            result,
+            id: Some("123456789".into()),
+            game: Some("431960".into()),
+            status: Some(status.into()),
+            url: Some("https://ggntw.com/download/exampleKey1234567".into()),
+        };
+        assert_eq!(
+            classify(reply(1, "1"), "123456789"),
+            GuestAvailability::Available
+        );
+        assert_eq!(
+            classify(reply(1, "0"), "123456789"),
+            GuestAvailability::Unavailable
+        );
+        assert_eq!(
+            classify(reply(10, "1"), "123456789"),
+            GuestAvailability::Unavailable
+        );
+        assert_eq!(
+            classify(reply(1, "1"), "999"),
+            GuestAvailability::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn availability_rejects_too_many_ids_and_serves_cache() {
+        let many: Vec<String> = (0..31).map(|n| n.to_string()).collect();
+        assert!(guest_availability(&many).await.is_err());
+        availability_cache().lock().insert(
+            "424242".into(),
+            (Instant::now(), GuestAvailability::Available),
+        );
+        let got = guest_availability(&["424242".into(), "bad".into()])
+            .await
+            .unwrap();
+        assert_eq!(got["424242"], GuestAvailability::Available);
+        assert_eq!(got["bad"], GuestAvailability::Unknown);
+    }
 
     #[test]
     fn accepts_only_the_requested_wallpaper_and_a_ggnetwork_key() {

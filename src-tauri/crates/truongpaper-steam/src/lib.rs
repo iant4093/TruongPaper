@@ -7,6 +7,7 @@ pub use browse::{browse_workshop, WorkshopBrowsePage, WorkshopBrowseQuery};
 
 pub mod commands;
 pub mod guest_download;
+pub mod local_import;
 pub mod local_sync;
 pub mod metadata;
 pub mod qr;

@@ -1,9 +1,10 @@
 import { Dropdown } from '../Dropdown';
 // src/components/views/PlaylistsView.tsx
 // §2.4 View 3: "Unified Playlists & Rotation" View
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, Plus, Save, Upload } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { wallpaperWrites } from '../../lib/writeQueue';
 import { ROTATION_INTERVALS, TRANSITION_LABEL } from '../../lib/format';
 import type { Playlist, TransitionType, WallpaperPreset } from '../../types/ipc';
 import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
@@ -75,6 +76,20 @@ export const PlaylistsView: React.FC = () => {
   );
   const [draft, setDraft] = useState<Playlist | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  // The duration slider follows the drag locally; the backend write is debounced.
+  const [durationDraft, setDurationDraft] = useState<number | null>(null);
+  const DURATION_KEY = 'settings:transitionDurationSeconds';
+  useEffect(() => () => wallpaperWrites.flush(DURATION_KEY), []);
+  const changeDuration = (value: number) => {
+    setDurationDraft(value);
+    wallpaperWrites
+      .schedule(DURATION_KEY, () => updateSettings({ transitionDurationSeconds: value }))
+      .then(() => setDurationDraft((current) => (current === value ? null : current)))
+      .catch((error) => {
+        setDurationDraft(null);
+        setMsg(error instanceof Error ? error.message : String(error));
+      });
+  };
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const applyRotation = async () => {
@@ -254,7 +269,7 @@ export const PlaylistsView: React.FC = () => {
         <label style={{ display: 'block', fontSize: 13, marginTop: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span>Transition Duration</span>
-            <span>{(settings?.transitionDurationSeconds ?? 1.2).toFixed(1)}s</span>
+            <span>{(durationDraft ?? settings?.transitionDurationSeconds ?? 1.2).toFixed(1)}s</span>
           </div>
           <input
             type="range"
@@ -263,8 +278,11 @@ export const PlaylistsView: React.FC = () => {
             min={0.3}
             max={3.0}
             step={0.1}
-            value={settings?.transitionDurationSeconds ?? 1.2}
-            onChange={(e) => void updateSettings({ transitionDurationSeconds: Number(e.target.value) })}
+            value={durationDraft ?? settings?.transitionDurationSeconds ?? 1.2}
+            onChange={(e) => changeDuration(Number(e.target.value))}
+            onPointerUp={() => wallpaperWrites.flush(DURATION_KEY)}
+            onBlur={() => wallpaperWrites.flush(DURATION_KEY)}
+            onKeyUp={() => wallpaperWrites.flush(DURATION_KEY)}
           />
         </label>
       </div>

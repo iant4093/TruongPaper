@@ -1,7 +1,7 @@
 // src/store/useAppStore.ts
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppSettings,
   FilterMode,
@@ -15,11 +15,14 @@ import type {
   UniversalAdjustments,
   WallpaperItem,
   WallpaperChangedPayload,
+  WallpaperDiagnosticsPayload,
+  WallpaperErrorPayload,
   WallpaperPreset,
   WallpaperSource,
   WorkshopPreview,
   WorkshopDownloadSource,
 } from '../types/ipc';
+import { adjustmentWriteKey, propertyWriteKey, wallpaperWrites } from '../lib/writeQueue';
 
 export interface SteamDownloadProgress {
   workshopId: string;
@@ -32,6 +35,12 @@ export interface SteamDownloadProgress {
 export interface Steam2FaPrompt {
   kind: 'totp' | 'email';
   prompt: string;
+}
+
+/** A wallpaper that failed to load on a display, shown until the next change there. */
+export interface WallpaperLoadError {
+  wallpaperId: string | null;
+  message: string;
 }
 
 export interface InitListenerOptions {
@@ -71,6 +80,16 @@ export interface AppState {
   systemPowerReasons: string[];
   policyStateByMonitor: Record<string, string>;
   presetsByWallpaper: Record<string, WallpaperPreset[]>;
+  /** Load failures keyed by monitorId (`wallpaper://error`). */
+  wallpaperErrors: Record<string, WallpaperLoadError>;
+  /** Scene report messages keyed by wallpaperId (`wallpaper://diagnostics`). */
+  diagnosticsByWallpaper: Record<string, string[]>;
+  /** Last failed property/adjustment write, shown by Studio. */
+  writeError: string | null;
+  dismissWallpaperError: (monitorId: string) => void;
+  dismissWriteError: () => void;
+  /** Report a failed debounced write and re-sync the library from the backend. */
+  recoverFromWriteError: (error: unknown) => Promise<void>;
 
   inspectedWorkshop: WorkshopPreview | null;
   downloadsById: Record<string, SteamDownloadProgress>;
@@ -131,6 +150,9 @@ export interface AppState {
 // `photo_add_album`, so re-adding is idempotent).
 const SAVED_ALBUMS_KEY = 'truongpaper.savedAlbums';
 const PRESETS_KEY = 'truongpaper.presets';
+const SELECTED_MONITOR_KEY = 'truongpaper.selectedMonitor';
+/** Cross-window event keeping Studio and the tray popover on the same display. */
+export const SELECTED_MONITOR_EVENT = 'ui://selected-monitor';
 /** Counts sign-in attempts so a replaced attempt cannot change the sign-in window. */
 let steamLoginRun = 0;
 
@@ -150,6 +172,11 @@ function writeJson(key: string, value: unknown): void {
   } catch {
     // Storage full or unavailable: the in-memory store remains authoritative.
   }
+}
+
+function readSelectedMonitor(): string | null {
+  const stored = readJson<string | null>(SELECTED_MONITOR_KEY, null);
+  return typeof stored === 'string' ? stored : null;
 }
 
 const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -172,7 +199,7 @@ export const useAppStore = create<AppState>((set, get) => {
     savedAlbums: readJson<SavedAlbum[]>(SAVED_ALBUMS_KEY, []),
     wallpapers: [],
     monitors: [],
-    selectedMonitorId: null,
+    selectedMonitorId: readSelectedMonitor(),
     selectedWallpaperId: null,
     selectedPhotoSource: false,
     playlists: [],
@@ -180,6 +207,23 @@ export const useAppStore = create<AppState>((set, get) => {
     systemPowerReasons: [],
     policyStateByMonitor: {},
     presetsByWallpaper: readJson<Record<string, WallpaperPreset[]>>(PRESETS_KEY, {}),
+    wallpaperErrors: {},
+    diagnosticsByWallpaper: {},
+    writeError: null,
+    dismissWallpaperError: (monitorId) => set((state) => {
+      const { [monitorId]: _dismissed, ...rest } = state.wallpaperErrors;
+      return { wallpaperErrors: rest };
+    }),
+    dismissWriteError: () => set({ writeError: null }),
+    recoverFromWriteError: async (error) => {
+      set({ writeError: `Could not save the change: ${errorMessage(error)}` });
+      try {
+        const wallpapers = await invoke<WallpaperItem[]>('library_list_wallpapers');
+        set({ wallpapers });
+      } catch {
+        // Keep the optimistic values if the backend cannot be reached either.
+      }
+    },
 
     inspectedWorkshop: null,
     downloadsById: {},
@@ -227,6 +271,9 @@ export const useAppStore = create<AppState>((set, get) => {
           const photo = currentItem && 'albumSlug' in currentItem ? currentItem : null;
           updateDisplay(() =>
             set((state) => ({
+              wallpaperErrors: Object.fromEntries(
+                Object.entries(state.wallpaperErrors).filter(([id]) => id !== monitorId),
+              ),
               monitors: state.monitors.map((m) =>
                 m.monitorId === monitorId
                   ? { ...m, activeSource: source, activeWallpaperId: wallpaper?.wallpaperId ?? null }
@@ -244,6 +291,28 @@ export const useAppStore = create<AppState>((set, get) => {
               },
             })),
           );
+        }),
+
+        listen<WallpaperErrorPayload>('wallpaper://error', ({ payload }) => {
+          set((state) => ({
+            wallpaperErrors: {
+              ...state.wallpaperErrors,
+              [payload.monitorId]: { wallpaperId: payload.wallpaperId, message: payload.message },
+            },
+          }));
+        }),
+        listen<WallpaperDiagnosticsPayload>('wallpaper://diagnostics', ({ payload }) => {
+          if (!payload.wallpaperId) return;
+          const wallpaperId = payload.wallpaperId;
+          set((state) => ({
+            diagnosticsByWallpaper: { ...state.diagnosticsByWallpaper, [wallpaperId]: payload.messages },
+          }));
+        }),
+        // Another window changed the display; apply it without re-emitting (no echo loop).
+        listen<{ monitorId: string }>(SELECTED_MONITOR_EVENT, ({ payload }) => {
+          if (!payload?.monitorId || payload.monitorId === get().selectedMonitorId) return;
+          writeJson(SELECTED_MONITOR_KEY, payload.monitorId);
+          set({ selectedMonitorId: payload.monitorId });
         }),
 
         listen<PhotoStatus>('photo-queue://updated', (event) => {
@@ -305,7 +374,10 @@ export const useAppStore = create<AppState>((set, get) => {
             void get().rotateNextPhoto(get().selectedMonitorId ?? undefined);
           }),
           listen('tray://toggle-pause-requested', () => {
-            void get().setPlaybackPaused(get().monitors.some((monitor) => !monitor.userPaused));
+            // Act on the display selected in Studio / the popover, not on every display.
+            const { monitors, selectedMonitorId } = get();
+            const target = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
+            if (target) void get().setPlaybackPaused(!target.userPaused, target.monitorId);
           })
         );
       }
@@ -471,7 +543,16 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ steamAccount: null, steamSigningIn: false });
     },
 
-    selectMonitor: (monitorId) => set({ selectedMonitorId: monitorId }),
+    selectMonitor: (monitorId) => {
+      if (monitorId === get().selectedMonitorId) return;
+      writeJson(SELECTED_MONITOR_KEY, monitorId);
+      set({ selectedMonitorId: monitorId });
+      try {
+        void emit(SELECTED_MONITOR_EVENT, { monitorId }).catch(() => {});
+      } catch {
+        // No Tauri event bridge (plain browser): single window, nothing to sync.
+      }
+    },
     selectWallpaper: (wallpaperId) => set({ selectedWallpaperId: wallpaperId, selectedPhotoSource: false }),
     selectPhotoSource: () => set({ selectedWallpaperId: null, selectedPhotoSource: true }),
 
@@ -488,12 +569,24 @@ export const useAppStore = create<AppState>((set, get) => {
 
     updateWallpaperProperty: async (wallpaperId, propKey, propValue) => {
       get().setLocalWallpaperProperty(wallpaperId, propKey, propValue);
-      await invoke('monitor_update_property', { wallpaperId, propKey, propValue });
+      try {
+        await wallpaperWrites.schedule(propertyWriteKey(wallpaperId, propKey), () =>
+          invoke('monitor_update_property', { wallpaperId, propKey, propValue }));
+      } catch (error) {
+        await get().recoverFromWriteError(error);
+        throw error;
+      }
     },
 
     updateWallpaperAdjustments: async (wallpaperId, adjustments) => {
       get().setLocalWallpaperAdjustments(wallpaperId, adjustments);
-      await invoke('monitor_update_adjustments', { wallpaperId, adjustments });
+      try {
+        await wallpaperWrites.schedule(adjustmentWriteKey(wallpaperId), () =>
+          invoke('monitor_update_adjustments', { wallpaperId, adjustments }));
+      } catch (error) {
+        await get().recoverFromWriteError(error);
+        throw error;
+      }
     },
 
     setLocalWallpaperProperty: (wallpaperId, propKey, propValue) => {

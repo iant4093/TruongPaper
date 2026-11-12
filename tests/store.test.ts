@@ -18,6 +18,7 @@ vi.mock('@tauri-apps/api/event', () => ({
     unlistenSpies.push(un);
     return un;
   }),
+  emit: vi.fn(async () => undefined),
 }));
 
 import { useAppStore } from '../src/store/useAppStore';
@@ -145,7 +146,10 @@ describe('store → listen() event wiring', () => {
         'steam-auth://qr-matrix',
         'steam-download://progress',
         'system-power',
+        'ui://selected-monitor',
         'wallpaper://changed',
+        'wallpaper://diagnostics',
+        'wallpaper://error',
       ].sort()
     );
 
@@ -196,10 +200,40 @@ describe('store → listen() event wiring', () => {
 
     invokeMock.mockClear();
     listeners.get('tray://toggle-pause-requested')!({ payload: null });
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('playback_set_paused', { monitorId: undefined, paused: true }));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('playback_set_paused', { monitorId: 'M1', paused: true }));
 
     invokeMock.mockClear();
     listeners.get('tray://next-requested')!({ payload: null });
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('photo_rotate_next', { monitorId: 'M1' }));
+  });
+});
+
+describe('shared display selection', () => {
+  it('persists, emits to other windows and applies incoming selections without echoing', async () => {
+    const { emit } = await import('@tauri-apps/api/event');
+    const emitMock = vi.mocked(emit);
+    await useAppStore.getState().initAppListeners();
+    emitMock.mockClear();
+
+    useAppStore.getState().selectMonitor('M2');
+    expect(useAppStore.getState().selectedMonitorId).toBe('M2');
+    expect(emitMock).toHaveBeenCalledWith('ui://selected-monitor', { monitorId: 'M2' });
+    expect(JSON.parse(localStorage.getItem('truongpaper.selectedMonitor')!)).toBe('M2');
+
+    emitMock.mockClear();
+    listeners.get('ui://selected-monitor')!({ payload: { monitorId: 'M3' } });
+    expect(useAppStore.getState().selectedMonitorId).toBe('M3');
+    expect(emitMock).not.toHaveBeenCalled();
+    // The originating window also receives its own event: a no-op.
+    listeners.get('ui://selected-monitor')!({ payload: { monitorId: 'M3' } });
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it('records wallpaper errors and scene reports from events', async () => {
+    await useAppStore.getState().initAppListeners();
+    listeners.get('wallpaper://error')!({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', message: 'bad' } });
+    expect(useAppStore.getState().wallpaperErrors.M1).toEqual({ wallpaperId: 'workshop:1', message: 'bad' });
+    listeners.get('wallpaper://diagnostics')!({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', messages: ['a'] } });
+    expect(useAppStore.getState().diagnosticsByWallpaper['workshop:1']).toEqual(['a']);
   });
 });

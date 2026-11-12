@@ -1,11 +1,12 @@
 // src/components/views/MonitorsView.tsx
 // §2.5 View 4: "Monitors & Fit" View
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Copy, Image as ImageIcon, Lock } from 'lucide-react';
 import { currentWallpaperForMonitor, useAppStore } from '../../store/useAppStore';
 import { FIT_MODE_LABEL } from '../../lib/format';
 import type { FitMode, MonitorInfo, WallpaperSource } from '../../types/ipc';
+import { wallpaperWrites } from '../../lib/writeQueue';
 import { Badge, SectionTitle, SegmentedControl, ToggleRow, ViewHeader } from '../ui';
 
 export function describeSource(
@@ -23,6 +24,35 @@ export function describeSource(
 }
 
 const DIAGRAM_HEIGHT = 170;
+
+/** Per-display volume: updates the store on every tick, debounces the backend write. */
+const VolumeSlider: React.FC<{ monitor: MonitorInfo; onError: (message: string) => void }> = ({ monitor, onError }) => {
+  const { monitorId } = monitor;
+  const key = `monitor-volume:${monitorId}`;
+  useEffect(() => () => wallpaperWrites.flush(key), [key]);
+  const value = monitor.volume ?? 1;
+  const change = (volume: number) => {
+    useAppStore.setState((state) => ({
+      monitors: state.monitors.map((m) => (m.monitorId === monitorId ? { ...m, volume } : m)),
+    }));
+    wallpaperWrites
+      .schedule(key, () => invoke('monitor_set_volume', { monitorId, volume }))
+      .catch((error) => {
+        onError(error instanceof Error ? error.message : String(error));
+        void useAppStore.getState().refreshAll().catch(() => {});
+      });
+  };
+  const flush = () => wallpaperWrites.flush(key);
+  return (
+    <label style={{ display: 'block', fontSize: 13, marginTop: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <span>Volume</span><span aria-hidden="true">{Math.round(value * 100)}%</span>
+      </div>
+      <input type="range" className="slider" aria-label={`Volume for ${monitor.name}`} min={0} max={1} step={0.01}
+        value={value} onChange={(e) => change(Number(e.target.value))} onPointerUp={flush} onBlur={flush} onKeyUp={flush} />
+    </label>
+  );
+};
 
 export const MonitorsView: React.FC = () => {
   const monitors = useAppStore((s) => s.monitors);
@@ -159,6 +189,11 @@ export const MonitorsView: React.FC = () => {
               {describeSource(active.activeSource, lookup)}
             </div>
           </div>
+          {active.volume !== undefined && (
+            <div className="card" style={{ padding: 16, marginTop: 10 }}>
+              <VolumeSlider key={active.monitorId} monitor={active} onError={setMsg} />
+            </div>
+          )}
           {active.activeSource.kind !== 'photo_api' && (
             <button
               type="button"
@@ -217,6 +252,16 @@ export const MonitorsView: React.FC = () => {
           Each display keeps its own source. Apply the selected source to all displays to share a Workshop
           wallpaper or photo pool. Photo draws remain independent.
         </div>
+        {settings?.multiMonitorMode !== undefined && (
+          <div style={{ marginBottom: 14 }}>
+            <ToggleRow
+              label="Span one wallpaper across all displays"
+              description="Stretch the selected wallpaper over the combined desktop instead of repeating it on each display."
+              checked={settings.multiMonitorMode === 'span'}
+              onChange={(span) => report(updateSettings({ multiMonitorMode: span ? 'span' : 'independent' }))}
+            />
+          </div>
+        )}
         <button
           type="button"
           className="button button-primary"

@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { parseImportLink } from '../../lib/importLinks';
-import { GB, MB, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
+import { GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
 import type { PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 
@@ -155,6 +155,7 @@ export const PhotosApiView: React.FC = () => {
           </>
         }
       />
+      {photoStatus?.offline && <div role="status" className="offline-notice">{OFFLINE_NOTICE}</div>}
 
       {/* Filter Controls Card */}
       <div className="card" style={{ padding: 16 }}>

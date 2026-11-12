@@ -280,3 +280,30 @@ input.button { cursor: text; }
 .rotation-source > .segmented-control, .rotation-source-apply { justify-self: start; }
 .rotation-source-choice { min-height: 31px; max-width: 440px; }
 .playlist-interval { margin-top: 12px; }
+
+/* Load-failure card above the playback bar, dismissible banners, drawer layout. */
+.load-error-card { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin: 0 24px 10px; padding: 9px 12px; border: 1px solid #654040; background: #352626; border-radius: 6px; color: #e3b1b1; font-size: 12px; }
+.load-error-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.load-error-card .button { padding: 4px 10px; min-height: 26px; font-size: 11px; }
+.error-banner-dismissible { display: flex; align-items: center; gap: 8px; }
+.error-banner-dismissible span { flex: 1; min-width: 0; }
+.inspector-scrim { display: none; }
+.offline-notice { padding: 8px 12px; margin-bottom: 14px; border: 1px solid #5a5238; background: #2e2b1f; border-radius: 6px; color: #d8cfa0; font-size: 12px; }
+.tray-offline { font-size: 11px; color: #d8cfa0; }
+.scene-report { margin: 14px 16px 0; font-size: 12px; color: var(--text-secondary); }
+.scene-report summary { cursor: pointer; color: var(--text-primary); }
+.scene-report ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.library-sort { display: flex; align-items: center; gap: 8px; }
+.library-sort .dropdown-trigger { min-height: 28px; padding: 4px 10px; font-size: 12px; }
+.settings-field { display: grid; gap: 4px; font-size: 13px; margin-bottom: 12px; }
+.settings-field input[type='text'] { text-align: left; cursor: text; }
+@media (min-width: 900px) {
+  /* Keep the right-most tiles (and their Apply buttons) clear of the open drawer. */
+  .with-inspector .content-viewport { padding-right: calc(var(--drawer-width) + 28px); }
+}
+@media (max-width: 899px) {
+  .with-inspector .inspector-scrim { display: block; position: absolute; inset: 0; z-index: 9; background: #0008; }
+}
+.tray-load-error { color: #ffadad; font-size: 12px; overflow-wrap: anywhere; }
+.library-sort { margin-left: auto; }
+.library-search { margin-left: 0; }

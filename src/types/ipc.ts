@@ -58,6 +58,10 @@ export interface PhotoStatus {
   blacklistCount: number;
   isRefilling: boolean;
   rateLimitRemaining: number;
+  /** True when the photo service is unreachable. */
+  offline?: boolean;
+  /** True when only already-cached photos are being shown. */
+  showingCachedOnly?: boolean;
 }
 
 export interface ProjectJsonComboOption {
@@ -176,6 +180,8 @@ export interface MonitorInfo {
   userPaused: boolean;
   activeSource: WallpaperSource;
   activeWallpaperId: string | null;
+  /** Per-display wallpaper volume, 0..1. */
+  volume?: number;
 }
 
 export interface PlaybackPauseChanged {
@@ -211,6 +217,9 @@ export interface AppSettings {
   batteryPolicy: 'continue' | 'pause_animations' | 'switch_to_photo';
   launchAtLogin: boolean;
   syncLockScreen: boolean;
+  multiMonitorMode?: 'independent' | 'span';
+  nextHotkey?: string;
+  pauseHotkey?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +286,8 @@ export const IPC_EVENTS = [
   'steam-auth://qr-matrix',
   'steam-auth://need-2fa',
   'policy://state-changed',
+  'wallpaper://error',
+  'wallpaper://diagnostics',
   'playback://pause-changed',
   'system-power',
   'tray://next-requested',
@@ -297,6 +308,18 @@ export interface WallpaperChangedPayload {
   source: WallpaperSource;
   currentItem: WallpaperItem | PhotoItem | null;
   transitionUsed: TransitionType;
+}
+
+export interface WallpaperErrorPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+  message: string;
+}
+
+export interface WallpaperDiagnosticsPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+  messages: string[];
 }
 
 export interface SystemPowerPayload {

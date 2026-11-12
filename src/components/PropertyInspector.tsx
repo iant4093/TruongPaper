@@ -1,15 +1,15 @@
 import { Dropdown } from './Dropdown';
 // src/components/PropertyInspector.tsx
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ColorPicker, normalizeHex } from './ColorPicker';
 import { FIT_MODE_LABEL } from '../lib/format';
+import { adjustmentWriteKey, propertyWriteKey, wallpaperWrites } from '../lib/writeQueue';
 import type {
   FitMode,
   ProjectJsonSchema,
   UniversalAdjustments,
-  WallpaperPreset,
 } from '../types/ipc';
 
 const SCENE_FIT_OPTIONS = Object.entries(FIT_MODE_LABEL) as [FitMode, string][];
@@ -143,9 +143,10 @@ interface PropertyInspectorProps {
   project: ProjectJsonSchema;
   values: Record<string, string | number | boolean>;
   adjustments: UniversalAdjustments;
-  presets: WallpaperPreset[];
   onPropertyChange: (key: string, value: string | number | boolean) => void;
   onAdjustmentChange: (next: UniversalAdjustments) => void;
+  /** Called when a debounced save fails; the owner should re-sync from the backend. */
+  onWriteError?: (error: unknown) => void;
 }
 
 export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
@@ -155,6 +156,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
   adjustments,
   onPropertyChange,
   onAdjustmentChange,
+  onWriteError,
 }) => {
   const sortedProperties = useMemo(() => {
     const propsMap = project.general?.properties ?? {};
@@ -163,22 +165,43 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
       .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
   }, [project]);
 
-  const handleChange = async (key: string, val: string | number | boolean) => {
+  const onWriteErrorRef = useRef(onWriteError);
+  onWriteErrorRef.current = onWriteError;
+  const adjustmentsRef = useRef(adjustments);
+  adjustmentsRef.current = adjustments;
+
+  // Send anything still waiting in the debounce window when the inspector goes away.
+  useEffect(() => () => {
+    wallpaperWrites.flush(`prop:${wallpaperId}:`);
+    wallpaperWrites.flush(adjustmentWriteKey(wallpaperId));
+  }, [wallpaperId]);
+
+  const flushWrites = () => {
+    wallpaperWrites.flush(`prop:${wallpaperId}:`);
+    wallpaperWrites.flush(adjustmentWriteKey(wallpaperId));
+  };
+  const flushHandlers = { onPointerUp: flushWrites, onBlur: flushWrites, onKeyUp: flushWrites };
+
+  /** Update the UI now; the backend write is debounced (immediately flushed for discrete controls). */
+  const handleChange = (key: string, val: string | number | boolean, immediate = true) => {
     onPropertyChange(key, val);
-    await invoke('monitor_update_property', {
-      wallpaperId,
-      propKey: key,
-      propValue: val,
-    });
+    const writeKey = propertyWriteKey(wallpaperId, key);
+    wallpaperWrites
+      .schedule(writeKey, () => invoke('monitor_update_property', { wallpaperId, propKey: key, propValue: val }))
+      .catch((error) => onWriteErrorRef.current?.(error));
+    if (immediate) wallpaperWrites.flush(writeKey);
   };
 
-  const handleAdjustmentChange = (patch: Partial<UniversalAdjustments>) => {
-    const previous = adjustments;
-    const next = { ...adjustments, ...patch };
+  const handleAdjustmentChange = (patch: Partial<UniversalAdjustments>, immediate = false) => {
+    // Build on the latest local value so rapid ticks never overwrite each other.
+    const next = { ...adjustmentsRef.current, ...patch };
+    adjustmentsRef.current = next;
     onAdjustmentChange(next);
-    // Put the old value back if it was not saved, so the control matches the wallpaper.
-    invoke('monitor_update_adjustments', { wallpaperId, adjustments: next })
-      .catch(() => onAdjustmentChange(previous));
+    const writeKey = adjustmentWriteKey(wallpaperId);
+    wallpaperWrites
+      .schedule(writeKey, () => invoke('monitor_update_adjustments', { wallpaperId, adjustments: next }))
+      .catch((error) => onWriteErrorRef.current?.(error));
+    if (immediate) wallpaperWrites.flush(writeKey);
   };
 
   return (
@@ -190,7 +213,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             label="Scene fit mode"
             value={adjustments.fitMode}
             options={SCENE_FIT_OPTIONS}
-            onChange={(fitMode) => handleAdjustmentChange({ fitMode })}
+            onChange={(fitMode) => handleAdjustmentChange({ fitMode }, true)}
           />
         </section>
       )}
@@ -209,21 +232,23 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             step={0.01}
             value={adjustments.volume}
             onChange={(e) => handleAdjustmentChange({ volume: Number(e.target.value) })}
+            {...flushHandlers}
           />
         </label>
         <label className="property-field">
           <span className="property-row">
             <span>Playback Speed</span>
-            <span className="property-value" aria-hidden="true">{Math.min(2, adjustments.playbackSpeed).toFixed(2)}x</span>
+            <span className="property-value" aria-hidden="true">{adjustments.playbackSpeed.toFixed(2)}x</span>
           </span>
           <input
             type="range"
             className="slider"
             min={0.1}
-            max={2.0}
+            max={Math.max(2, adjustments.playbackSpeed)}
             step={0.05}
-            value={Math.min(2, adjustments.playbackSpeed)}
+            value={adjustments.playbackSpeed}
             onChange={(e) => handleAdjustmentChange({ playbackSpeed: Number(e.target.value) })}
+            {...flushHandlers}
           />
         </label>
       </section>
@@ -265,7 +290,8 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                   max={max}
                   step={step}
                   value={Number(currentVal)}
-                  onChange={(e) => void handleChange(prop.key, Number(e.target.value))}
+                  onChange={(e) => handleChange(prop.key, Number(e.target.value), false)}
+                  {...flushHandlers}
                 />
               </label>
             );
@@ -279,7 +305,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 <input
                   type="checkbox"
                   checked={checked}
-                  onChange={(e) => void handleChange(prop.key, e.target.checked)}
+                  onChange={(e) => handleChange(prop.key, e.target.checked)}
                 />
               </label>
             );
@@ -291,7 +317,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 key={prop.key}
                 label={label}
                 value={weColorToHex(String(currentVal))}
-                onChange={(hex) => void handleChange(prop.key, hexToWeColor(hex))}
+                onChange={(hex) => handleChange(prop.key, hexToWeColor(hex))}
               />
             );
           }
@@ -302,7 +328,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 <span>{label}</span>
                 <Dropdown label={label} value={String(currentVal)}
                   options={(prop.options ?? []).map((option) => [String(option.value), resolveLocalizedText(option.label, project)])}
-                  onChange={(value) => void handleChange(prop.key, value)} />
+                  onChange={(value) => handleChange(prop.key, value)} />
               </div>
             );
           }
@@ -321,7 +347,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                       multiple: false,
                     });
                     if (typeof selected === 'string') {
-                      await handleChange(prop.key, selected);
+                      handleChange(prop.key, selected);
                     }
                   }}
                 >
@@ -338,7 +364,8 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
                 type="text"
                 className="button"
                 value={String(currentVal ?? '')}
-                onChange={(e) => void handleChange(prop.key, e.target.value)}
+                onChange={(e) => handleChange(prop.key, e.target.value, false)}
+                onBlur={flushWrites}
               />
             </label>
           );

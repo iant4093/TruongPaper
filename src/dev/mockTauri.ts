@@ -278,6 +278,9 @@ export function createMockBackend(
     batteryPolicy: 'pause_animations',
     launchAtLogin: true,
     syncLockScreen: false,
+    multiMonitorMode: 'independent',
+    nextHotkey: '',
+    pauseHotkey: '',
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });
@@ -341,6 +344,7 @@ export function createMockBackend(
       userPaused: false,
       activeSource: { kind: 'photo_api' },
       activeWallpaperId: null,
+      volume: 1,
     },
     {
       monitorId: 'DISPLAY-2',
@@ -354,6 +358,7 @@ export function createMockBackend(
       userPaused: false,
       activeSource: { kind: 'workshop', wallpaperId: 'workshop:2841928371' },
       activeWallpaperId: 'workshop:2841928371',
+      volume: 0.6,
     },
   ];
   let playlists: Playlist[] = [
@@ -726,6 +731,12 @@ export function createMockBackend(
   return {
     handle: (cmd, args = {}) => {
       if (cmd.startsWith('plugin:')) return handlePlugin(cmd, args);
+      if (cmd === 'monitor_set_volume') {
+        // Added by the backend alongside the §5.1 registry; kept out of IPC_COMMANDS until documented.
+        const volume = Math.max(0, Math.min(1, Number(args.volume)));
+        monitors = monitors.map((m) => (m.monitorId === args.monitorId ? { ...m, volume } : m));
+        return null;
+      }
       const handler = (handlers as Record<string, (a: Args) => unknown>)[cmd];
       if (!handler) throw new Error(`[mockTauri] Unhandled command: ${cmd}`);
       return handler(args);

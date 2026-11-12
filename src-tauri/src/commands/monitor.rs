@@ -180,6 +180,22 @@ pub(crate) async fn lock_monitor_applies<'a>(
     guards
 }
 
+/// Transition for what `source` shows: a playlist's own effect and length, otherwise the global
+/// (Photography) setting with no length override.
+fn transition_for(state: &AppState, source: &WallpaperSource) -> (IpcTransitionType, Option<f32>) {
+    if let WallpaperSource::Playlist { playlist_id } = source {
+        if let Ok(Some(playlist)) = db::get_playlist(&state.db.lock(), playlist_id) {
+            if let Some(t) = playlist.transition {
+                return (
+                    IpcTransitionType::from_setting(&t.transition_type),
+                    Some(t.duration_seconds),
+                );
+            }
+        }
+    }
+    (settings_modes(state).1, None)
+}
+
 fn settings_modes(state: &AppState) -> (IpcFitMode, IpcTransitionType) {
     let s = state.settings.lock();
     (
@@ -271,12 +287,14 @@ async fn start_wallpaper_runtime(
     let host = &state.host;
     let activate = || -> Result<(), String> {
         db::set_monitor_source(&state.db.lock(), monitor_id, source)?;
+        let (transition, secs) = transition_for(state, source);
         host.set_source(
             monitor_id,
             source.clone(),
             Some(wallpaper_id.to_string()),
-            adjustments.compositor_uniforms(settings_modes(state).1),
+            adjustments.compositor_uniforms(transition),
         );
+        host.set_transition_secs(monitor_id, secs);
         Ok(())
     };
     if !matches!(
@@ -541,13 +559,14 @@ pub(crate) fn set_photo_host_source(
     state: &AppState,
     monitor_id: &str,
 ) -> Result<WallpaperSource, String> {
-    let (default_fit, transition) = settings_modes(state);
+    let (default_fit, _) = settings_modes(state);
     let source = {
         let conn = state.db.lock();
         db::monitor_sources(&conn)?
             .remove(monitor_id)
             .unwrap_or_default()
     };
+    let (transition, secs) = transition_for(state, &source);
     let uniforms = UniversalAdjustments {
         fit_mode: default_fit,
         ..Default::default()
@@ -556,6 +575,7 @@ pub(crate) fn set_photo_host_source(
     state
         .host
         .set_source(monitor_id, source.clone(), None, uniforms);
+    state.host.set_transition_secs(monitor_id, secs);
     Ok(source)
 }
 

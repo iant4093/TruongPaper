@@ -314,7 +314,7 @@ pub enum PlaylistItem {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Playlist {
     #[serde(default)]
@@ -326,6 +326,19 @@ pub struct Playlist {
     pub interval_seconds: u64,
     #[serde(default)]
     pub items: Vec<PlaylistItem>,
+    /// Own transition for this playlist; `None` uses the Photography setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<PlaylistTransition>,
+}
+
+/// A playlist's own photo transition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistTransition {
+    /// `crossfade`, `blur_dissolve` or `liquid_glass`.
+    #[serde(rename = "type")]
+    pub transition_type: String,
+    pub duration_seconds: f32,
 }
 
 fn default_playlist_interval() -> u64 {

@@ -805,6 +805,7 @@ mod tests {
             mode,
             interval_seconds: 60,
             items,
+            transition: None,
         }
     }
 

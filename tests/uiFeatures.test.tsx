@@ -350,7 +350,8 @@ describe('Playlists', () => {
     for (const word of [/Rotation Source/, /GPU Transition/, /Unified Mixed/, /Per Monitor/]) {
       expect(document.body.textContent).not.toMatch(word);
     }
-    expect(screen.getByText('Transition effect')).toBeTruthy();
+    // The global photo transition moved to Photography; playlists pick their own in the form.
+    expect(screen.queryByText('Transition effect')).toBeNull();
     // The photo timer now lives with Photography, not Playlists.
     expect(screen.queryByText('Change photo every')).toBeNull();
   });
@@ -574,5 +575,37 @@ describe('status banner and photo timer', () => {
     fireEvent.click(picker);
     await act(async () => { fireEvent.click(screen.getByRole('option', { name: '5 min' })); });
     expect(useAppStore.getState().settings!.rotationIntervalSeconds).toBe(300);
+  });
+});
+
+describe('playlist form', () => {
+  it('picks wallpapers from picture tiles and saves an own transition', async () => {
+    await openApp();
+    await goto('Playlists', /^Playlists$/);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /New playlist|Create your first playlist/ })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wallpapers' })); });
+    const picks = within(screen.getByRole('group', { name: 'Wallpapers in this playlist' }));
+    const first = picks.getAllByRole('button')[0];
+    await act(async () => { fireEvent.click(first); });
+    expect(first.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('combobox', { name: 'Playlist transition' }));
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Crossfade' })); });
+    expect(screen.getByRole('combobox', { name: 'Playlist effect length' })).toBeTruthy();
+    const before = useAppStore.getState().playlists.length;
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save playlist' })); });
+    const saved = useAppStore.getState().playlists;
+    expect(saved.length).toBe(before + 1);
+    const created = saved.find((p) => p.name === 'New playlist')!;
+    expect(created.transition?.type).toBe('crossfade');
+    expect(created.items.some((i) => i.kind === 'workshop')).toBe(true);
+    await act(async () => { await useAppStore.getState().deletePlaylist(created.playlistId); });
+  });
+
+  it('sets the photo transition from Photography', async () => {
+    await openApp();
+    await goto('Photography', /^Ian Truong Photography$/);
+    fireEvent.click(screen.getByRole('combobox', { name: 'Photo transition' }));
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Blur dissolve' })); });
+    expect(useAppStore.getState().settings!.transitionType).toBe('blur_dissolve');
   });
 });

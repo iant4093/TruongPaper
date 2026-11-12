@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS playlists (
     mode                TEXT NOT NULL,
     interval_seconds    INTEGER NOT NULL DEFAULT 900,
     items_json          TEXT NOT NULL DEFAULT '[]',
-    updated_at          INTEGER NOT NULL
+    updated_at          INTEGER NOT NULL,
+    -- Optional own transition {"type": ..., "durationSeconds": ...}; '' follows the photo setting.
+    transition_json     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS monitor_assignments (
@@ -159,7 +161,8 @@ const INDEXES_SQL: &str = indexes_sql!();
 /// `PRAGMA user_version` written by this build. Version 1 is the original schema; version 2 adds
 /// `wallpaper_favorites` and `playlist_positions`. All tables are `CREATE IF NOT EXISTS`, so
 /// [`migrate`] upgrades a v1 database by re-running the table batch.
-pub const SCHEMA_VERSION: i64 = 2;
+/// 3 adds `playlists.transition_json` (per-playlist transition).
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Every non-primary-key column of every table, with a definition valid for
 /// `ALTER TABLE ... ADD COLUMN` (NOT NULL columns carry a default). Used to upgrade databases
@@ -291,6 +294,7 @@ const EXPECTED_COLUMNS: &[(&str, &str, &str)] = &[
     ),
     ("playlists", "items_json", "TEXT NOT NULL DEFAULT '[]'"),
     ("playlists", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("playlists", "transition_json", "TEXT NOT NULL DEFAULT ''"),
     (
         "monitor_assignments",
         "source_json",
@@ -527,7 +531,10 @@ mod tests {
             .unwrap();
         }
         let conn = open_and_initialize_db(&path).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 2);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(columns(&conn, "playlists")
+            .iter()
+            .any(|c| c == "transition_json"));
         for table in ["wallpaper_favorites", "playlist_positions"] {
             assert!(!columns(&conn, table).is_empty(), "{table} missing");
         }

@@ -210,6 +210,13 @@ export interface Playlist {
   mode: 'photos_only' | 'workshop_only' | 'mixed';
   intervalSeconds: number;
   items: Array<{ kind: 'photo_api_draw' } | { kind: 'workshop'; wallpaperId: string }>;
+  /** Own photo transition; absent follows the Photography setting. */
+  transition?: PlaylistTransition;
+}
+
+export interface PlaylistTransition {
+  type: TransitionType;
+  durationSeconds: number;
 }
 
 export interface AppSettings {

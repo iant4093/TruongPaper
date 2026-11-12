@@ -2,15 +2,38 @@
 // changed right there instead of on another page.
 import React, { useEffect, useState } from 'react';
 import { SkipForward, Trash2 } from 'lucide-react';
-import { FIT_MODE_HINT, FIT_MODE_LABEL, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, plural } from '../lib/format';
+import { FIT_MODE_HINT, FIT_MODE_LABEL, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, TRANSITION_LABEL, plural } from '../lib/format';
 import { useAppStore } from '../store/useAppStore';
 import { confirmAction, toast } from '../store/feedback';
-import type { FitMode, Playlist } from '../types/ipc';
+import type { FitMode, Playlist, TransitionType } from '../types/ipc';
 import { Dropdown } from './Dropdown';
-import { PlaylistEditor, playlistIsValid } from './PlaylistEditor';
+import { PlaylistEditor, TRANSITION_LENGTHS, playlistIsValid } from './PlaylistEditor';
 import { SegmentedControl, ToggleRow } from './ui';
 
 const saved = (action: Promise<unknown>) => action.then(() => toast.success('Saved'), (err) => toast.error(err));
+
+/** The Photography transition (playlists can pick their own). */
+export const PhotoTransitionControls: React.FC = () => {
+  const type = useAppStore((s) => s.settings?.transitionType ?? 'liquid_glass');
+  const seconds = useAppStore((s) => s.settings?.transitionDurationSeconds ?? 1.2);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const nearest = TRANSITION_LENGTHS.reduce((best, [s]) => (Math.abs(s - seconds) < Math.abs(best - seconds) ? s : best), 1);
+  return (
+    <div className="playlist-editor-row">
+      <div className="settings-field">
+        <span>Transition</span>
+        <Dropdown<TransitionType> label="Photo transition" value={type}
+          options={(Object.keys(TRANSITION_LABEL) as TransitionType[]).map((k) => [k, TRANSITION_LABEL[k]] as const)}
+          onChange={(transitionType) => void saved(updateSettings({ transitionType }))} />
+      </div>
+      <div className="settings-field">
+        <span>Effect length</span>
+        <Dropdown<number> label="Photo effect length" value={nearest} options={TRANSITION_LENGTHS}
+          onChange={(transitionDurationSeconds) => void saved(updateSettings({ transitionDurationSeconds }))} />
+      </div>
+    </div>
+  );
+};
 
 export const PhotoSourceSettings: React.FC<{ onMore: () => void }> = ({ onMore }) => {
   const settings = useAppStore((s) => s.settings);
@@ -43,6 +66,7 @@ export const PhotoSourceSettings: React.FC<{ onMore: () => void }> = ({ onMore }
           onChange={(defaultFitMode) => void saved(updateSettings({ defaultFitMode }))} />
         <span className="view-subtitle">{FIT_MODE_HINT[fit]}</span>
       </div>
+      <PhotoTransitionControls />
       <ToggleRow label="Match photo orientation to display"
         checked={settings?.skipMismatchedOrientation ?? true}
         onChange={(skipMismatchedOrientation) => void saved(updateSettings({ skipMismatchedOrientation }))} />

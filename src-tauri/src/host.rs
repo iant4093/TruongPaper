@@ -153,6 +153,8 @@ pub struct MonitorRuntime {
     pub audio_reactive: bool,
     /// Per-display output volume `0..=1`; multiplies `adjustments.volume`.
     pub monitor_volume: f32,
+    /// Transition length set by the playlist on this display; `None` uses the global setting.
+    pub transition_secs: Option<f32>,
 }
 
 impl Default for MonitorRuntime {
@@ -169,6 +171,7 @@ impl Default for MonitorRuntime {
             adjustments: UniversalAdjustments::default(),
             audio_reactive: false,
             monitor_volume: 1.0,
+            transition_secs: None,
         }
     }
 }
@@ -675,6 +678,14 @@ impl WallpaperHost {
                 ..MonitorRuntime::default()
             })
             .monitor_volume = volume;
+        self.bump();
+    }
+
+    /// The playlist on `monitor_id` sets its own transition length (`None`: global setting).
+    pub fn set_transition_secs(&self, monitor_id: &str, secs: Option<f32>) {
+        if let Some(rt) = self.monitors.lock().get_mut(monitor_id) {
+            rt.transition_secs = secs;
+        }
         self.bump();
     }
 

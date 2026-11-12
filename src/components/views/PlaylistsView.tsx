@@ -1,13 +1,12 @@
 // src/components/views/PlaylistsView.tsx
 // §2.4 View 3: "Unified Playlists & Rotation" View
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Download, Pencil, Plus, Save, Trash2, Upload } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { wallpaperWrites } from '../../lib/writeQueue';
-import { PLAYLIST_MODE_LABEL, ROTATION_INTERVALS, TRANSITION_LABEL, plural } from '../../lib/format';
+import { PLAYLIST_MODE_LABEL, ROTATION_INTERVALS, plural } from '../../lib/format';
 import { confirmAction, toast } from '../../store/feedback';
-import type { Playlist, TransitionType, WallpaperPreset } from '../../types/ipc';
-import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
+import type { Playlist, WallpaperPreset } from '../../types/ipc';
+import { SectionTitle, ViewHeader } from '../ui';
 import { PlaylistEditor, playlistIsValid } from '../PlaylistEditor';
 
 export interface PlaylistExportFile {
@@ -54,7 +53,6 @@ export const PlaylistsView: React.FC = () => {
   const settings = useAppStore((s) => s.settings);
   const savedAlbums = useAppStore((s) => s.savedAlbums);
   const presetsByWallpaper = useAppStore((s) => s.presetsByWallpaper);
-  const updateSettings = useAppStore((s) => s.updateSettings);
   const savePlaylist = useAppStore((s) => s.savePlaylist);
   const deletePlaylist = useAppStore((s) => s.deletePlaylist);
   const addAlbum = useAppStore((s) => s.addAlbum);
@@ -64,21 +62,6 @@ export const PlaylistsView: React.FC = () => {
     monitors.filter((m) => m.activeSource.kind === 'playlist' && m.activeSource.playlistId === playlistId).map((m) => m.name);
 
   const [draft, setDraft] = useState<Playlist | null>(null);
-  // The duration slider follows the drag locally; the backend write is debounced.
-  const [durationDraft, setDurationDraft] = useState<number | null>(null);
-  const DURATION_KEY = 'settings:transitionDurationSeconds';
-  useEffect(() => () => wallpaperWrites.flush(DURATION_KEY), []);
-  const changeDuration = (value: number) => {
-    setDurationDraft(value);
-    wallpaperWrites
-      .schedule(DURATION_KEY, () => updateSettings({ transitionDurationSeconds: value }))
-      .then(() => setDurationDraft((current) => (current === value ? null : current)))
-      .catch((error) => {
-        setDurationDraft(null);
-        toast.error(error);
-      });
-  };
-  const save = (action: () => Promise<unknown>) => action().then(() => toast.success('Saved'), (e) => toast.error(e));
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const startNewPlaylist = () =>
@@ -240,33 +223,6 @@ export const PlaylistsView: React.FC = () => {
         </div>
       )}
 
-      <SectionTitle>Transition effect</SectionTitle>
-      <div className="card" style={{ padding: 16 }}>
-        <SegmentedControl
-          value={settings?.transitionType ?? 'liquid_glass'}
-          options={(Object.keys(TRANSITION_LABEL) as TransitionType[]).map((k) => [k, TRANSITION_LABEL[k]] as const)}
-          onChange={(next) => void save(() => updateSettings({ transitionType: next }))}
-        />
-        <label style={{ display: 'block', fontSize: 13, marginTop: 14 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span>Effect length</span>
-            <span>{(durationDraft ?? settings?.transitionDurationSeconds ?? 1.2).toFixed(1)}s</span>
-          </div>
-          <input
-            type="range"
-            className="slider"
-            aria-label="Effect length"
-            min={0.3}
-            max={3.0}
-            step={0.1}
-            value={durationDraft ?? settings?.transitionDurationSeconds ?? 1.2}
-            onChange={(e) => changeDuration(Number(e.target.value))}
-            onPointerUp={() => wallpaperWrites.flush(DURATION_KEY)}
-            onBlur={() => wallpaperWrites.flush(DURATION_KEY)}
-            onKeyUp={() => wallpaperWrites.flush(DURATION_KEY)}
-          />
-        </label>
-      </div>
     </div>
   );
 };

@@ -345,7 +345,7 @@ pub const MIN_PLAYLIST_INTERVAL_SECONDS: u64 = 10;
 pub fn list_playlists(conn: &Connection) -> DbResult<Vec<Playlist>> {
     let mut stmt = conn
         .prepare(
-            "SELECT playlist_id, name, mode, interval_seconds, items_json
+            "SELECT playlist_id, name, mode, interval_seconds, items_json, transition_json
              FROM playlists ORDER BY name COLLATE NOCASE, playlist_id",
         )
         .map_err(e)?;
@@ -357,6 +357,7 @@ pub fn list_playlists(conn: &Connection) -> DbResult<Vec<Playlist>> {
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })
         .map_err(e)?
@@ -364,13 +365,16 @@ pub fn list_playlists(conn: &Connection) -> DbResult<Vec<Playlist>> {
         .map_err(e)?;
     Ok(rows
         .into_iter()
-        .map(|(playlist_id, name, mode, interval, items)| Playlist {
-            playlist_id,
-            name,
-            mode: serde_json::from_value(Value::String(mode)).unwrap_or_default(),
-            interval_seconds: interval.max(0) as u64,
-            items: serde_json::from_str(&items).unwrap_or_default(),
-        })
+        .map(
+            |(playlist_id, name, mode, interval, items, transition)| Playlist {
+                playlist_id,
+                name,
+                mode: serde_json::from_value(Value::String(mode)).unwrap_or_default(),
+                interval_seconds: interval.max(0) as u64,
+                items: serde_json::from_str(&items).unwrap_or_default(),
+                transition: serde_json::from_str(&transition).ok(),
+            },
+        )
         .collect())
 }
 
@@ -390,16 +394,31 @@ pub fn save_playlist(conn: &Connection, mut playlist: Playlist) -> DbResult<Play
         playlist.playlist_id = new_id("playlist");
     }
     playlist.interval_seconds = playlist.interval_seconds.max(MIN_PLAYLIST_INTERVAL_SECONDS);
+    if let Some(t) = playlist.transition.as_mut() {
+        t.transition_type = crate::models::IpcTransitionType::from_setting(&t.transition_type)
+            .as_str()
+            .to_string();
+        t.duration_seconds = if t.duration_seconds.is_finite() {
+            t.duration_seconds.clamp(0.3, 3.0)
+        } else {
+            1.2
+        };
+    }
+    let transition_json = match &playlist.transition {
+        Some(t) => serde_json::to_string(t).map_err(e)?,
+        None => String::new(),
+    };
     let mode = serde_json::to_value(playlist.mode).map_err(e)?;
     conn.execute(
-        "INSERT INTO playlists (playlist_id, name, mode, interval_seconds, items_json, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO playlists (playlist_id, name, mode, interval_seconds, items_json, updated_at, transition_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(playlist_id) DO UPDATE SET
             name = excluded.name,
             mode = excluded.mode,
             interval_seconds = excluded.interval_seconds,
             items_json = excluded.items_json,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            transition_json = excluded.transition_json",
         params![
             playlist.playlist_id,
             playlist.name,
@@ -407,6 +426,7 @@ pub fn save_playlist(conn: &Connection, mut playlist: Playlist) -> DbResult<Play
             playlist.interval_seconds.min(i64::MAX as u64) as i64,
             serde_json::to_string(&playlist.items).map_err(e)?,
             now_ms(),
+            transition_json,
         ],
     )
     .map_err(e)?;
@@ -691,10 +711,25 @@ mod tests {
                         wallpaper_id: "workshop:1".into(),
                     },
                 ],
+                transition: Some(crate::models::PlaylistTransition {
+                    transition_type: "nonsense".into(),
+                    duration_seconds: 9.0,
+                }),
             },
         )
         .unwrap();
         assert!(saved.playlist_id.starts_with("playlist-"));
+        // An unknown effect and an out-of-range length are cleaned up, and both survive a reload.
+        let transition = saved.transition.clone().unwrap();
+        assert_eq!(transition.transition_type, "liquid_glass");
+        assert_eq!(transition.duration_seconds, 3.0);
+        assert_eq!(
+            get_playlist(&conn, &saved.playlist_id)
+                .unwrap()
+                .unwrap()
+                .transition,
+            Some(transition)
+        );
         assert_eq!(saved.interval_seconds, MIN_PLAYLIST_INTERVAL_SECONDS);
         let mut renamed = saved.clone();
         renamed.name = "Night".into();
@@ -713,7 +748,8 @@ mod tests {
                 name: "".into(),
                 mode: PlaylistMode::Mixed,
                 interval_seconds: 60,
-                items: vec![]
+                items: vec![],
+                transition: None,
             }
         )
         .is_err());
@@ -791,6 +827,7 @@ mod tests {
             mode: PlaylistMode::Mixed,
             interval_seconds: 60,
             items: vec![PlaylistItem::PhotoApiDraw],
+            transition: None,
         };
         let a = save_playlist(&conn, mk("A")).unwrap();
         let b = save_playlist(&conn, mk("B")).unwrap();

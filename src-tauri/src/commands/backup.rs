@@ -468,6 +468,7 @@ mod tests {
             mode: PlaylistMode::Mixed,
             interval_seconds: 60,
             items: vec![PlaylistItem::PhotoApiDraw],
+            transition: None,
         }
     }
 

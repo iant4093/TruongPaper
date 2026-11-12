@@ -22,6 +22,7 @@ import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIO
 import type { FitMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 import { Dropdown } from '../Dropdown';
+import { PhotoTransitionControls } from '../SourceDetails';
 
 const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
@@ -233,7 +234,7 @@ export const PhotosApiView: React.FC = () => {
 
 
       {/* Filter Controls Card */}
-      <div className="card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16, marginTop: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Photo source</div>
         <SegmentedControl
           value={mode}
@@ -257,6 +258,7 @@ export const PhotosApiView: React.FC = () => {
             onChange={(rotationIntervalSeconds) => void runPhotoAction(() => updateSettings({ rotationIntervalSeconds }), 'Saved')} />
           <span className="view-subtitle">For displays showing photos. Playlists keep their own timer.</span>
         </div>
+        <PhotoTransitionControls />
         <div className="settings-field" style={{ marginTop: 12 }}>
           <span>Photo fit</span>
           <Dropdown<FitMode> label="Photo fit" value={settings?.defaultFitMode ?? 'fill'}

@@ -2609,7 +2609,8 @@ fn run_renderer(
                 rt,
                 should_render,
                 sound_owner,
-                transition_secs,
+                rt.and_then(|r| r.transition_secs)
+                    .unwrap_or(transition_secs),
                 &geoms,
                 span,
                 &mut cursor,

@@ -150,6 +150,7 @@ describe('store → listen() event wiring', () => {
         'wallpaper://changed',
         'wallpaper://diagnostics',
         'wallpaper://error',
+        'wallpaper://loaded',
       ].sort()
     );
 
@@ -193,18 +194,10 @@ describe('store → listen() event wiring', () => {
     expect(unlistenSpies.every((s) => s.mock.calls.length === 1)).toBe(true);
   });
 
-  it('only handles tray menu events when asked to (main window)', async () => {
-    await useAppStore.getState().initAppListeners({ handleTrayMenuEvents: true });
-    expect(listeners.has('tray://next-requested')).toBe(true);
-    expect(listeners.has('tray://toggle-pause-requested')).toBe(true);
-
-    invokeMock.mockClear();
-    listeners.get('tray://toggle-pause-requested')!({ payload: null });
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('playback_set_paused', { monitorId: 'M1', paused: true }));
-
-    invokeMock.mockClear();
-    listeners.get('tray://next-requested')!({ payload: null });
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('photo_rotate_next', { monitorId: 'M1' }));
+  it('does not listen for tray menu events (the Rust side acts on them directly)', async () => {
+    await useAppStore.getState().initAppListeners();
+    expect(listeners.has('tray://next-requested')).toBe(false);
+    expect(listeners.has('tray://toggle-pause-requested')).toBe(false);
   });
 });
 
@@ -235,5 +228,85 @@ describe('shared display selection', () => {
     expect(useAppStore.getState().wallpaperErrors.M1).toEqual({ wallpaperId: 'workshop:1', message: 'bad' });
     listeners.get('wallpaper://diagnostics')!({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', messages: ['a'] } });
     expect(useAppStore.getState().diagnosticsByWallpaper['workshop:1']).toEqual(['a']);
+  });
+});
+
+describe('error cards, diagnostics and downloads', () => {
+  it('wallpaper://loaded clears only that display\'s error card', async () => {
+    await useAppStore.getState().initAppListeners();
+    listeners.get('wallpaper://error')!({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', message: 'bad' } });
+    listeners.get('wallpaper://error')!({ payload: { monitorId: 'M2', wallpaperId: 'workshop:2', message: 'worse' } });
+    listeners.get('wallpaper://loaded')!({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1' } });
+    expect(Object.keys(useAppStore.getState().wallpaperErrors)).toEqual(['M2']);
+  });
+
+  it('each diagnostics event replaces the previous list and an empty list clears it', async () => {
+    await useAppStore.getState().initAppListeners();
+    const diagnostics = listeners.get('wallpaper://diagnostics')!;
+    diagnostics({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', messages: ['a', 'b'] } });
+    diagnostics({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', messages: ['c'] } });
+    expect(useAppStore.getState().diagnosticsByWallpaper['workshop:1']).toEqual(['c']);
+    diagnostics({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', messages: [] } });
+    expect(useAppStore.getState().diagnosticsByWallpaper).toEqual({});
+  });
+
+  it('skips download progress updates that do not change the whole percent', async () => {
+    await useAppStore.getState().initAppListeners();
+    const progress = listeners.get('steam-download://progress')!;
+    progress({ payload: { workshopId: '1', title: 't', progressPercent: 10.1, state: 'downloading' } });
+    const first = useAppStore.getState().downloadsById;
+    progress({ payload: { workshopId: '1', title: 't', progressPercent: 10.6, state: 'downloading' } });
+    expect(useAppStore.getState().downloadsById).toBe(first);
+    progress({ payload: { workshopId: '1', title: 't', progressPercent: 11, state: 'downloading' } });
+    expect(useAppStore.getState().downloadsById['1'].progressPercent).toBe(11);
+    progress({ payload: { workshopId: '1', title: 't', progressPercent: 11, state: 'error', error: 'x' } });
+    expect(useAppStore.getState().downloadsById['1'].state).toBe('error');
+    useAppStore.getState().dismissDownload('1');
+    expect(useAppStore.getState().downloadsById).toEqual({});
+  });
+});
+
+describe('new contracts: favorites, playlists, backup, offline retry', () => {
+  it('setWallpaperFavorite updates optimistically and calls library_set_favorite', async () => {
+    useAppStore.setState({ wallpapers: [{ wallpaperId: 'workshop:1', userProperties: {}, adjustments: {} } as never] });
+    const pending = useAppStore.getState().setWallpaperFavorite('workshop:1', true);
+    expect(useAppStore.getState().wallpapers[0].isFavorite).toBe(true);
+    await pending;
+    expect(invokeMock).toHaveBeenCalledWith('library_set_favorite', { wallpaperId: 'workshop:1', favorite: true });
+  });
+
+  it('setWallpaperFavorite rolls back when the backend refuses', async () => {
+    useAppStore.setState({ wallpapers: [{ wallpaperId: 'workshop:1', isFavorite: false, userProperties: {}, adjustments: {} } as never] });
+    invokeMock.mockRejectedValueOnce(new Error('nope'));
+    await expect(useAppStore.getState().setWallpaperFavorite('workshop:1', true)).rejects.toThrow('nope');
+    expect(useAppStore.getState().wallpapers[0].isFavorite).toBe(false);
+  });
+
+  it('deletePlaylist calls playlist_delete, drops the playlist and reloads the displays', async () => {
+    useAppStore.setState({ playlists: [{ playlistId: 'a', name: 'A' } as never, { playlistId: 'b', name: 'B' } as never] });
+    await useAppStore.getState().deletePlaylist('a');
+    expect(invokeMock).toHaveBeenCalledWith('playlist_delete', { playlistId: 'a' });
+    expect(useAppStore.getState().playlists.map((p) => p.playlistId)).toEqual(['b']);
+    expect(invokeMock).toHaveBeenCalledWith('monitors_list', undefined);
+  });
+
+  it('exportBackup and importBackup use the chosen path; import refreshes everything', async () => {
+    const summary = { settings: true, playlists: 1, favorites: 2, wallpapers: 3, missingWorkshopIds: ['9'] };
+    invokeMock.mockImplementation(async (cmd: string) => (cmd === 'backup_import' ? summary : responses[cmd] ?? null));
+    await useAppStore.getState().exportBackup('/tmp/b.json');
+    expect(invokeMock).toHaveBeenCalledWith('backup_export', { path: '/tmp/b.json' });
+    expect(await useAppStore.getState().importBackup('/tmp/b.json')).toEqual(summary);
+    expect(invokeMock).toHaveBeenCalledWith('backup_import', { path: '/tmp/b.json' });
+    expect(invokeMock).toHaveBeenCalledWith('settings_get', undefined);
+  });
+
+  it('retryPhotoNow calls photo_retry_now then reloads the photo status', async () => {
+    await useAppStore.getState().retryPhotoNow();
+    expect(invokeMock.mock.calls.map((c) => c[0])).toEqual(['photo_retry_now', 'photo_get_status']);
+  });
+
+  it('refreshLive reloads only the displays and the photo status', async () => {
+    await useAppStore.getState().refreshLive();
+    expect(invokeMock.mock.calls.map((c) => c[0]).sort()).toEqual(['monitors_list', 'photo_get_status']);
   });
 });

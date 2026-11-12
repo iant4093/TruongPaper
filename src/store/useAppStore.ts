@@ -14,8 +14,10 @@ import type {
   PublicCatalogAlbum,
   SavedAlbum,
   UniversalAdjustments,
+  BackupImportSummary,
   WallpaperItem,
   WallpaperChangedPayload,
+  WallpaperLoadedPayload,
   WallpaperDiagnosticsPayload,
   WallpaperErrorPayload,
   WallpaperPreset,
@@ -42,15 +44,6 @@ export interface Steam2FaPrompt {
 export interface WallpaperLoadError {
   wallpaperId: string | null;
   message: string;
-}
-
-export interface InitListenerOptions {
-  /**
-   * Handle the tray context-menu events (`tray://next-requested`,
-   * `tray://toggle-pause-requested`). Only ONE window (the main studio window)
-   * should pass `true`, otherwise each action would run once per window.
-   */
-  handleTrayMenuEvents?: boolean;
 }
 
 export function currentWallpaperForMonitor(
@@ -104,10 +97,14 @@ export interface AppState {
   steamAccount: string | null;
   /** True while a sign-in runs. QR and 2FA events from other runs are ignored. */
   steamSigningIn: boolean;
-  initAppListeners: (options?: InitListenerOptions) => Promise<UnlistenFn>;
+  initAppListeners: () => Promise<UnlistenFn>;
   refreshAll: () => Promise<void>;
+  /** Cheap refresh for the tray popover: only the display list and photo status. */
+  refreshLive: () => Promise<void>;
   rotateNextPhoto: (monitorId?: string) => Promise<void>;
   triggerPhotoRefill: () => Promise<void>;
+  /** Offline mode: try the photo service again right now. */
+  retryPhotoNow: () => Promise<void>;
   fetchPublicCatalog: () => Promise<PublicCatalogAlbum[]>;
   addAlbum: (urlOrSlug: string, displayName?: string) => Promise<SavedAlbum>;
   toggleAlbum: (albumSlug: string, enabled: boolean) => Promise<void>;
@@ -127,6 +124,11 @@ export interface AppState {
   loadGuestAvailability: (workshopIds: string[]) => Promise<void>;
   importLocalWallpaper: (path: string) => Promise<WallpaperItem>;
   deleteWallpaper: (wallpaperId: string) => Promise<void>;
+  setWallpaperFavorite: (wallpaperId: string, favorite: boolean) => Promise<void>;
+  dismissDownload: (workshopId: string) => void;
+  deletePlaylist: (playlistId: string) => Promise<void>;
+  exportBackup: (path: string) => Promise<void>;
+  importBackup: (path: string) => Promise<BackupImportSummary>;
   openSteamAuthModal: () => void;
   closeSteamAuthModal: () => void;
   startSteamQrLogin: () => Promise<void>;
@@ -263,7 +265,21 @@ export const useAppStore = create<AppState>((set, get) => {
       }));
     },
 
-    initAppListeners: async (options = {}) => {
+    refreshLive: async () => {
+      const [photoStatus, monitors] = await Promise.all([
+        invoke<PhotoStatus>('photo_get_status'),
+        invoke<MonitorInfo[]>('monitors_list'),
+      ]);
+      set((state) => ({
+        photoStatus,
+        monitors,
+        selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
+          ? state.selectedMonitorId
+          : monitors[0]?.monitorId ?? null,
+      }));
+    },
+
+    initAppListeners: async () => {
       let pendingDisplayUpdates: Array<() => void> | null = [];
       const updateDisplay = (update: () => void) => {
         if (pendingDisplayUpdates) pendingDisplayUpdates.push(update);
@@ -307,12 +323,20 @@ export const useAppStore = create<AppState>((set, get) => {
             },
           }));
         }),
+        // A wallpaper loaded fine on that display, so its error card is stale.
+        listen<WallpaperLoadedPayload>('wallpaper://loaded', ({ payload }) => {
+          set((state) => state.wallpaperErrors[payload.monitorId]
+            ? { wallpaperErrors: Object.fromEntries(Object.entries(state.wallpaperErrors).filter(([id]) => id !== payload.monitorId)) }
+            : state);
+        }),
+        // Every load reports its own list, so it replaces the previous one (an empty list clears it).
         listen<WallpaperDiagnosticsPayload>('wallpaper://diagnostics', ({ payload }) => {
           if (!payload.wallpaperId) return;
           const wallpaperId = payload.wallpaperId;
-          set((state) => ({
-            diagnosticsByWallpaper: { ...state.diagnosticsByWallpaper, [wallpaperId]: payload.messages },
-          }));
+          set((state) => {
+            const { [wallpaperId]: _old, ...rest } = state.diagnosticsByWallpaper;
+            return { diagnosticsByWallpaper: payload.messages.length > 0 ? { ...rest, [wallpaperId]: payload.messages } : rest };
+          });
         }),
         // Another window changed the display; apply it without re-emitting (no echo loop).
         listen<{ monitorId: string }>(SELECTED_MONITOR_EVENT, ({ payload }) => {
@@ -337,6 +361,9 @@ export const useAppStore = create<AppState>((set, get) => {
 
         listen<SteamDownloadProgress>('steam-download://progress', (event) => {
           const prog = event.payload;
+          const previous = get().downloadsById[prog.workshopId];
+          // Whole-percent steps are enough for the bar; skipping the rest avoids re-rendering on every chunk.
+          if (previous && previous.state === prog.state && Math.floor(previous.progressPercent) === Math.floor(prog.progressPercent)) return;
           set((state) => ({
             downloadsById: { ...state.downloadsById, [prog.workshopId]: prog },
           }));
@@ -374,20 +401,6 @@ export const useAppStore = create<AppState>((set, get) => {
         }),
       ];
 
-      if (options.handleTrayMenuEvents) {
-        subscriptions.push(
-          listen('tray://next-requested', () => {
-            void get().rotateNextPhoto(get().selectedMonitorId ?? undefined);
-          }),
-          listen('tray://toggle-pause-requested', () => {
-            // Act on the display selected in Studio / the popover, not on every display.
-            const { monitors, selectedMonitorId } = get();
-            const target = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
-            if (target) void get().setPlaybackPaused(!target.userPaused, target.monitorId);
-          })
-        );
-      }
-
       const unlisteners = await Promise.all(subscriptions);
       try {
         await get().refreshAll();
@@ -412,6 +425,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     triggerPhotoRefill: async () => {
       await invoke('photo_trigger_refill');
+    },
+
+    retryPhotoNow: async () => {
+      await invoke('photo_retry_now');
+      await refreshPhotoStatus();
     },
 
     fetchPublicCatalog: async () => {
@@ -524,6 +542,45 @@ export const useAppStore = create<AppState>((set, get) => {
         selectedWallpaperId:
           state.selectedWallpaperId === wallpaperId ? null : state.selectedWallpaperId,
       }));
+    },
+
+    setWallpaperFavorite: async (wallpaperId, favorite) => {
+      const mark = (value: boolean | undefined) => set((state) => ({
+        wallpapers: state.wallpapers.map((w) => (w.wallpaperId === wallpaperId ? { ...w, isFavorite: value } : w)),
+      }));
+      const before = get().wallpapers.find((w) => w.wallpaperId === wallpaperId)?.isFavorite;
+      mark(favorite);
+      try {
+        await invoke('library_set_favorite', { wallpaperId, favorite });
+      } catch (error) {
+        mark(before);
+        throw error;
+      }
+    },
+
+    dismissDownload: (workshopId) => set((state) => {
+      const { [workshopId]: _gone, ...rest } = state.downloadsById;
+      return { downloadsById: rest };
+    }),
+
+    deletePlaylist: async (playlistId) => {
+      await invoke('playlist_delete', { playlistId });
+      set((state) => ({ playlists: state.playlists.filter((p) => p.playlistId !== playlistId) }));
+      // Displays that played it fall back to something else on the backend.
+      try {
+        const monitors = await invoke<MonitorInfo[]>('monitors_list');
+        set({ monitors });
+      } catch { /* the next refresh will catch up */ }
+    },
+
+    exportBackup: async (path) => {
+      await invoke('backup_export', { path });
+    },
+
+    importBackup: async (path) => {
+      const summary = await invoke<BackupImportSummary>('backup_import', { path });
+      await get().refreshAll();
+      return summary;
     },
 
     openSteamAuthModal: () => set({ authModalOpen: true, steamAuthError: null }),

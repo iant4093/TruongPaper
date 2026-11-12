@@ -20,7 +20,11 @@ import type {
   WallpaperSource,
   WorkshopPreview,
   WorkshopBrowseQuery,
+  BackupImportSummary,
 } from '../types/ipc';
+
+/** Commands added after the §5.1 registry; kept in one block so the registry list stays untouched. */
+type ExtraCommand = 'library_set_favorite' | 'playlist_delete' | 'backup_export' | 'backup_import' | 'photo_retry_now';
 
 type Args = Record<string, unknown>;
 type Emitter = (event: string, payload: unknown) => void;
@@ -456,22 +460,12 @@ export function createMockBackend(
     return w;
   };
 
-  const handlers: Record<IpcCommand, (args: Args) => unknown> = {
+  const handlers: Record<Exclude<IpcCommand, ExtraCommand>, (args: Args) => unknown> = {
     // --- Photo API & Cache ---
     photo_get_status: () => photoStatus(),
     photo_fetch_public_catalog: () => catalog,
     photo_rotate_next: (args) => rotate(String(args.monitorId ?? monitors[0].monitorId)),
     photo_trigger_refill: () => {
-      isRefilling = true;
-      emitEvent('photo-queue://updated', photoStatus());
-      schedule(() => {
-        refillQueue();
-        isRefilling = false;
-        emitEvent('photo-queue://updated', photoStatus());
-      }, 600);
-      return null;
-    },
-    photo_retry_now: () => {
       isRefilling = true;
       emitEvent('photo-queue://updated', photoStatus());
       schedule(() => {
@@ -674,13 +668,6 @@ export function createMockBackend(
       wallpapers = wallpapers.filter((w) => w.wallpaperId !== args.wallpaperId);
       return null;
     },
-    library_set_favorite: (args) => {
-      const id = String(args.wallpaperId);
-      if (!wallpapers.some((w) => w.wallpaperId === id)) throw new Error(`Wallpaper '${id}' is not in the library`);
-      wallpapers = wallpapers.map((w) => (w.wallpaperId === id ? { ...w, isFavorite: Boolean(args.favorite) } : w));
-      return null;
-    },
-
     // --- Monitor, Playback & Property Customization ---
     monitors_list: () => monitors,
     monitor_apply_wallpaper: (args) => {
@@ -691,6 +678,7 @@ export function createMockBackend(
         ? { ...m, activeSource: source, activeWallpaperId: wallpaperId } : m);
       const item = wallpaperId ? findWallpaper(wallpaperId) : currentByMonitor[monitorId] ?? null;
       emitEvent('wallpaper://changed', { monitorId, source, currentItem: item, transitionUsed: settings.transitionType });
+      emitEvent('wallpaper://loaded', { monitorId, wallpaperId });
       return null;
     },
     wallpaper_set_lock_screen: () => null,
@@ -751,14 +739,6 @@ export function createMockBackend(
       playlists = [...playlists.filter((p) => p.playlistId !== playlist.playlistId), playlist];
       return playlist;
     },
-    playlist_delete: (args) => {
-      const id = String(args.playlistId);
-      playlists = playlists.filter((p) => p.playlistId !== id);
-      monitors = monitors.map((m) =>
-        m.activeSource.kind === 'playlist' && m.activeSource.playlistId === id
-          ? { ...m, activeSource: { kind: 'photo_api' }, activeWallpaperId: null } : m);
-      return null;
-    },
     settings_get: () => settings,
     settings_update: (args) => {
       settings = { ...settings, ...(args.settings as Partial<AppSettings>) };
@@ -768,8 +748,41 @@ export function createMockBackend(
     update_feed_status: () => 'ok',
     runtime_shutdown_for_update: () => null,
     runtime_get_memory_usage: () => ({ residentBytes: 164 * MB }),
-    backup_export: () => ({ settings: true, playlists: playlists.length, favorites: wallpapers.filter((w) => w.isFavorite).length, wallpapers: wallpapers.length, missingWorkshopIds: [] }),
-    backup_import: () => ({ settings: true, playlists: playlists.length, favorites: wallpapers.filter((w) => w.isFavorite).length, wallpapers: wallpapers.length, missingWorkshopIds: ['1234567890'] }),
+  };
+
+  // --- Favorites, playlist delete, backup & restore, offline retry (browser-preview behaviour) ---
+  const extraHandlers: Record<ExtraCommand, (args: Args) => unknown> = {
+    library_set_favorite: (args) => {
+      const w = findWallpaper(args.wallpaperId);
+      wallpapers = wallpapers.map((x) => (x === w ? { ...x, isFavorite: Boolean(args.favorite) } : x));
+      return null;
+    },
+    playlist_delete: (args) => {
+      if (!playlists.some((p) => p.playlistId === args.playlistId)) throw new Error('Unknown playlist');
+      playlists = playlists.filter((p) => p.playlistId !== args.playlistId);
+      // Displays that played it go back to photos.
+      monitors = monitors.map((m) => m.activeSource.kind === 'playlist' && m.activeSource.playlistId === args.playlistId
+        ? { ...m, activeSource: { kind: 'photo_api' }, activeWallpaperId: null } : m);
+      return null;
+    },
+    backup_export: (args) => {
+      if (!String(args.path ?? '')) throw new Error('Choose where to save the backup.');
+      return null;
+    },
+    backup_import: (args): BackupImportSummary => {
+      if (!String(args.path ?? '')) throw new Error('Choose a backup file.');
+      return {
+        settings: true,
+        playlists: playlists.length,
+        favorites: wallpapers.filter((w) => w.isFavorite).length + favorites.size,
+        wallpapers: wallpapers.length,
+        missingWorkshopIds: String(args.path).includes('complete') ? [] : ['3800000001', '3800000002'],
+      };
+    },
+    photo_retry_now: () => {
+      emitEvent('photo-queue://updated', photoStatus());
+      return null;
+    },
   };
 
   const handlePlugin = (cmd: string, args: Args): unknown => {
@@ -784,8 +797,11 @@ export function createMockBackend(
         if (typeof window !== 'undefined' && typeof args.path === 'string') window.open(args.path, '_blank', 'noopener');
         return null;
       case 'plugin:dialog|open':
-      case 'plugin:dialog|save':
-        return null;
+      case 'plugin:dialog|save': {
+        // Only the backup dialogs return a path in the preview; imports and the rest cancel.
+        const filters = (args.options as { filters?: Array<{ name?: string }> } | undefined)?.filters;
+        return filters?.[0]?.name === 'TruongPaper backup' ? '/mock/truongpaper-backup.json' : null;
+      }
       case 'plugin:window|get_all_windows':
         return ['main', 'tray-popover'];
       case 'plugin:webview|get_all_webviews':
@@ -804,7 +820,7 @@ export function createMockBackend(
   return {
     handle: (cmd, args = {}) => {
       if (cmd.startsWith('plugin:')) return handlePlugin(cmd, args);
-      const handler = (handlers as Record<string, (a: Args) => unknown>)[cmd];
+      const handler = (handlers as Record<string, (a: Args) => unknown>)[cmd] ?? (extraHandlers as Record<string, (a: Args) => unknown>)[cmd];
       if (!handler) throw new Error(`[mockTauri] Unhandled command: ${cmd}`);
       return handler(args);
     },

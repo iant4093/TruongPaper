@@ -95,6 +95,7 @@ impl LibraryCache {
             project_json,
             user_properties: row.user_properties(),
             adjustments: row.adjustments(default_fit),
+            is_favorite: row.is_favorite,
         })
     }
 }

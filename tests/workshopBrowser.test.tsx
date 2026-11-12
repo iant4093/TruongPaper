@@ -26,6 +26,7 @@ it('browses, filters, and pages without a login or download', async () => {
   render(<WorkshopBrowser />);
   await screen.findByRole('button', {name:'Preview Test mountain'});
   expect(invokeMock.mock.calls.every(([cmd]) => cmd === 'steam_browse_workshop' || cmd === 'steam_guest_availability')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
   fireEvent.click(screen.getByRole('combobox', { name: 'Workshop type' }));
   await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Scene' })); });
   expectLastBrowse({query:expect.objectContaining({page:1,tags:['Scene']})});

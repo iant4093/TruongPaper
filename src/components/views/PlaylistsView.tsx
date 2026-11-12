@@ -2,15 +2,13 @@ import { Dropdown } from '../Dropdown';
 // src/components/views/PlaylistsView.tsx
 // §2.4 View 3: "Unified Playlists & Rotation" View
 import React, { useEffect, useRef, useState } from 'react';
-import { Download, Plus, Save, Upload } from 'lucide-react';
+import { Download, Pencil, Plus, Save, Trash2, Upload } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { wallpaperWrites } from '../../lib/writeQueue';
-import { ROTATION_INTERVALS, TRANSITION_LABEL } from '../../lib/format';
+import { PLAYLIST_MODE_LABEL, ROTATION_INTERVALS, TRANSITION_LABEL, plural } from '../../lib/format';
+import { confirmAction, toast } from '../../store/feedback';
 import type { Playlist, TransitionType, WallpaperPreset } from '../../types/ipc';
 import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
-
-type RotationMode = 'photo_api' | 'workshop' | 'playlist';
-type Scope = 'monitor' | 'global';
 
 export interface PlaylistExportFile {
   format: 'truongpaper-playlists';
@@ -52,30 +50,22 @@ export function parsePlaylistExport(raw: string): PlaylistExportFile {
 
 export const PlaylistsView: React.FC = () => {
   const monitors = useAppStore((s) => s.monitors);
-  const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const wallpapers = useAppStore((s) => s.wallpapers);
   const playlists = useAppStore((s) => s.playlists);
   const settings = useAppStore((s) => s.settings);
   const savedAlbums = useAppStore((s) => s.savedAlbums);
   const presetsByWallpaper = useAppStore((s) => s.presetsByWallpaper);
-  const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const savePlaylist = useAppStore((s) => s.savePlaylist);
+  const deletePlaylist = useAppStore((s) => s.deletePlaylist);
   const addAlbum = useAppStore((s) => s.addAlbum);
 
-  const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0] ?? null;
   const workshopItems = wallpapers.filter((w) => w.type !== 'photo');
+  /** Which displays currently play each playlist. */
+  const usedBy = (playlistId: string) =>
+    monitors.filter((m) => m.activeSource.kind === 'playlist' && m.activeSource.playlistId === playlistId).map((m) => m.name);
 
-  const [scope, setScope] = useState<Scope>('monitor');
-  const [mode, setMode] = useState<RotationMode>(activeMonitor?.activeSource.kind ?? 'photo_api');
-  const [singleId, setSingleId] = useState<string>(
-    activeMonitor?.activeSource.kind === 'workshop' ? activeMonitor.activeSource.wallpaperId : workshopItems[0]?.wallpaperId ?? ''
-  );
-  const [playlistId, setPlaylistId] = useState<string>(
-    activeMonitor?.activeSource.kind === 'playlist' ? activeMonitor.activeSource.playlistId : playlists[0]?.playlistId ?? ''
-  );
   const [draft, setDraft] = useState<Playlist | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
   // The duration slider follows the drag locally; the backend write is debounced.
   const [durationDraft, setDurationDraft] = useState<number | null>(null);
   const DURATION_KEY = 'settings:transitionDurationSeconds';
@@ -87,37 +77,16 @@ export const PlaylistsView: React.FC = () => {
       .then(() => setDurationDraft((current) => (current === value ? null : current)))
       .catch((error) => {
         setDurationDraft(null);
-        setMsg(error instanceof Error ? error.message : String(error));
+        toast.error(error);
       });
   };
+  const save = (action: () => Promise<unknown>) => action().then(() => toast.success('Saved'), (e) => toast.error(e));
   const fileRef = useRef<HTMLInputElement | null>(null);
-
-  const applyRotation = async () => {
-    const targets = scope === 'global' ? monitors : activeMonitor ? [activeMonitor] : [];
-    const source =
-      mode === 'photo_api'
-        ? ({ kind: 'photo_api' } as const)
-        : mode === 'workshop'
-          ? ({ kind: 'workshop', wallpaperId: singleId } as const)
-          : ({ kind: 'playlist', playlistId } as const);
-    if ((mode === 'workshop' && !singleId) || (mode === 'playlist' && !playlistId)) {
-      setMsg('Choose a wallpaper or playlist first');
-      return;
-    }
-    try {
-      for (const m of targets) {
-        await applyMonitorSource(m.monitorId, source);
-      }
-      setMsg(`Applied to ${targets.length} monitor${targets.length === 1 ? '' : 's'}`);
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   const startNewPlaylist = () =>
     setDraft({
       playlistId: newPlaylistId(),
-      name: 'New Mixed Playlist',
+      name: 'New playlist',
       mode: 'mixed',
       intervalSeconds: settings?.rotationIntervalSeconds || 1800,
       items: [{ kind: 'photo_api_draw' }],
@@ -128,11 +97,22 @@ export const PlaylistsView: React.FC = () => {
     try {
       const saved = await savePlaylist(draft);
       setDraft(null);
-      setPlaylistId(saved.playlistId);
-      setMsg(`Saved playlist "${saved.name}"`);
+      toast.success(`Saved playlist “${saved.name}”. Choose it for a display in Displays.`);
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
+      toast.error(err);
     }
+  };
+
+  const removePlaylist = async (p: Playlist) => {
+    const users = usedBy(p.playlistId);
+    const ok = await confirmAction(`Delete the playlist “${p.name}”?`, 'Delete playlist',
+      users.length ? `${users.join(', ')} ${users.length === 1 ? 'is' : 'are'} playing it right now.` : undefined);
+    if (!ok) return;
+    try {
+      await deletePlaylist(p.playlistId);
+      if (draft?.playlistId === p.playlistId) setDraft(null);
+      toast.info(`Deleted “${p.name}”`, async () => { await savePlaylist(p); });
+    } catch (err) { toast.error(err, 'Could not delete'); }
   };
 
   const exportPlaylists = () => {
@@ -156,6 +136,7 @@ export const PlaylistsView: React.FC = () => {
     a.download = 'truongpaper-playlists.json';
     a.click();
     URL.revokeObjectURL(url);
+    toast.success('Playlists saved to a file');
   };
 
   const importPlaylists = async (fileList: FileList | null) => {
@@ -167,9 +148,9 @@ export const PlaylistsView: React.FC = () => {
       for (const slug of parsed.albumSlugs) {
         if (!savedAlbums.some((a) => a.albumSlug === slug)) await addAlbum(slug);
       }
-      setMsg(`Imported ${parsed.playlists.length} playlist(s) and ${parsed.albumSlugs.length} album slug(s)`);
+      toast.success(`Loaded ${plural(parsed.playlists.length, 'playlist')} and ${plural(parsed.albumSlugs.length, 'album')}`);
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
+      toast.error(err);
     } finally {
       if (fileRef.current) fileRef.current.value = '';
     }
@@ -179,19 +160,21 @@ export const PlaylistsView: React.FC = () => {
     draft?.items.flatMap((i) => (i.kind === 'workshop' ? [i.wallpaperId] : [])) ?? []
   );
   const draftPhotoDraws = draft?.items.filter((i) => i.kind === 'photo_api_draw').length ?? 0;
+  const intervalLabel = (seconds: number) =>
+    seconds === 0 ? 'manual only' : `every ${ROTATION_INTERVALS.find((r) => r.seconds === seconds)?.label ?? `${seconds}s`}`;
 
   return (
     <div>
       <ViewHeader
         title="Playlists"
-        subtitle={msg ?? 'Mix Ian Truong Photo API draws with Wallpaper Engine items'}
+        subtitle="Mix photos and wallpapers. Pick a playlist for each display in Displays."
         actions={
           <>
             <button type="button" className="button" onClick={exportPlaylists}>
-              <Download size={14} /> Export .json
+              <Download size={14} /> Save playlists to a file
             </button>
             <button type="button" className="button" onClick={() => fileRef.current?.click()}>
-              <Upload size={14} /> Import .json
+              <Upload size={14} /> Load playlists from a file
             </button>
             <input
               ref={fileRef}
@@ -205,108 +188,41 @@ export const PlaylistsView: React.FC = () => {
         }
       />
 
-      {/* Mode Selector */}
-      <div className="card rotation-source">
-        <div className="rotation-source-heading">
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Rotation Source</div>
-          <SegmentedControl
-            value={scope}
-            options={[
-              ['monitor', `Per Monitor (${activeMonitor?.name ?? 'none'})`],
-              ['global', 'Global (All Monitors)'],
-            ]}
-            onChange={setScope}
-          />
-        </div>
-        <SegmentedControl
-          value={mode}
-          options={[
-            ['photo_api', "Ian's Photo API Only"],
-            ['workshop', 'Single Wallpaper Engine Item'],
-            ['playlist', 'Unified Mixed Playlist'],
-          ]}
-          onChange={setMode}
-        />
-        <div className="rotation-source-choice">
-          {mode === 'workshop' && (
-            <Dropdown label="Wallpaper Engine item" value={singleId} placeholder="No Workshop items in library"
-              options={workshopItems.map((item) => [item.wallpaperId, item.title])} onChange={setSingleId} />
-          )}
-          {mode === 'playlist' && (
-            <Dropdown label="Playlist" value={playlistId} placeholder="No playlists yet"
-              options={playlists.map((playlist) => [playlist.playlistId, playlist.name])} onChange={setPlaylistId} />
-          )}
-        </div>
-        <button type="button" className="button button-primary rotation-source-apply"
-          disabled={(mode === 'workshop' && !singleId) || (mode === 'playlist' && !playlistId)}
-          onClick={() => void applyRotation()}>
-          Apply Rotation Source
-        </button>
-      </div>
-
-      {/* Rotation Interval & Trigger Controls */}
-      <SectionTitle>Rotation Interval & Triggers</SectionTitle>
-      <div className="card" style={{ padding: 16 }}>
-        <SegmentedControl
-          value={String(settings?.rotationIntervalSeconds ?? 1800)}
-          options={ROTATION_INTERVALS.map((r) => [String(r.seconds), r.label] as const)}
-          onChange={(next) => void updateSettings({ rotationIntervalSeconds: Number(next) })}
-        />
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 12 }}>
-          Photo rotation runs on this timer, at launch, and after wake. Choose Never for manual-only rotation.
-          Playlists use their own saved interval.
-        </div>
-      </div>
-
-      {/* GPU Transition Selector */}
-      <SectionTitle>GPU Transition</SectionTitle>
-      <div className="card" style={{ padding: 16 }}>
-        <SegmentedControl
-          value={settings?.transitionType ?? 'liquid_glass'}
-          options={(Object.keys(TRANSITION_LABEL) as TransitionType[]).map((k) => [k, TRANSITION_LABEL[k]] as const)}
-          onChange={(next) => void updateSettings({ transitionType: next })}
-        />
-        <label style={{ display: 'block', fontSize: 13, marginTop: 14 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span>Transition Duration</span>
-            <span>{(durationDraft ?? settings?.transitionDurationSeconds ?? 1.2).toFixed(1)}s</span>
-          </div>
-          <input
-            type="range"
-            className="slider"
-            aria-label="Transition Duration"
-            min={0.3}
-            max={3.0}
-            step={0.1}
-            value={durationDraft ?? settings?.transitionDurationSeconds ?? 1.2}
-            onChange={(e) => changeDuration(Number(e.target.value))}
-            onPointerUp={() => wallpaperWrites.flush(DURATION_KEY)}
-            onBlur={() => wallpaperWrites.flush(DURATION_KEY)}
-            onKeyUp={() => wallpaperWrites.flush(DURATION_KEY)}
-          />
-        </label>
-      </div>
-
-      {/* Playlists */}
-      <SectionTitle>Playlists</SectionTitle>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {playlists.map((p) => (
-          <div key={p.playlistId} className="card" style={{ padding: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</div>
-              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                {p.mode.replace('_', ' ')} • {p.items.length} item(s) • every{' '}
-                {ROTATION_INTERVALS.find((r) => r.seconds === p.intervalSeconds)?.label ?? `${p.intervalSeconds}s`}
+      <SectionTitle>Your playlists</SectionTitle>
+      <div className="stack">
+        {playlists.map((p) => {
+          const users = usedBy(p.playlistId);
+          return (
+            <div key={p.playlistId} className="card playlist-row">
+              <div className="playlist-row-main">
+                <div className="playlist-name">{p.name}</div>
+                <div className="view-subtitle" style={{ marginTop: 2 }}>
+                  {PLAYLIST_MODE_LABEL[p.mode]} · {plural(p.items.length, 'item')} · {intervalLabel(p.intervalSeconds)}
+                </div>
+                <div className="view-subtitle" style={{ marginTop: 2 }}>
+                  {users.length ? `Playing on: ${users.join(', ')}` : 'Not used by any display'}
+                </div>
               </div>
+              <button type="button" className="button" aria-label={`Edit ${p.name}`} onClick={() => setDraft(JSON.parse(JSON.stringify(p)) as Playlist)}>
+                <Pencil size={13} /> Edit
+              </button>
+              <button type="button" className="button button-quiet" aria-label={`Delete ${p.name}`} onClick={() => void removePlaylist(p)}>
+                <Trash2 size={13} /> Delete
+              </button>
             </div>
-            <button type="button" className="button" onClick={() => setDraft(JSON.parse(JSON.stringify(p)) as Playlist)}>
-              Edit
-            </button>
+          );
+        })}
+        {playlists.length === 0 && !draft && (
+          <div className="empty-state" role="status">
+            No playlists yet.
+            <div className="empty-actions">
+              <button type="button" className="button button-primary" onClick={startNewPlaylist}>Create your first playlist</button>
+            </div>
           </div>
-        ))}
-        {!draft && (
+        )}
+        {!draft && playlists.length > 0 && (
           <button type="button" className="button" style={{ alignSelf: 'flex-start' }} onClick={startNewPlaylist}>
-            <Plus size={14} /> New Playlist
+            <Plus size={14} /> New playlist
           </button>
         )}
       </div>
@@ -324,8 +240,8 @@ export const PlaylistsView: React.FC = () => {
           <SegmentedControl
             value={draft.mode}
             options={[
-              ['photos_only', 'Photos Only'],
-              ['workshop_only', 'Workshop Only'],
+              ['photos_only', 'Photos only'],
+              ['workshop_only', 'Wallpapers only'],
               ['mixed', 'Mixed'],
             ]}
             onChange={(next) =>
@@ -347,7 +263,7 @@ export const PlaylistsView: React.FC = () => {
 
           {draft.mode === 'mixed' && (
             <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginTop: 12 }}>
-              <span>Photo API draws per cycle</span>
+              <span>Photos per round</span>
               <input
                 type="number"
                 min={0}
@@ -388,7 +304,7 @@ export const PlaylistsView: React.FC = () => {
                 </label>
               ))}
               {workshopItems.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No Workshop items in the library yet.</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No wallpapers in the library yet.</div>
               )}
             </div>
           )}
@@ -400,7 +316,7 @@ export const PlaylistsView: React.FC = () => {
               disabled={draft.items.length === 0 || !draft.name.trim()}
               onClick={() => void saveDraft()}
             >
-              <Save size={14} /> Save Playlist
+              <Save size={14} /> Save playlist
             </button>
             <button type="button" className="button" onClick={() => setDraft(null)}>
               Cancel
@@ -408,6 +324,47 @@ export const PlaylistsView: React.FC = () => {
           </div>
         </div>
       )}
+
+      <SectionTitle>Change photo every</SectionTitle>
+      <div className="card" style={{ padding: 16 }}>
+        <SegmentedControl
+          value={String(settings?.rotationIntervalSeconds ?? 1800)}
+          options={ROTATION_INTERVALS.map((r) => [String(r.seconds), r.label] as const)}
+          onChange={(next) => void save(() => updateSettings({ rotationIntervalSeconds: Number(next) }))}
+        />
+        <div className="view-subtitle" style={{ marginTop: 12 }}>
+          Applies to displays showing photos, at launch and after wake. Choose “Never” to change photos by hand.
+          Playlists use their own interval.
+        </div>
+      </div>
+
+      <SectionTitle>Transition effect</SectionTitle>
+      <div className="card" style={{ padding: 16 }}>
+        <SegmentedControl
+          value={settings?.transitionType ?? 'liquid_glass'}
+          options={(Object.keys(TRANSITION_LABEL) as TransitionType[]).map((k) => [k, TRANSITION_LABEL[k]] as const)}
+          onChange={(next) => void save(() => updateSettings({ transitionType: next }))}
+        />
+        <label style={{ display: 'block', fontSize: 13, marginTop: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span>Effect length</span>
+            <span>{(durationDraft ?? settings?.transitionDurationSeconds ?? 1.2).toFixed(1)}s</span>
+          </div>
+          <input
+            type="range"
+            className="slider"
+            aria-label="Effect length"
+            min={0.3}
+            max={3.0}
+            step={0.1}
+            value={durationDraft ?? settings?.transitionDurationSeconds ?? 1.2}
+            onChange={(e) => changeDuration(Number(e.target.value))}
+            onPointerUp={() => wallpaperWrites.flush(DURATION_KEY)}
+            onBlur={() => wallpaperWrites.flush(DURATION_KEY)}
+            onKeyUp={() => wallpaperWrites.flush(DURATION_KEY)}
+          />
+        </label>
+      </div>
     </div>
   );
 };

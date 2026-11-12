@@ -50,11 +50,26 @@ describe('<SteamAuthModal />', () => {
     expect(container.innerHTML).toBe('');
   });
 
-  it('starts a QR login session when opened without a matrix', async () => {
+  it('is an accessible dialog: labelled, modal, focused, closes on Escape', async () => {
     await act(async () => {
       useAppStore.setState({ authModalOpen: true });
       render(<SteamAuthModal />);
     });
+    const dialog = screen.getByRole('dialog', { name: 'Sign in to Steam' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect((dialog as HTMLElement).style.width).toContain('min(420px');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(useAppStore.getState().authModalOpen).toBe(false);
+  });
+
+  it('waits for "Show QR code" before starting a QR login session', async () => {
+    await act(async () => {
+      useAppStore.setState({ authModalOpen: true });
+      render(<SteamAuthModal />);
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Show QR code' })); });
     expect(invokeMock).toHaveBeenCalledWith('steam_login_qr', undefined);
     expect(screen.getByText('Generating Steam QR session...')).toBeTruthy();
   });
@@ -102,7 +117,7 @@ describe('<SteamAuthModal />', () => {
       useAppStore.setState({ authModalOpen: true, qrMatrix: [[true]] });
       render(<SteamAuthModal />);
     });
-    fireEvent.click(screen.getByText('Username & 2FA'));
+    fireEvent.click(screen.getByText('Username and code'));
     fireEvent.change(screen.getByPlaceholderText('Steam Username'), { target: { value: 'ian' } });
     fireEvent.change(screen.getByPlaceholderText('Steam Password'), { target: { value: 'pw' } });
     await act(async () => {
@@ -116,7 +131,7 @@ describe('<SteamAuthModal />', () => {
     expect(screen.getByText('Check your email')).toBeTruthy();
     fireEvent.change(screen.getByPlaceholderText('Email Steam Guard Code'), { target: { value: 'AB12C' } });
     await act(async () => {
-      fireEvent.click(screen.getByText('Verify Steam Guard Code'));
+      fireEvent.click(screen.getByText('Verify code'));
     });
     expect(invokeMock).toHaveBeenCalledWith('steam_submit_2fa_code', { code: 'AB12C' });
     expect(useAppStore.getState().need2Fa).toBeNull();
@@ -136,6 +151,7 @@ describe('<SteamAuthModal />', () => {
       useAppStore.setState({ authModalOpen: true });
       render(<SteamAuthModal />);
     });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Show QR code' })); });
     expect(useAppStore.getState().steamSigningIn).toBe(true);
     fireEvent.click(screen.getByText('Close'));
     expect(invokeMock).toHaveBeenCalledWith('steam_cancel_login', undefined);
@@ -149,6 +165,7 @@ describe('<SteamAuthModal />', () => {
       useAppStore.setState({ authModalOpen: true });
       render(<SteamAuthModal />);
     });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Show QR code' })); });
     await act(async () => { approve('ian'); });
     expect(useAppStore.getState()).toMatchObject({ authModalOpen: false, steamAccount: 'ian', steamSigningIn: false });
   });

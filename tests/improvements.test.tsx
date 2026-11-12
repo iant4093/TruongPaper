@@ -37,17 +37,29 @@ describe('wallpaper load errors', () => {
     await act(async () => { render(<App />); });
     await screen.findByRole('button', { name: 'Select Neon Rain City' });
     await fail();
-    const card = screen.getByText(/Neon Rain City could not load: Missing scene\.pkg/);
+    const card = screen.getByText(/Neon Rain City couldn.t be set as wallpaper/);
     expect(card.closest('.load-error-card')).toBeTruthy();
+    // The raw backend message sits behind "Show details".
+    expect(card.closest('.load-error-card')!.querySelector('details')!.open).toBe(false);
+    expect(screen.getByText('Missing scene.pkg')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    expect(screen.queryByText(/could not load/)).toBeNull();
+    expect(screen.queryByText(/couldn.t be set as wallpaper/)).toBeNull();
 
     await fail('again');
-    expect(screen.getByText(/could not load: again/)).toBeTruthy();
+    expect(screen.getByText('again')).toBeTruthy();
     await act(async () => {
       await emit('wallpaper://changed', { monitorId: 'DISPLAY-2', source: { kind: 'photo_api' }, currentItem: null, transitionUsed: 'crossfade' });
     });
-    expect(screen.queryByText(/could not load/)).toBeNull();
+    expect(screen.queryByText(/couldn.t be set as wallpaper/)).toBeNull();
+  });
+
+  it('wallpaper://loaded clears the card too', async () => {
+    await act(async () => { render(<App />); });
+    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await fail();
+    expect(screen.getByText(/couldn.t be set as wallpaper/)).toBeTruthy();
+    await act(async () => { await emit('wallpaper://loaded', { monitorId: 'DISPLAY-2', wallpaperId: NEON }); });
+    expect(screen.queryByText(/couldn.t be set as wallpaper/)).toBeNull();
   });
 
   it('keeps the error when a different display changes, and Try again re-applies the wallpaper', async () => {
@@ -57,28 +69,29 @@ describe('wallpaper load errors', () => {
     await act(async () => {
       await emit('wallpaper://changed', { monitorId: 'DISPLAY-1', source: { kind: 'photo_api' }, currentItem: null, transitionUsed: 'crossfade' });
     });
-    expect(screen.getByText(/could not load/)).toBeTruthy();
+    expect(screen.getByText(/couldn.t be set as wallpaper/)).toBeTruthy();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
-    expect(screen.queryByText(/could not load/)).toBeNull();
+    expect(screen.queryByText(/couldn.t be set as wallpaper/)).toBeNull();
     expect(useAppStore.getState().monitors.find((m) => m.monitorId === 'DISPLAY-2')?.activeWallpaperId).toBe(NEON);
   });
 
   it('shows the same line in the tray popover', async () => {
     await act(async () => { render(<TrayApp />); });
-    await screen.findByText('Current Wallpaper');
+    await screen.findByRole('button', { name: 'Next photo' });
     await act(async () => { useAppStore.getState().selectMonitor('DISPLAY-2'); });
     await act(async () => { await emit('wallpaper://error', { monitorId: 'DISPLAY-2', wallpaperId: NEON, message: 'GPU lost' }); });
-    expect(screen.getByText(/Neon Rain City could not load: GPU lost/)).toBeTruthy();
+    expect(screen.getByText(/Neon Rain City couldn.t be set as wallpaper/)).toBeTruthy();
+    expect(screen.getByText('GPU lost')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    expect(screen.queryByText(/could not load/)).toBeNull();
+    expect(screen.queryByText(/couldn.t be set as wallpaper/)).toBeNull();
   });
 });
 
 describe('scene report', () => {
   it('lists diagnostics in a collapsed section of the details drawer', async () => {
     await act(async () => { render(<App />); });
-    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Select Neon Rain City' })); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Details for Neon Rain City' })); });
     expect(screen.queryByText(/Scene report/)).toBeNull();
     await act(async () => { await emit('wallpaper://diagnostics', { monitorId: 'DISPLAY-2', wallpaperId: NEON, messages: ['Shader foo skipped', 'Texture bar missing'] }); });
     const summary = screen.getByText('Scene report (2)');
@@ -92,7 +105,7 @@ describe('scene report', () => {
 describe('details drawer', () => {
   it('focuses the close button on open, closes on Escape and returns focus to the tile', async () => {
     await act(async () => { render(<App />); });
-    const tile = await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    const tile = await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     await act(async () => { fireEvent.click(tile); });
     const close = screen.getByRole('button', { name: 'Close wallpaper details' });
     expect(document.activeElement).toBe(close);
@@ -103,7 +116,7 @@ describe('details drawer', () => {
 
   it('adds a scrim for the overlay layout that closes the drawer', async () => {
     await act(async () => { render(<App />); });
-    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Select Neon Rain City' })); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Details for Neon Rain City' })); });
     const scrim = document.querySelector('.inspector-scrim')!;
     expect(scrim).toBeTruthy();
     await act(async () => { fireEvent.click(scrim); });
@@ -150,12 +163,13 @@ describe('offline notice', () => {
     await act(async () => { render(<App />); });
     await screen.findByRole('button', { name: 'Select Neon Rain City' });
     fireEvent.click(screen.getByRole('button', { name: 'Photography' }));
+    await screen.findByRole('heading', { level: 2, name: 'Ian Truong Photography' });
     expect(screen.queryByText(OFFLINE_NOTICE)).toBeNull();
     await act(async () => { useAppStore.setState({ photoStatus: { ...useAppStore.getState().photoStatus!, offline: true } }); });
     expect(screen.getByText('Offline - showing cached photos')).toBeTruthy();
     cleanup();
     await act(async () => { render(<TrayApp />); });
-    await screen.findByText('Current Wallpaper');
+    await screen.findByRole('button', { name: 'Next photo' });
     expect(screen.queryByText(OFFLINE_NOTICE)).toBeNull();
     await act(async () => { useAppStore.setState({ photoStatus: { ...useAppStore.getState().photoStatus!, offline: true } }); });
     expect(screen.getByText('Offline - showing cached photos')).toBeTruthy();
@@ -200,7 +214,7 @@ describe('debounced slider writes', () => {
       await act(async () => { render(<App />); });
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       const scene = useAppStore.getState().wallpapers.find((w) => w.wallpaperId === NEON)!;
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Select Neon Rain City' })); });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Details for Neon Rain City' })); });
       const volume = document.querySelectorAll<HTMLInputElement>('.property-inspector input[type="range"]')[0];
       for (const v of ['0.1', '0.2', '0.3']) fireEvent.change(volume, { target: { value: v } });
       expect(useAppStore.getState().wallpapers.find((w) => w.wallpaperId === NEON)!.adjustments.volume).toBe(0.3);
@@ -223,7 +237,7 @@ describe('playbackSpeed above 2', () => {
     await act(async () => { render(<App />); });
     await act(async () => {
       useAppStore.getState().setLocalWallpaperAdjustments(NEON, { ...useAppStore.getState().wallpapers.find((w) => w.wallpaperId === NEON)!.adjustments, playbackSpeed: 3 });
-      fireEvent.click(await screen.findByRole('button', { name: 'Select Neon Rain City' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Details for Neon Rain City' }));
     });
     expect(screen.getByText('3.00x')).toBeTruthy();
   });
@@ -236,23 +250,20 @@ describe('settings and displays additions', () => {
     await act(async () => { fireEvent.click(within(screen.getByRole('navigation', { name: 'Studio views' })).getByRole('button', { name: label })); });
   };
 
-  it('saves global shortcuts and hides the section when the backend omits them', async () => {
+  it('saves keyboard shortcuts', async () => {
     await open('Settings');
     const next = await screen.findByPlaceholderText('CmdOrCtrl+Alt+Right');
     fireEvent.change(next, { target: { value: 'CmdOrCtrl+Alt+N' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save shortcuts' })); });
     expect(useAppStore.getState().settings!.nextHotkey).toBe('CmdOrCtrl+Alt+N');
-    await act(async () => {
-      const { nextHotkey: _n, pauseHotkey: _p, ...rest } = useAppStore.getState().settings!;
-      // Older backends leave the hotkey fields out.
-      useAppStore.setState({ settings: rest as never });
-    });
-    expect(screen.queryByText('Global shortcuts')).toBeNull();
+    expect(screen.getByText('Keyboard shortcuts')).toBeTruthy();
   });
 
   it('toggles span mode and writes per-display volume once after the drag', async () => {
     await open('Displays');
-    await act(async () => { fireEvent.click(screen.getByRole('checkbox', { name: /Span one wallpaper/ })); });
+    const span = await screen.findByRole('checkbox', { name: /Span one wallpaper/ });
+    await act(async () => { fireEvent.click(span); });
+    expect(screen.getByText('Works for photos and scenes. Videos and web wallpapers show on each display.')).toBeTruthy();
     expect(useAppStore.getState().settings!.multiMonitorMode).toBe('span');
     const volume = screen.getByRole('slider', { name: /^Volume for / });
     fireEvent.change(volume, { target: { value: '0.25' } });

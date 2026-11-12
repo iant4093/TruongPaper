@@ -123,7 +123,8 @@ export interface WallpaperItem {
   projectJson: ProjectJsonSchema;
   userProperties: Record<string, string | number | boolean>;
   adjustments: UniversalAdjustments;
-  isFavorite: boolean;
+  /** Starred by the user (`library_set_favorite`). */
+  isFavorite?: boolean;
 }
 
 export interface BackupSummary {
@@ -296,7 +297,7 @@ export const IPC_COMMANDS = [
 
 export type IpcCommand = (typeof IPC_COMMANDS)[number];
 
-/** Rust → frontend event channels (§5.1) plus the tray menu events emitted by `tray.rs` (§4.1). */
+/** Rust → frontend event channels (§5.1). */
 export const IPC_EVENTS = [
   'wallpaper://changed',
   'photo-queue://updated',
@@ -309,8 +310,7 @@ export const IPC_EVENTS = [
   'wallpaper://diagnostics',
   'playback://pause-changed',
   'system-power',
-  'tray://next-requested',
-  'tray://toggle-pause-requested',
+  'wallpaper://loaded',
 ] as const;
 
 export type IpcEvent = (typeof IPC_EVENTS)[number];
@@ -333,6 +333,21 @@ export interface WallpaperErrorPayload {
   monitorId: string;
   wallpaperId: string | null;
   message: string;
+}
+
+/** A wallpaper finished loading on a display (clears that display's error card). */
+export interface WallpaperLoadedPayload {
+  monitorId: string;
+  wallpaperId: string | null;
+}
+
+/** Result of `backup_import`. */
+export interface BackupImportSummary {
+  settings: boolean;
+  playlists: number;
+  favorites: number;
+  wallpapers: number;
+  missingWorkshopIds: string[];
 }
 
 export interface WallpaperDiagnosticsPayload {

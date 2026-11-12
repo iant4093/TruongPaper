@@ -1,6 +1,6 @@
 // src/lib/format.ts
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { FilterMode, MonitorInfo, PhotoItem, PhotoStatus, WallpaperType } from '../types/ipc';
+import type { FilterMode, MonitorInfo, PhotoItem, PhotoStatus, WallpaperSource, WallpaperType } from '../types/ipc';
 
 export const MB = 1024 * 1024;
 export const GB = 1024 * MB;
@@ -83,21 +83,42 @@ export const ROTATION_INTERVALS: Array<{ label: string; seconds: number }> = [
   { label: '4 hours', seconds: 14400 },
   { label: '12 hours', seconds: 43200 },
   { label: '24 hours', seconds: 86400 },
-  { label: 'Never (Manual Only)', seconds: 0 },
+  { label: 'Never (manual only)', seconds: 0 },
 ];
 
 export const FIT_MODE_LABEL = {
-  fit_blur: 'Fit + Blurred Backdrop',
-  fill: 'Fill / Center Crop',
-  fit_black: 'Fit + Black Bars',
+  fit_blur: 'Fit, blurred edges',
+  fill: 'Fill screen (crop)',
+  fit_black: 'Fit, black bars',
   stretch: 'Stretch',
 } as const;
 
+export const FIT_MODE_HINT: Record<keyof typeof FIT_MODE_LABEL, string> = {
+  fit_blur: 'Show the whole picture; a blurred copy fills the empty edges.',
+  fill: 'Cover the screen and crop what does not fit.',
+  fit_black: 'Show the whole picture with black bars where it does not fit.',
+  stretch: 'Stretch the picture to the screen shape (can distort it).',
+};
+
 export const TRANSITION_LABEL = {
-  crossfade: 'Smooth Crossfade',
-  blur_dissolve: 'Blur-Dissolve',
-  liquid_glass: 'Liquid Glass Morph',
+  crossfade: 'Crossfade',
+  blur_dissolve: 'Blur dissolve',
+  liquid_glass: 'Liquid morph',
 } as const;
+
+export const PLAYLIST_MODE_LABEL = {
+  photos_only: 'Photos',
+  workshop_only: 'Wallpapers',
+  mixed: 'Photos + wallpapers',
+} as const;
+
+export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** Shown in Photography and the tray while the photo service is unreachable. */
 export const OFFLINE_NOTICE = 'Offline - showing cached photos';
+
+/** Source value for pickers that mix photos, single wallpapers and playlists. */
+export const sourceKey = (source: WallpaperSource): string =>
+  source.kind === 'photo_api' ? 'photo_api' : source.kind === 'workshop' ? `w:${source.wallpaperId}` : `p:${source.playlistId}`;
+export const sourceFromKey = (key: string): WallpaperSource =>
+  key === 'photo_api' ? { kind: 'photo_api' } : key.startsWith('w:') ? { kind: 'workshop', wallpaperId: key.slice(2) } : { kind: 'playlist', playlistId: key.slice(2) };

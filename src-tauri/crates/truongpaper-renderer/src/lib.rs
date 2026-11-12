@@ -20,7 +20,7 @@ pub mod web_runtime;
 
 pub use compositor::{
     clamp_transition_duration, fitted_layer_sample, load_rgba_image, transition_progress,
-    upload_rgba_texture, BlurUniforms, CompositorPipeline, CompositorUniforms, FitMode,
+    upload_rgba_texture, next_view_id, downscale_for_display, photo_display_target, PHOTO_DISPLAY_HEADROOM, BlurUniforms, CompositorPipeline, CompositorUniforms, FitMode,
     FittedSample, RgbaImageData, TransitionMode, DEFAULT_TRANSITION_DURATION_SECS,
     MAX_PHOTO_TEXTURE_DIMENSION, MAX_TRANSITION_DURATION_SECS, MIN_TRANSITION_DURATION_SECS,
 };

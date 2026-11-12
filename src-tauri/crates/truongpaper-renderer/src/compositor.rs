@@ -84,6 +84,22 @@ pub struct CompositorPipeline {
     pub blur_width: u32,
     pub blur_height: u32,
     pub surface_format: wgpu::TextureFormat,
+    /// Bind groups of blur passes 1..=2 and the final pass into (from, to); they only touch the
+    /// fixed ping/pong/blurred targets, so they are built once.
+    blur_fixed_bgs: [wgpu::BindGroup; 4],
+    /// Source key last blurred into (from, to); the blur is skipped while it matches.
+    blur_keys: [Option<u64>; 2],
+    /// `(from_id, to_id, shared_blur)` -> compositor bind group for the last keyed draw.
+    cached_bg: Option<(u64, u64, bool, wgpu::BindGroup)>,
+    /// Uniforms currently in `compositor_uniform_buf` (skip identical uploads).
+    written_uniforms: Option<CompositorUniforms>,
+}
+
+/// Returns a process-unique id for a texture view, for the keyed compositor caches. Ids are
+/// never reused, so a cache entry can never match a different (new) texture.
+pub fn next_view_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl CompositorPipeline {
@@ -274,7 +290,38 @@ impl CompositorPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let blur_bg = |input: &wgpu::TextureView, buf_idx: usize| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("kawase_pass_bg"),
+                layout: &blur_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: blur_pass_uniform_bufs[buf_idx].as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let blur_fixed_bgs = [
+            blur_bg(&ping_view, 1),
+            blur_bg(&pong_view, 2),
+            blur_bg(&ping_view, 3),
+            blur_bg(&ping_view, 3),
+        ];
+
         Self {
+            blur_fixed_bgs,
+            blur_keys: [None, None],
+            cached_bg: None,
+            written_uniforms: None,
             blur_bgl,
             compositor_bgl,
             blur_downsample_pipeline,
@@ -340,39 +387,39 @@ impl CompositorPipeline {
         src_view: &wgpu::TextureView,
         is_target_to: bool,
     ) {
+        // Only pass 0 depends on the source; the other passes reuse prebuilt bind groups.
+        let first_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("kawase_pass_bg"),
+            layout: &self.blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.blur_pass_uniform_bufs[0].as_entire_binding(),
+                },
+            ],
+        });
         let final_dest = if is_target_to {
             &self.to_blurred_view
         } else {
             &self.from_blurred_view
         };
-
-        let passes: [(&wgpu::TextureView, &wgpu::TextureView, bool, usize); 4] = [
-            (src_view, &self.ping_view, true, 0),
-            (&self.ping_view, &self.pong_view, true, 1),
-            (&self.pong_view, &self.ping_view, false, 2),
-            (&self.ping_view, final_dest, false, 3),
+        let final_bg = &self.blur_fixed_bgs[if is_target_to { 3 } else { 2 }];
+        let passes: [(&wgpu::BindGroup, &wgpu::TextureView, bool); 4] = [
+            (&first_bg, &self.ping_view, true),
+            (&self.blur_fixed_bgs[0], &self.pong_view, true),
+            (&self.blur_fixed_bgs[1], &self.ping_view, false),
+            (final_bg, final_dest, false),
         ];
 
-        for (input_view, output_view, is_down, buf_idx) in passes {
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("kawase_pass_bg"),
-                layout: &self.blur_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(input_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.blur_pass_uniform_bufs[buf_idx].as_entire_binding(),
-                    },
-                ],
-            });
-
+        for (bg, output_view, is_down) in passes {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kawase_blur_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -393,9 +440,125 @@ impl CompositorPipeline {
             } else {
                 &self.blur_upsample_pipeline
             });
-            rpass.set_bind_group(0, &bg, &[]);
+            rpass.set_bind_group(0, bg, &[]);
             rpass.draw(0..3, 0..1);
         }
+    }
+
+    /// [`Self::precompute_kawase_blur`], skipped while `content_key` is the key last blurred
+    /// into the same target (the caller bumps the key whenever the source pixels change).
+    /// Returns `true` when the blur ran.
+    pub fn precompute_kawase_blur_keyed(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        is_target_to: bool,
+        content_key: u64,
+    ) -> bool {
+        let slot = usize::from(is_target_to);
+        if self.blur_keys[slot] == Some(content_key) {
+            return false;
+        }
+        self.precompute_kawase_blur(device, encoder, src_view, is_target_to);
+        self.blur_keys[slot] = Some(content_key);
+        true
+    }
+
+    /// Forgets cached blur results and bind groups (releases the textures they reference).
+    pub fn invalidate_caches(&mut self) {
+        self.blur_keys = [None, None];
+        self.cached_bg = None;
+        self.written_uniforms = None;
+    }
+
+    /// [`Self::render_frame`] with the per-frame allocations cached: the bind group is rebuilt
+    /// only when the `(from, to)` view ids change and the uniform buffer is written only when
+    /// the uniforms changed. With `shared_blur` both blurred slots read the `to` blur (the
+    /// scene path blurs one source once).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_frame_keyed(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        from: (&wgpu::TextureView, u64),
+        to: (&wgpu::TextureView, u64),
+        shared_blur: bool,
+        target_surface_view: &wgpu::TextureView,
+        uniforms: &CompositorUniforms,
+    ) {
+        let unchanged = self
+            .written_uniforms
+            .as_ref()
+            .is_some_and(|u| bytemuck::bytes_of(u) == bytemuck::bytes_of(uniforms));
+        if !unchanged {
+            queue.write_buffer(
+                &self.compositor_uniform_buf,
+                0,
+                bytemuck::bytes_of(uniforms),
+            );
+            self.written_uniforms = Some(*uniforms);
+        }
+        let hit = matches!(&self.cached_bg, Some((f, t, sb, _)) if *f == from.1 && *t == to.1 && *sb == shared_blur);
+        if !hit {
+            let from_blur = if shared_blur {
+                &self.to_blurred_view
+            } else {
+                &self.from_blurred_view
+            };
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("compositor_bg"),
+                layout: &self.compositor_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(from.0),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(to.0),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(from_blur),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.to_blurred_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.compositor_uniform_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            self.cached_bg = Some((from.1, to.1, shared_blur, bg));
+        }
+        let Some((_, _, _, bg)) = &self.cached_bg else {
+            return;
+        };
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("compositor_render_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_surface_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rpass.set_pipeline(&self.compositor_pipeline);
+        rpass.set_bind_group(0, bg, &[]);
+        rpass.draw(0..3, 0..1);
     }
 
     /// Renders the fitted, transitioned, and color-graded wallpaper frame into `target_surface_view`.
@@ -488,6 +651,58 @@ impl RgbaImageData {
     pub fn aspect(&self) -> f32 {
         self.width.max(1) as f32 / self.height.max(1) as f32
     }
+}
+
+/// Headroom over the monitor's physical pixels kept when decoding at display size.
+pub const PHOTO_DISPLAY_HEADROOM: f32 = 1.25;
+
+/// Texture size for a `src` photo shown on displays up to `max_display` physical pixels: the
+/// smallest size that still covers `max_display * PHOTO_DISPLAY_HEADROOM` (fill / crop / fit),
+/// aspect preserved, never larger than the source and never above
+/// [`MAX_PHOTO_TEXTURE_DIMENSION`].
+pub fn photo_display_target(src: (u32, u32), max_display: (u32, u32)) -> (u32, u32) {
+    let (sw, sh) = (src.0.max(1), src.1.max(1));
+    let tw = (max_display.0.max(1) as f32 * PHOTO_DISPLAY_HEADROOM).ceil();
+    let th = (max_display.1.max(1) as f32 * PHOTO_DISPLAY_HEADROOM).ceil();
+    let mut scale = (tw / sw as f32).max(th / sh as f32).min(1.0);
+    let longest = sw.max(sh) as f32 * scale;
+    if longest > MAX_PHOTO_TEXTURE_DIMENSION as f32 {
+        scale *= MAX_PHOTO_TEXTURE_DIMENSION as f32 / longest;
+    }
+    if scale >= 1.0 {
+        return (sw, sh);
+    }
+    (
+        ((sw as f32 * scale).round() as u32).max(1),
+        ((sh as f32 * scale).round() as u32).max(1),
+    )
+}
+
+/// Downscales `img` to [`photo_display_target`] for `max_display` (box/triangle filter; a
+/// no-op returning the input when it is already small enough).
+pub fn downscale_for_display(
+    img: std::sync::Arc<RgbaImageData>,
+    max_display: (u32, u32),
+) -> std::sync::Arc<RgbaImageData> {
+    let (w, h) = photo_display_target((img.width, img.height), max_display);
+    if (w, h) == (img.width, img.height)
+        || img.pixels.len() != img.width as usize * img.height as usize * 4
+    {
+        return img;
+    }
+    let (sw, sh, pixels) = match std::sync::Arc::try_unwrap(img) {
+        Ok(d) => (d.width, d.height, d.pixels),
+        Err(shared) => (shared.width, shared.height, shared.pixels.clone()),
+    };
+    let Some(buf) = image::RgbaImage::from_raw(sw, sh, pixels) else {
+        unreachable!("pixel length was validated above");
+    };
+    let resized = image::imageops::resize(&buf, w, h, image::imageops::FilterType::Triangle);
+    std::sync::Arc::new(RgbaImageData {
+        width: resized.width(),
+        height: resized.height(),
+        pixels: resized.into_raw(),
+    })
 }
 
 /// Decodes a cached photo (JPEG / PNG / WebP / GIF / BMP / TGA, sniffed from the content) to

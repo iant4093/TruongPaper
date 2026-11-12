@@ -13,6 +13,10 @@ fn invalid(msg: impl Into<String>) -> Error {
 
 /// Upper bound for a single decompressed mipmap (1 GiB). Rejects hostile `decompressed_bytes_count`.
 const MAX_MIPMAP_BYTES: usize = 1 << 30;
+/// Hard cap for LZ4 decompression output (256 MiB).
+const MAX_LZ4_DECOMPRESSED_BYTES: usize = 256 << 20;
+/// Largest accepted TEX dimension in pixels.
+const MAX_TEX_DIMENSION: i32 = 16_384;
 
 pub trait WeBinaryExt: Read + Seek {
     fn read_u32_le(&mut self) -> IoResult<u32> {
@@ -308,6 +312,19 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
         unk_int0: r.read_u32_le()?,
     };
 
+    for (name, v) in [
+        ("texture_width", header.texture_width),
+        ("texture_height", header.texture_height),
+        ("image_width", header.image_width),
+        ("image_height", header.image_height),
+    ] {
+        if !(0..=MAX_TEX_DIMENSION).contains(&v) {
+            return Err(invalid(format!(
+                "TEX {name} {v} outside 0..={MAX_TEX_DIMENSION}"
+            )));
+        }
+    }
+
     let container_magic = r.read_n_string(16)?;
     let image_count = read_count(&mut r, "image")?;
     let (container_version, free_image_format) = read_container(&mut r, &container_magic)?;
@@ -327,6 +344,13 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
 
             let width = r.read_i32_le()?;
             let height = r.read_i32_le()?;
+            if !(0..=MAX_TEX_DIMENSION).contains(&width)
+                || !(0..=MAX_TEX_DIMENSION).contains(&height)
+            {
+                return Err(invalid(format!(
+                    "Mipmap dimensions {width}x{height} outside 0..={MAX_TEX_DIMENSION}"
+                )));
+            }
             let (is_lz4, decompressed_len) = if container_version >= 2 {
                 (r.read_i32_le()? == 1, r.read_i32_le()?)
             } else {
@@ -344,10 +368,23 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
             r.read_exact(&mut payload)?;
 
             let raw_bytes = if is_lz4 {
-                if decompressed_len < 0 || decompressed_len as usize > MAX_MIPMAP_BYTES {
+                if decompressed_len < 0
+                    || decompressed_len as usize > MAX_LZ4_DECOMPRESSED_BYTES.min(MAX_MIPMAP_BYTES)
+                {
                     return Err(invalid(format!(
                         "Invalid LZ4 decompressed size: {decompressed_len}"
                     )));
+                }
+                // Raw pixel formats never exceed 4 bytes/pixel (block formats are padded to
+                // 4x4). Embedded images (FreeImage) and video are exempt from this check.
+                if free_image_format < 0 && width > 0 && height > 0 {
+                    let padded = |d: i32| (d as usize).div_ceil(4) * 4;
+                    let max_raw = padded(width) * padded(height) * 4;
+                    if decompressed_len as usize > max_raw {
+                        return Err(invalid(format!(
+                            "LZ4 decompressed size {decompressed_len} exceeds {width}x{height} pixel data"
+                        )));
+                    }
                 }
                 lz4_flex::block::decompress(&payload, decompressed_len as usize)
                     .map_err(|e| invalid(e.to_string()))?
@@ -776,6 +813,34 @@ mod tests {
         assert_eq!(t.images[0][0].raw_bytes, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(!t.images[0][0].is_lz4_compressed);
         assert!(t.sprite_frames.is_none());
+    }
+
+    #[test]
+    fn tex_rejects_lz4_size_beyond_pixel_data_and_huge_dimensions() {
+        let raw = vec![0u8; 1024];
+        let comp = lz4_flex::block::compress(&raw);
+        let mut b = tex_header(0, 0);
+        b.extend(nstr("TEXB0002"));
+        b.extend(i32le(1));
+        b.extend(i32le(1));
+        // 2x2 pixels -> at most 4x4x4 = 64 bytes after block padding.
+        b.extend(mip_v2(2, 2, true, raw.len() as i32, &comp));
+        assert!(parse_tex(&b).is_err());
+
+        let mut b = tex_header(0, 0);
+        b.extend(nstr("TEXB0002"));
+        b.extend(i32le(1));
+        b.extend(i32le(1));
+        b.extend(mip_v2(20_000, 1, false, 0, &[1]));
+        assert!(parse_tex(&b).is_err());
+
+        let mut b = nstr("TEXV0005");
+        b.extend(nstr("TEXI0001"));
+        for v in [0, 0, 32_768, 256, 300, 200, 0] {
+            b.extend(i32le(v));
+        }
+        b.extend(nstr("TEXB0002"));
+        assert!(parse_tex(&b).is_err());
     }
 
     #[test]

@@ -354,6 +354,21 @@ pub struct SceneObject {
     pub maxtime: Option<f32>,
     #[serde(default)]
     pub text: Option<UserBoundValue<String>>,
+    /// Text layers: font size in scene units.
+    #[serde(default)]
+    pub pointsize: Option<UserBoundValue<f32>>,
+    /// Text layers: `systemfont_*` name or a VFS path to a `.ttf`/`.otf`.
+    #[serde(default)]
+    pub font: Option<String>,
+    /// Text layers: `left` / `center` / `right`.
+    #[serde(default)]
+    pub horizontalalign: Option<String>,
+    /// Text layers: `top` / `center` / `bottom`.
+    #[serde(default)]
+    pub verticalalign: Option<String>,
+    /// Text layers: inner margin in scene units.
+    #[serde(default)]
+    pub padding: Option<UserBoundValue<f32>>,
     #[serde(
         default,
         rename = "animationlayers",

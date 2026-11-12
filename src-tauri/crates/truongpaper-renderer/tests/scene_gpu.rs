@@ -1,0 +1,137 @@
+//! GPU smoke tests for the scene renderer (skipped when no adapter is available).
+mod common;
+
+use common::TempDir;
+use glam::Vec2;
+use truongpaper_renderer::scene_renderer::{FrameUniformInputs, HDR_FORMAT};
+use truongpaper_renderer::{CameraState, SceneGraph, SceneRenderer};
+use truongpaper_we_formats::WeVirtualFileSystem;
+
+fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
+}
+
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((bits >> 10) & 0x1f) as i32;
+    let frac = (bits & 0x3ff) as f32;
+    match exp {
+        0 => sign * frac * 2f32.powi(-24),
+        31 => sign * f32::INFINITY,
+        _ => sign * (1.0 + frac / 1024.0) * 2f32.powi(exp - 15),
+    }
+}
+
+/// Renders `scene` once into a `size`x`size` Rgba16Float target and returns RGBA f32 pixels.
+fn render_hdr(t: &TempDir, scene: &str, size: u32) -> Option<(Vec<f32>, Vec<String>)> {
+    let (device, queue) = device()?;
+    t.write("scene.json", scene);
+    let vfs = WeVirtualFileSystem::mount(t.path().to_path_buf(), t.path().join("core"));
+    let graph = SceneGraph::load(&vfs, "scene.json", None, Vec2::splat(size as f32)).unwrap();
+    let mut renderer = SceneRenderer::new(&device, &queue, HDR_FORMAT, graph.scene_size);
+    renderer.load(&device, &queue, &vfs, &graph);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let row = size * 8;
+    assert_eq!(row % 256, 0);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (row * size) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render(
+        &device,
+        &queue,
+        &mut encoder,
+        &view,
+        &graph,
+        &CameraState::new(),
+        &FrameUniformInputs::default(),
+    );
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &buffer,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(size),
+            },
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let px = data
+        .chunks_exact(2)
+        .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+        .collect();
+    Some((px, renderer.diagnostics()))
+}
+
+#[test]
+fn scene_target_keeps_values_above_one() {
+    let t = TempDir::new("gpu-hdr");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 64, "height": 64 }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 } },
+        "objects": [ { "name": "Bright", "image": "models/solid.json", "origin": "32 32 0",
+                       "size": "64 64", "color": "1 1 1", "brightness": 3.0 } ] }"#;
+    let Some((px, _)) = render_hdr(&t, scene, 64) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mid = ((32 * 64 + 32) * 4) as usize;
+    assert!(px[mid] > 2.5, "expected HDR value, got {}", px[mid]);
+}
+
+#[test]
+fn text_layer_draws_glyph_pixels_when_a_font_exists() {
+    let t = TempDir::new("gpu-text");
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 },
+                       "clearcolor": "0 0 0" },
+        "objects": [ { "name": "Label", "text": "MMMM", "size": "64 64", "origin": "32 32 0",
+                       "pointsize": 40, "color": "1 1 1" } ] }"#;
+    let Some((px, diag)) = render_hdr(&t, scene, 64) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    if diag.iter().any(|d| d.contains("no usable font")) {
+        return;
+    }
+    assert!(diag.is_empty(), "{diag:?}");
+    let lit = px.chunks_exact(4).filter(|p| p[0] > 0.5).count();
+    assert!(lit > 40, "text should light some pixels, got {lit}");
+}

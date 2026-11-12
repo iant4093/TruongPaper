@@ -4,6 +4,7 @@
 //! `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Sections 4, 5, 7.2).
 
 pub mod compositor;
+pub mod diagnostics;
 pub mod effect_chain;
 pub mod json;
 pub mod particles;
@@ -13,6 +14,7 @@ pub mod scene_graph;
 pub mod scene_math;
 pub mod scene_renderer;
 pub mod shader_preprocessor;
+pub mod text;
 pub mod video_runtime;
 pub mod web_runtime;
 
@@ -22,6 +24,7 @@ pub use compositor::{
     FittedSample, RgbaImageData, TransitionMode, DEFAULT_TRANSITION_DURATION_SECS,
     MAX_PHOTO_TEXTURE_DIMENSION, MAX_TRANSITION_DURATION_SECS, MIN_TRANSITION_DURATION_SECS,
 };
+pub use diagnostics::{DiagnosticsLog, MAX_DIAGNOSTICS};
 pub use effect_chain::{
     fbo_size, fbo_texture_format, BlendMode, BloomPassPlan, BloomPlan, BloomStage, EffectChainPlan,
     EffectPassPlan, EffectStep, FboDesc, RenderTargetId, TextureBinding, RT_4_FRAME_BUFFER,
@@ -59,6 +62,7 @@ pub use shader_preprocessor::{
     ReflectedUniformField, TranslatedWeShaderPair, UniformCommentMetadata, WeShaderStage,
     WE_BUILTIN_UNIFORMS,
 };
+pub use text::{HAlign, TextStyle, VAlign};
 pub use video_runtime::{
     clamp_playback_speed, clamp_volume, embedded_mp4_cache_path, extract_embedded_tex_mp4,
     is_mp4_container, tightly_packed_rows, VideoFrame, VideoFrameSource, VideoLoopClock,

@@ -15,6 +15,7 @@ use truongpaper_renderer::{CompositorUniforms, FitMode, TransitionMode};
 
 pub const EVENT_WALLPAPER_CHANGED: &str = "wallpaper://changed";
 pub const EVENT_PHOTO_QUEUE_UPDATED: &str = "photo-queue://updated";
+pub const EVENT_SETTINGS_CHANGED: &str = "settings://changed";
 pub const EVENT_STEAM_DOWNLOAD_PROGRESS: &str = "steam-download://progress";
 pub const EVENT_STEAM_QR_MATRIX: &str = "steam-auth://qr-matrix";
 pub const EVENT_STEAM_NEED_2FA: &str = "steam-auth://need-2fa";

@@ -61,6 +61,7 @@
       let lastSnapshot = -Infinity;
       let lastBackdrop = -Infinity;
       let adjustments = {};
+      let revealed = typeof window.__truongpaper_signal_ready !== 'function';
 
       function snapshot(canvas, maxEdge) {
         if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return false;
@@ -120,15 +121,16 @@
         if (hostPaused || hiddenBySpace) {
           showHeldFrame();
         } else {
-          held.hidden = !hasFrame;
+          held.hidden = true;
           video.style.visibility = 'visible';
         }
+        window.__truongpaper_signal_ready?.();
       });
       video.addEventListener('pause', () => {
         if (video.paused) showHeldFrame();
       });
       video.addEventListener('waiting', () => {
-        if (hasFrame) held.hidden = false;
+        if (hasFrame && revealed) held.hidden = false;
         awaitingFrame = true;
         resumedAt = video.currentTime;
         if (frameRequest === undefined) frameRequest = video.requestVideoFrameCallback?.(showFreshFrame);
@@ -171,7 +173,7 @@
         if (fitMode === 'fit_blur' && snapshot(backdrop, 192)) lastBackdrop = performance.now();
 
         const volume = Number(adj.volume ?? 0);
-        video.muted = Boolean(adj.muted) || volume <= 0.001;
+        video.muted = !revealed || Boolean(adj.muted) || volume <= 0.001;
         video.volume = video.muted ? 0 : Math.min(1, Math.max(0, volume));
         const rate = Math.min(2, Math.max(0.1, Number(adj.playbackSpeed ?? 1)));
         if (video.playbackRate !== rate) video.playbackRate = rate;
@@ -186,6 +188,10 @@
         hostPaused = paused;
         syncPlayback();
       };
+      window.addEventListener('truongpaper:revealed', () => {
+        revealed = true;
+        applyAdjustments();
+      }, { once: true });
       document.addEventListener('visibilitychange', () => {
         hiddenBySpace = mac && document.hidden;
         syncPlayback();

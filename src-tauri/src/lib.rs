@@ -25,6 +25,16 @@ use tauri::Manager;
 pub const DB_FILE_NAME: &str = "truongpaper.db";
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window("main") {
+        let studio = window.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = studio.hide();
+            }
+        });
+    }
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
     let conn = truongpaper_core::open_and_initialize_db(&app_data_dir.join(DB_FILE_NAME))?;
@@ -55,6 +65,25 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    let context = {
+        let mut context = context;
+        if let Some(studio) = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|w| w.label == "main")
+        {
+            studio.decorations = true;
+            studio.title_bar_style = tauri::TitleBarStyle::Overlay;
+            studio.hidden_title = true;
+            studio.traffic_light_position =
+                Some(tauri::utils::config::LogicalPosition { x: 20.0, y: 18.0 });
+        }
+        context
+    };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -142,7 +171,7 @@ pub fn run() {
             commands::updater::runtime_shutdown_for_update,
             commands::runtime::runtime_get_memory_usage,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building TruongPaper Tauri application");
 
     app.run(|handle, event| match event {
@@ -211,6 +240,7 @@ mod tests {
         for name in [
             crate::models::EVENT_WALLPAPER_CHANGED,
             crate::models::EVENT_PHOTO_QUEUE_UPDATED,
+            crate::models::EVENT_SETTINGS_CHANGED,
             crate::models::EVENT_STEAM_DOWNLOAD_PROGRESS,
             crate::models::EVENT_STEAM_QR_MATRIX,
             crate::models::EVENT_STEAM_NEED_2FA,

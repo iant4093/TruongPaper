@@ -2108,6 +2108,7 @@ invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: numb
 #### Rust $\to$ Frontend Event Channels (`app.emit(...)`)
 - `wallpaper://changed`: `{ monitorId: string, source: WallpaperSource, currentItem: WallpaperItem | PhotoItem | null, transitionUsed: TransitionType }`
 - `photo-queue://updated`: `PhotoStatus`
+- `settings://changed`: `AppSettings`
 - `steam-download://progress`: `{ workshopId: string, title: string, progressPercent: number, state: 'downloading' | 'completed' | 'error', error?: string }`
 - `steam-auth://qr-matrix`: `{ matrix: boolean[][] }`
 - `steam-auth://need-2fa`: `{ kind: 'totp' | 'email', prompt: string }`

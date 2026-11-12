@@ -11,7 +11,7 @@ use crate::models::{
     EVENT_WALLPAPER_CHANGED,
 };
 use crate::state::AppState;
-use crate::wallpaper_webview::{self, wallpaper_window_label, WebviewSpec};
+use crate::wallpaper_webview::{self, WebviewSpec};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -235,6 +235,7 @@ async fn start_wallpaper_runtime(
     state: &AppState,
     monitor_id: &str,
     wallpaper_id: &str,
+    source: &WallpaperSource,
     kind: Result<WallpaperRuntimeKind, String>,
     item: &WallpaperItem,
     install_dir: &Path,
@@ -252,6 +253,22 @@ async fn start_wallpaper_runtime(
     let audio_reactive = item.audio_reactive;
     let props = effective_user_properties(&item.project_json, &item.user_properties);
     let host = &state.host;
+    let activate = || -> Result<(), String> {
+        db::set_monitor_source(&state.db.lock(), monitor_id, source)?;
+        host.set_source(
+            monitor_id,
+            source.clone(),
+            Some(wallpaper_id.to_string()),
+            adjustments.compositor_uniforms(settings_modes(state).1),
+        );
+        Ok(())
+    };
+    if !matches!(
+        kind,
+        Ok(WallpaperRuntimeKind::Web | WallpaperRuntimeKind::Video)
+    ) {
+        activate()?;
+    }
     match kind {
         Ok(WallpaperRuntimeKind::Scene) => {
             let scene_file = if project_file.is_empty() {
@@ -309,22 +326,10 @@ async fn start_wallpaper_runtime(
                 && crate::commands::library::is_strictly_within(&preview_path, install_dir))
             .then_some(preview_path);
             let vfs = Arc::new(vfs);
-            host.set_active_vfs(wallpaper_id, Arc::clone(&vfs));
-            let label = wallpaper_window_label(monitor_id);
-            host.set_runtime(
-                monitor_id,
-                ActiveRuntime::Webview {
-                    kind: webview_kind,
-                    label: label.clone(),
-                    preview_path,
-                },
-                adjustments,
-                audio_reactive,
-            );
-            // Mounted before the window (re)loads so its first requests hit the right folder.
-            host.set_webview_vfs(&label, wallpaper_id, vfs);
             wallpaper_webview::show(
                 app,
+                host,
+                Arc::clone(&vfs),
                 WebviewSpec {
                     monitor_id: monitor_id.to_string(),
                     kind: webview_kind,
@@ -332,6 +337,21 @@ async fn start_wallpaper_runtime(
                     url,
                     audio_reactive,
                     on_load_scripts: vec![on_load],
+                },
+                |label| {
+                    activate()?;
+                    host.set_active_vfs(wallpaper_id, vfs);
+                    host.set_runtime(
+                        monitor_id,
+                        ActiveRuntime::Webview {
+                            kind: webview_kind,
+                            label,
+                            preview_path,
+                        },
+                        adjustments,
+                        audio_reactive,
+                    );
+                    Ok(())
                 },
             )
             .await
@@ -417,21 +437,12 @@ pub(crate) async fn show_library_wallpaper(
         application_exe_path(&install_dir, file)?;
     }
 
-    {
-        let conn = state.db.lock();
-        db::set_monitor_source(&conn, monitor_id, &source)?;
-    }
-    state.host.set_source(
-        monitor_id,
-        source.clone(),
-        Some(wallpaper_id.to_string()),
-        item.adjustments.compositor_uniforms(transition),
-    );
     start_wallpaper_runtime(
         app,
         state,
         monitor_id,
         wallpaper_id,
+        &source,
         kind,
         &item,
         &install_dir,

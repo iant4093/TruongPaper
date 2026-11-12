@@ -93,11 +93,15 @@ describe('Main studio window', () => {
         wallpapers: wallpapers.filter((wallpaper) => wallpaper.type === 'video'),
         photoStatus: {
           ...photoStatus!,
-          unusedQueue: Array.from({ length: 8 }, (_, i) => ({ ...queuedPhoto, id: `offline-${i}` })),
+          unusedQueue: [
+            ...Array.from({ length: 8 }, (_, i) => ({ ...queuedPhoto, id: `offline-${i}`, width: 6000, height: 4000 })),
+            { ...queuedPhoto, id: 'portrait-offline', width: 4000, height: 6000, albumSlug: 'portrait-only' },
+          ],
         },
       });
     });
     expect(screen.getByText('8 photos ready offline')).toBeTruthy();
+    expect(screen.queryByRole('img', { name: 'portrait-only' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Videos' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Scenes' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Web' })).toBeNull();

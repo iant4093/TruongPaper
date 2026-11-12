@@ -3,7 +3,7 @@
 
 use crate::state::AppState;
 use crate::state::{merge_settings_patch, overlay_photo_keys, persist_settings, sanitize_settings};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use truongpaper_core::AppSettings;
 
 #[tauri::command]
@@ -50,6 +50,7 @@ pub async fn settings_update(
     if before.sync_lock_screen != after.sync_lock_screen {
         super::lock_screen::request_sync(&app);
     }
+    let _ = app.emit(crate::models::EVENT_SETTINGS_CHANGED, after);
     Ok(())
 }
 

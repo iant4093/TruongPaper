@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { parseImportLink } from '../../lib/importLinks';
-import { GB, MB, formatBytes, formatOfflinePhotoCount, photoPreviewSrc } from '../../lib/format';
+import { GB, MB, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
 import type { FilterMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 
@@ -85,10 +85,11 @@ export const PhotosApiView: React.FC = () => {
   const featuredOnly = photoStatus?.featuredOnly ?? false;
   const maxCache = photoStatus?.maxCacheBytes ?? settings?.maxPhotoCacheBytes ?? 250 * MB;
   const cached = photoStatus?.cachedBytes ?? 0;
-  const activeMonitorId = selectedMonitorId ?? monitors[0]?.monitorId;
+  const activeMonitor = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
+  const activeMonitorId = activeMonitor?.monitorId;
   const currentPhoto =
     (activeMonitorId ? photoStatus?.currentPhotoByMonitor?.[activeMonitorId] : null) ?? null;
-  const queue = photoStatus?.unusedQueue ?? [];
+  const queue = offlinePhotosForDisplay(photoStatus, activeMonitor, settings?.skipMismatchedOrientation ?? true);
   const favorites = photoStatus?.favoritePhotos ?? [];
 
   const runPhotoAction = async (action: () => Promise<void>) => {
@@ -182,7 +183,7 @@ export const PhotosApiView: React.FC = () => {
         <div style={{ marginTop: 12 }}>
           <ToggleRow
             label="Match photo orientation to display"
-            description="Landscape displays use landscape photos. Portrait displays use portrait photos."
+            description="Offline photos and automatic rotation match the selected display."
             checked={settings?.skipMismatchedOrientation ?? true}
             onChange={(next) => void updateSettings({ skipMismatchedOrientation: next })}
           />
@@ -379,7 +380,11 @@ export const PhotosApiView: React.FC = () => {
           </PhotoTile>
         ))}
         {queue.length === 0 && (
-          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Queue is empty. Refill to download new photos.</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            {settings?.skipMismatchedOrientation ?? true
+              ? 'No offline photos match this display yet.'
+              : 'No photos are ready offline yet.'}
+          </div>
         )}
       </div>
 

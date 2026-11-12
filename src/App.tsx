@@ -30,6 +30,7 @@ const VIEWS: Record<StudioTab, React.FC> = {
   all: AllWallpapersView, photos: PhotosApiView, workshop: SteamWorkshopView,
   playlists: PlaylistsView, monitors: MonitorsView, settings: SettingsView,
 };
+const nativeMacTitlebar = /Mac/.test(navigator.platform);
 
 export const App: React.FC = () => {
   const initAppListeners = useAppStore((s) => s.initAppListeners);
@@ -83,11 +84,11 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="app-window-frame studio-shell">
+    <div className={`app-window-frame studio-shell${nativeMacTitlebar ? ' native-titlebar' : ''}`}>
       <SteamAuthModal />
       <WorkshopPreviewModal />
       <aside className="app-sidebar">
-        <div className="sidebar-titlebar" data-tauri-drag-region><WindowControls /></div>
+        <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && <WindowControls />}</div>
         <div className="app-brand" data-tauri-drag-region><img src="/app-icon.png" width={23} height={23} alt="" /><span>TruongPaper</span></div>
         <nav aria-label="Studio views" className="sidebar-nav">
           <div className="sidebar-label">Workspace</div>
@@ -121,10 +122,11 @@ export const App: React.FC = () => {
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
           <main className="content-viewport">
             {(loadError || actionError) && <div role="alert" className="error-banner">{loadError ?? actionError}</div>}
-            <div className="view-content"><ActiveView /></div>
+            <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}><ActiveView /></div>
           </main>
-          {showInspector && selectedWallpaper && (
-            <aside className="inspector-drawer" aria-label="Wallpaper details">
+          <div className="inspector-slot" inert={!showInspector} aria-hidden={!showInspector}>
+            {selectedWallpaper && (
+              <aside className="inspector-drawer" aria-label="Wallpaper details">
               <div className="inspector-heading">Wallpaper details</div>
               <div className="inspector-preview"><Thumb src={selectedWallpaper.previewPath} alt={selectedWallpaper.title} height={150} /></div>
               <PresetBar key={selectedWallpaper.wallpaperId} wallpaperId={selectedWallpaper.wallpaperId} />
@@ -132,8 +134,9 @@ export const App: React.FC = () => {
                 project={selectedWallpaper.projectJson} values={selectedWallpaper.userProperties} adjustments={selectedWallpaper.adjustments} presets={[]}
                 onPropertyChange={(k, v) => setLocalWallpaperProperty(selectedWallpaper.wallpaperId, k, v)}
                 onAdjustmentChange={(next) => setLocalWallpaperAdjustments(selectedWallpaper.wallpaperId, next)} />
-            </aside>
-          )}
+              </aside>
+            )}
+          </div>
         </div>
         <footer className="playback-bar">
           <div className="now-playing-image"><Thumb src={currentPreview} alt={currentTitle} height={36} /></div>

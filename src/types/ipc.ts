@@ -264,6 +264,7 @@ export type IpcCommand = (typeof IPC_COMMANDS)[number];
 export const IPC_EVENTS = [
   'wallpaper://changed',
   'photo-queue://updated',
+  'settings://changed',
   'steam-download://progress',
   'steam-auth://qr-matrix',
   'steam-auth://need-2fa',

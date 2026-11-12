@@ -144,6 +144,8 @@ pub struct MonitorRuntime {
     pub active: ActiveRuntime,
     /// Bumped every time `active` changes; the render thread reloads when it differs.
     pub generation: u64,
+    /// The last generation presented by the desktop renderer.
+    pub presented_generation: u64,
     /// Volume / mute / playback speed / audio sensitivity of the shown wallpaper.
     pub adjustments: UniversalAdjustments,
     /// `project.json` declares audio processing (drives the system-audio loopback worker).
@@ -160,6 +162,7 @@ impl Default for MonitorRuntime {
             policy: MonitorPlaybackPolicy::Playing,
             active: ActiveRuntime::None,
             generation: 0,
+            presented_generation: 0,
             adjustments: UniversalAdjustments::default(),
             audio_reactive: false,
         }
@@ -195,6 +198,13 @@ pub struct WallpaperHost {
 }
 
 impl WallpaperHost {
+    pub fn note_presented(&self, monitor_id: &str, generation: u64) {
+        if let Some(runtime) = self.monitors.lock().get_mut(monitor_id) {
+            if runtime.generation == generation {
+                runtime.presented_generation = generation;
+            }
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -431,6 +441,10 @@ impl WallpaperHost {
         self.webview_vfs
             .write()
             .insert(label.to_string(), (wallpaper_id.to_string(), vfs));
+    }
+
+    pub fn remove_webview_vfs(&self, label: &str) {
+        self.webview_vfs.write().remove(label);
     }
 
     /// Wallpaper windows only read their own mount. Studio windows can use the active mount.

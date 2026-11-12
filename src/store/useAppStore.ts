@@ -236,6 +236,9 @@ export const useAppStore = create<AppState>((set, get) => {
         listen<PhotoStatus>('photo-queue://updated', (event) => {
           updateDisplay(() => set({ photoStatus: event.payload }));
         }),
+        listen<AppSettings>('settings://changed', ({ payload }) => {
+          updateDisplay(() => set({ settings: payload }));
+        }),
 
         listen<SteamDownloadProgress>('steam-download://progress', (event) => {
           const prog = event.payload;

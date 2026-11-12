@@ -1,6 +1,6 @@
 // src/lib/format.ts
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { PhotoItem, WallpaperType } from '../types/ipc';
+import type { MonitorInfo, PhotoItem, PhotoStatus, WallpaperType } from '../types/ipc';
 
 export const MB = 1024 * 1024;
 export const GB = 1024 * MB;
@@ -13,6 +13,18 @@ export function formatBytes(bytes: number): string {
 
 export function formatOfflinePhotoCount(count: number): string {
   return `${count} ${count === 1 ? 'photo' : 'photos'} ready offline`;
+}
+
+export function offlinePhotosForDisplay(
+  status: PhotoStatus | null,
+  monitor: MonitorInfo | undefined,
+  matchOrientation: boolean,
+): PhotoItem[] {
+  const queue = status?.unusedQueue ?? [];
+  if (!monitor || !matchOrientation) return queue;
+  return queue.filter(({ width, height }) =>
+    width !== null && height !== null && (height > width) === monitor.isPortrait,
+  );
 }
 
 export function photoPreviewSrc(photo: PhotoItem | null | undefined): string | undefined {

@@ -1028,6 +1028,16 @@ impl MonitorRenderer {
         if self.generation == Some(generation) {
             return;
         }
+        if let Some(ActiveRuntime::Webview {
+            label,
+            preview_path: Some(_),
+            ..
+        }) = rt.map(|runtime| &runtime.active)
+        {
+            if !crate::wallpaper_webview::can_show_preview(label) {
+                return;
+            }
+        }
         self.generation = Some(generation);
         self.dirty = true;
         let active = rt.map(|r| r.active.clone()).unwrap_or_default();
@@ -1641,6 +1651,16 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
                 &geoms,
                 &mut cursor,
             );
+            if let Some(rt) = rt {
+                if m.generation == Some(rt.generation)
+                    && rt.presented_generation != rt.generation
+                    && !m.dirty
+                    && (matches!(m.content, Content::Scene(_))
+                        || matches!(m.content, Content::Photo) && m.to.is_some())
+                {
+                    host.note_presented(&m.monitor_id, rt.generation);
+                }
+            }
         }
 
         let budget = if animating {

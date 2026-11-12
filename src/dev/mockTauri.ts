@@ -675,6 +675,7 @@ export function createMockBackend(
     settings_get: () => settings,
     settings_update: (args) => {
       settings = { ...settings, ...(args.settings as Partial<AppSettings>) };
+      emitEvent('settings://changed', settings);
       return null;
     },
     update_feed_status: () => 'ok',

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Images, Search } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { WALLPAPER_TYPE_LABEL, formatBytes, formatOfflinePhotoCount, photoPreviewSrc } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
 import type { WallpaperType } from '../../types/ipc';
 import { SectionTitle, Thumb, ViewHeader, SegmentedControl } from '../ui';
 import { WallpaperCard } from '../WallpaperCard';
@@ -19,6 +19,7 @@ const TYPE_FILTERS = [
 export const AllWallpapersView: React.FC = () => {
   const wallpapers = useAppStore((s) => s.wallpapers);
   const photoStatus = useAppStore((s) => s.photoStatus);
+  const matchOrientation = useAppStore((s) => s.settings?.skipMismatchedOrientation ?? true);
   const monitors = useAppStore((s) => s.monitors);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
@@ -27,9 +28,10 @@ export const AllWallpapersView: React.FC = () => {
   const [selectedFilter, setFilter] = useState<LibraryFilter>('all');
   const [query, setQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [applying, setApplying] = useState<string | null>(null);
   const activeMonitor = monitors.find((m) => m.monitorId === selectedMonitorId) ?? monitors[0];
   const currentPhoto = activeMonitor ? photoStatus?.currentPhotoByMonitor?.[activeMonitor.monitorId] : null;
-  const queue = photoStatus?.unusedQueue ?? [];
+  const queue = offlinePhotosForDisplay(photoStatus, activeMonitor, matchOrientation);
   const installedTypes = new Set(wallpapers.map((wallpaper) => wallpaper.type));
   const filters = TYPE_FILTERS.filter(([type]) => installedTypes.has(type));
   const filter = selectedFilter !== 'all' && installedTypes.has(selectedFilter) ? selectedFilter : 'all';
@@ -38,10 +40,12 @@ export const AllWallpapersView: React.FC = () => {
   const showPhotos = filter === 'all' && 'ian truong photography photos'.includes(search);
   const showQueue = filter === 'all' && !search && !!photoStatus;
   const apply = async (wallpaperId?: string) => {
-    if (!activeMonitor) return;
+    if (!activeMonitor || applying !== null) return;
     setError(null);
+    setApplying(wallpaperId ?? 'photo_api');
     try { await applyMonitorSource(activeMonitor.monitorId, wallpaperId ? { kind: 'workshop', wallpaperId } : { kind: 'photo_api' }); }
     catch (err) { setError(String(err)); }
+    finally { setApplying(null); }
   };
   return (
     <div>
@@ -54,8 +58,8 @@ export const AllWallpapersView: React.FC = () => {
       </div>
       {error && <div role="alert" className="error-banner">{error}</div>}
       <div className="wallpaper-grid">
-        {showPhotos && <WallpaperCard title="Ian Truong Photography" preview={photoPreviewSrc(currentPhoto)} kind="Photography" detail="Photo API" active={activeMonitor?.activeSource.kind === 'photo_api'} canApply={!!activeMonitor} onApply={() => void apply()} />}
-        {items.map((w) => <WallpaperCard key={w.wallpaperId} title={w.title} preview={w.previewPath} kind={WALLPAPER_TYPE_LABEL[w.type]} detail={w.windowsOnly ? 'Windows only' : formatBytes(w.bytes)} audioReactive={w.audioReactive} selected={w.wallpaperId === selectedWallpaperId} active={activeMonitor?.activeSource.kind === 'workshop' && activeMonitor.activeSource.wallpaperId === w.wallpaperId} canApply={!!activeMonitor} onSelect={() => selectWallpaper(w.wallpaperId)} onApply={() => void apply(w.wallpaperId)} />)}
+        {showPhotos && <WallpaperCard title="Ian Truong Photography" preview={photoPreviewSrc(currentPhoto)} kind="Photography" detail="Photo API" active={activeMonitor?.activeSource.kind === 'photo_api'} canApply={!!activeMonitor && applying === null} applying={applying === 'photo_api'} onApply={() => void apply()} />}
+        {items.map((w) => <WallpaperCard key={w.wallpaperId} title={w.title} preview={w.previewPath} kind={WALLPAPER_TYPE_LABEL[w.type]} detail={w.windowsOnly ? 'Windows only' : formatBytes(w.bytes)} audioReactive={w.audioReactive} selected={w.wallpaperId === selectedWallpaperId} active={activeMonitor?.activeSource.kind === 'workshop' && activeMonitor.activeSource.wallpaperId === w.wallpaperId} canApply={!!activeMonitor && applying === null} applying={applying === w.wallpaperId} onSelect={() => selectWallpaper(w.wallpaperId)} onApply={() => void apply(w.wallpaperId)} />)}
       </div>
       {!showPhotos && items.length === 0 && <div className="empty-state"><Images size={24} />No wallpapers match your search.</div>}
       {showQueue && (

@@ -139,6 +139,7 @@ describe('store → listen() event wiring', () => {
       [
         'photo-queue://updated',
         'policy://state-changed',
+        'settings://changed',
         'steam-auth://need-2fa',
         'steam-auth://qr-matrix',
         'steam-download://progress',
@@ -152,6 +153,9 @@ describe('store → listen() event wiring', () => {
 
     listeners.get('policy://state-changed')!({ payload: { monitorId: 'M1', state: 'paused_battery' } });
     expect(useAppStore.getState().policyStateByMonitor).toEqual({ M1: 'paused_battery' });
+
+    listeners.get('settings://changed')!({ payload: { skipMismatchedOrientation: false } });
+    expect(useAppStore.getState().settings?.skipMismatchedOrientation).toBe(false);
 
     listeners.get('system-power')!({ payload: { kind: 'pause', reason: 'lock' } });
     expect(useAppStore.getState().isPaused).toBe(false);

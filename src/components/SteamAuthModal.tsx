@@ -7,6 +7,7 @@ export const SteamAuthModal: React.FC = () => {
   const qrMatrix = useAppStore((s) => s.qrMatrix);
   const need2Fa = useAppStore((s) => s.need2Fa);
   const steamAuthError = useAppStore((s) => s.steamAuthError);
+  const steamSigningIn = useAppStore((s) => s.steamSigningIn);
   const closeSteamAuthModal = useAppStore((s) => s.closeSteamAuthModal);
   const startSteamQrLogin = useAppStore((s) => s.startSteamQrLogin);
   const submitSteamCredentials = useAppStore((s) => s.submitSteamCredentials);
@@ -18,8 +19,9 @@ export const SteamAuthModal: React.FC = () => {
   const [twoFaCode, setTwoFaCode] = useState('');
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Start once per opening. After an error the user restarts with "New QR code".
   useEffect(() => {
-    if (authModalOpen && tab === 'qr' && !qrMatrix) {
+    if (authModalOpen && tab === 'qr' && !qrMatrix && !steamSigningIn && !steamAuthError) {
       void startSteamQrLogin();
     }
   }, [authModalOpen, tab]);
@@ -108,20 +110,29 @@ export const SteamAuthModal: React.FC = () => {
               Sign in with the Steam Mobile App. DepotDownloader remembers your login on this computer.
             </p>
             {qrMatrix ? (
-              <canvas
-                ref={qrCanvasRef}
-                role="img"
-                aria-label="Steam sign-in QR code"
-                style={{
-                  borderRadius: 14,
-                  boxShadow: '0 12px 32px rgba(0, 0, 0, 0.45)',
-                  maxWidth: '100%',
-                }}
-              />
-            ) : (
+              <>
+                <canvas
+                  ref={qrCanvasRef}
+                  role="img"
+                  aria-label="Steam sign-in QR code"
+                  style={{
+                    borderRadius: 14,
+                    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.45)',
+                    maxWidth: '100%',
+                  }}
+                />
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 10 }}>
+                  Scan it with the QR scanner in the Steam app, not the camera. The code refreshes about every 20 seconds.
+                </p>
+              </>
+            ) : steamSigningIn ? (
               <div style={{ padding: '48px 0', color: 'var(--text-muted)', fontSize: 13 }}>
                 Generating Steam QR session...
               </div>
+            ) : (
+              <button type="button" className="button button-primary" onClick={() => void startSteamQrLogin()}>
+                New QR code
+              </button>
             )}
           </div>
         ) : (

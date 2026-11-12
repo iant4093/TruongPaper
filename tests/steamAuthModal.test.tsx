@@ -3,7 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 
-const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
+const invokeMock = vi.fn(async (cmd: string, _args?: unknown): Promise<unknown> =>
+  // Real sign-ins wait for the phone or a Steam Guard code, so keep them pending.
+  cmd.startsWith('steam_login') ? new Promise(() => {}) : null);
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
   convertFileSrc: (p: string) => p,
@@ -127,5 +129,27 @@ describe('<SteamAuthModal />', () => {
     });
     fireEvent.click(screen.getByText('Close'));
     expect(useAppStore.getState()).toMatchObject({ authModalOpen: false, qrMatrix: null, need2Fa: null });
+  });
+
+  it('Close stops a running QR sign-in', async () => {
+    await act(async () => {
+      useAppStore.setState({ authModalOpen: true });
+      render(<SteamAuthModal />);
+    });
+    expect(useAppStore.getState().steamSigningIn).toBe(true);
+    fireEvent.click(screen.getByText('Close'));
+    expect(invokeMock).toHaveBeenCalledWith('steam_cancel_login', undefined);
+    expect(useAppStore.getState().steamSigningIn).toBe(false);
+  });
+
+  it('closes and shows the account after the phone approves', async () => {
+    let approve: (account: string) => void = () => {};
+    invokeMock.mockImplementationOnce(() => new Promise((resolve) => { approve = resolve; }));
+    await act(async () => {
+      useAppStore.setState({ authModalOpen: true });
+      render(<SteamAuthModal />);
+    });
+    await act(async () => { approve('ian'); });
+    expect(useAppStore.getState()).toMatchObject({ authModalOpen: false, steamAccount: 'ian', steamSigningIn: false });
   });
 });

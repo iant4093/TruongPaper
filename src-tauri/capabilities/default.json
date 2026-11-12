@@ -47,6 +47,8 @@
     "allow-steam-login-credentials",
     "allow-steam-submit-2fa-code",
     "allow-steam-logout",
+    "allow-steam-cancel-login",
+    "allow-steam-account",
     "allow-steam-sync-local-folders",
     "allow-library-list-wallpapers",
     "allow-library-delete-wallpaper",

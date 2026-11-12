@@ -2078,9 +2078,11 @@ invoke<void>('photo_reset_history', { albumSlug?: string });
 invoke<WorkshopBrowsePage>('steam_browse_workshop', { query: WorkshopBrowseQuery }); // Guest public catalog: search, sort, page, days, tags
 invoke<WorkshopPreview>('steam_inspect_url', { urlOrId: string });
 invoke<string>('steam_download_workshop_item', { urlOrId: string, source?: 'steam' | 'ggnetwork' });
-invoke<void>('steam_login_qr');
-invoke<void>('steam_login_credentials', { username: string, password: string });
+invoke<string>('steam_login_qr'); // Resolves with the account name after the phone approves; times out after 3 minutes
+invoke<string>('steam_login_credentials', { username: string, password: string });
 invoke<void>('steam_submit_2fa_code', { code: string });
+invoke<void>('steam_cancel_login'); // Stops a running sign-in when the window closes
+invoke<string | null>('steam_account'); // Saved account name, or null when signed out
 invoke<void>('steam_logout');
 invoke<WallpaperItem[]>('steam_sync_local_folders');
 invoke<WallpaperItem[]>('library_list_wallpapers');

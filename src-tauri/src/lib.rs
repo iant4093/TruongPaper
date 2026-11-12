@@ -150,6 +150,8 @@ pub fn run() {
             commands::steam::steam_login_credentials,
             commands::steam::steam_submit_2fa_code,
             commands::steam::steam_logout,
+            commands::steam::steam_cancel_login,
+            commands::steam::steam_account,
             commands::steam::steam_sync_local_folders,
             commands::library::library_list_wallpapers,
             commands::library::library_delete_wallpaper,
@@ -230,7 +232,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 39, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 41, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

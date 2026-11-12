@@ -325,6 +325,9 @@ export function createMockBackend(
   ];
 
   let wallpapers = initialWallpapers();
+  let steamAccount: string | null = null;
+  let cancelSteamLogin: (() => void) | null = null;
+  let finishSteamLogin: (() => void) | null = null;
   let monitors: MonitorInfo[] = [
     {
       monitorId: 'DISPLAY-1',
@@ -591,7 +594,8 @@ export function createMockBackend(
     },
     steam_login_qr: () => {
       schedule(() => emitEvent('steam-auth://qr-matrix', { matrix: buildDemoQrMatrix() }), 400);
-      return null;
+      // Like DepotDownloader, wait until the phone approves (never in the preview) or a cancel.
+      return new Promise((resolve) => { cancelSteamLogin = () => resolve(null); });
     },
     steam_login_credentials: (args) => {
       if (!args.username || !args.password) throw new Error('Steam username and password are required');
@@ -599,13 +603,18 @@ export function createMockBackend(
         () => emitEvent('steam-auth://need-2fa', { kind: 'totp', prompt: 'Enter the code from your Steam Mobile Authenticator' }),
         300
       );
-      return null;
+      return new Promise((resolve) => {
+        finishSteamLogin = () => { steamAccount = String(args.username); resolve(steamAccount); };
+      });
     },
     steam_submit_2fa_code: (args) => {
       if (!/^[A-Za-z0-9]{5}$/.test(String(args.code ?? ''))) throw new Error('Invalid Steam Guard code');
+      schedule(() => finishSteamLogin?.(), 200);
       return null;
     },
-    steam_logout: () => null,
+    steam_logout: () => { steamAccount = null; return null; },
+    steam_cancel_login: () => { cancelSteamLogin?.(); cancelSteamLogin = null; return null; },
+    steam_account: () => steamAccount,
     steam_sync_local_folders: () => wallpapers,
     library_list_wallpapers: () => wallpapers,
     library_delete_wallpaper: (args) => {

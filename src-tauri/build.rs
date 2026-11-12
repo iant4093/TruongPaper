@@ -27,6 +27,8 @@ const APP_COMMANDS: &[&str] = &[
     "steam_login_credentials",
     "steam_submit_2fa_code",
     "steam_logout",
+    "steam_cancel_login",
+    "steam_account",
     "steam_sync_local_folders",
     "library_list_wallpapers",
     "library_delete_wallpaper",

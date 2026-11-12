@@ -66,10 +66,10 @@ it('sleep and unlock keep manual pause and overlapping system pause reasons', as
 });
 
 describe('store → invoke() contract', () => {
-  it('refreshAll loads status, monitors, library, settings and playlists', async () => {
+  it('refreshAll loads status, monitors, library, settings, playlists and the Steam account', async () => {
     await useAppStore.getState().refreshAll();
     expect(calls().map((c) => c[0]).sort()).toEqual(
-      ['library_list_wallpapers', 'monitors_list', 'photo_get_status', 'playlist_list', 'settings_get'].sort()
+      ['library_list_wallpapers', 'monitors_list', 'photo_get_status', 'playlist_list', 'settings_get', 'steam_account'].sort()
     );
     expect(useAppStore.getState().selectedMonitorId).toBe('M1');
     expect(useAppStore.getState().selectedWallpaperId).toBeNull();
@@ -149,6 +149,10 @@ describe('store → listen() event wiring', () => {
       ].sort()
     );
 
+    // A QR from a closed or replaced sign-in must not reopen the window.
+    listeners.get('steam-auth://qr-matrix')!({ payload: { matrix: [[true]] } });
+    expect(useAppStore.getState()).toMatchObject({ qrMatrix: null, authModalOpen: false });
+    useAppStore.setState({ steamSigningIn: true, authModalOpen: true });
     listeners.get('steam-auth://qr-matrix')!({ payload: { matrix: [[true]] } });
     expect(useAppStore.getState()).toMatchObject({ qrMatrix: [[true]], authModalOpen: true });
 

@@ -88,6 +88,7 @@ const InstalledWorkshopView: React.FC = () => {
   const syncLocalSteamFolders = useAppStore((s) => s.syncLocalSteamFolders);
   const openSteamAuthModal = useAppStore((s) => s.openSteamAuthModal);
   const steamLogout = useAppStore((s) => s.steamLogout);
+  const steamAccount = useAppStore((s) => s.steamAccount);
 
   const [filter, setFilter] = useState<WorkshopFilter>('all');
   const [query, setQuery] = useState('');
@@ -118,15 +119,19 @@ const InstalledWorkshopView: React.FC = () => {
         <div style={{ flex: 1, fontSize: 13 }}>
           <div style={{ fontWeight: 600 }}>Steam Account</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            {syncMsg ?? 'Sign in once to download Workshop items via DepotDownloader.'}
+            {syncMsg ?? (steamAccount
+              ? `Signed in as ${steamAccount}.`
+              : 'Not signed in. Sign in once to download Workshop items with Steam.')}
           </div>
         </div>
         <button type="button" className="button" onClick={openSteamAuthModal}>
-          <LogIn size={14} /> Manage Steam Account
+          <LogIn size={14} /> {steamAccount ? 'Switch Steam Account' : 'Sign in to Steam'}
         </button>
-        <button type="button" className="button" onClick={() => void steamLogout()}>
-          <LogOut size={14} /> Sign Out
-        </button>
+        {steamAccount && (
+          <button type="button" className="button" onClick={() => void steamLogout()}>
+            <LogOut size={14} /> Sign Out
+          </button>
+        )}
         <button type="button" className="button button-primary" onClick={() => void runSync()}>
           <RefreshCw size={14} /> Sync Local Steam Library
         </button>

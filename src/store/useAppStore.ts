@@ -78,7 +78,10 @@ export interface AppState {
   qrMatrix: boolean[][] | null;
   need2Fa: Steam2FaPrompt | null;
   steamAuthError: string | null;
-
+  /** Saved Steam account name; null when signed out. */
+  steamAccount: string | null;
+  /** True while a sign-in runs. QR and 2FA events from other runs are ignored. */
+  steamSigningIn: boolean;
   initAppListeners: (options?: InitListenerOptions) => Promise<UnlistenFn>;
   refreshAll: () => Promise<void>;
   rotateNextPhoto: (monitorId?: string) => Promise<void>;
@@ -128,6 +131,8 @@ export interface AppState {
 // `photo_add_album`, so re-adding is idempotent).
 const SAVED_ALBUMS_KEY = 'truongpaper.savedAlbums';
 const PRESETS_KEY = 'truongpaper.presets';
+/** Counts sign-in attempts so a replaced attempt cannot change the sign-in window. */
+let steamLoginRun = 0;
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -182,16 +187,19 @@ export const useAppStore = create<AppState>((set, get) => {
     qrMatrix: null,
     need2Fa: null,
     steamAuthError: null,
-
+    steamAccount: null,
+    steamSigningIn: false,
     refreshAll: async () => {
-      const [photoStatus, monitors, wallpapers, settings, playlists] = await Promise.all([
+      const [photoStatus, monitors, wallpapers, settings, playlists, steamAccount] = await Promise.all([
         invoke<PhotoStatus>('photo_get_status'),
         invoke<MonitorInfo[]>('monitors_list'),
         invoke<WallpaperItem[]>('library_list_wallpapers'),
         invoke<AppSettings>('settings_get'),
         invoke<Playlist[]>('playlist_list').catch(() => [] as Playlist[]),
+        invoke<string | null>('steam_account').catch(() => null),
       ]);
       set((state) => ({
+        steamAccount,
         photoStatus,
         monitors,
         // A display can disappear between refreshes, so drop a stale selection.
@@ -265,11 +273,12 @@ export const useAppStore = create<AppState>((set, get) => {
         }),
 
         listen<{ matrix: boolean[][] }>('steam-auth://qr-matrix', (event) => {
-          set({ qrMatrix: event.payload.matrix, authModalOpen: true });
+          // Only the running sign-in may show a QR code, and it never reopens a closed window.
+          if (get().steamSigningIn) set({ qrMatrix: event.payload.matrix });
         }),
 
         listen<Steam2FaPrompt>('steam-auth://need-2fa', (event) => {
-          set({ need2Fa: event.payload, authModalOpen: true });
+          if (get().steamSigningIn) set({ need2Fa: event.payload });
         }),
 
         listen<{ monitorId: string; state: string }>('policy://state-changed', (event) => {
@@ -417,24 +426,34 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     openSteamAuthModal: () => set({ authModalOpen: true, steamAuthError: null }),
-    closeSteamAuthModal: () =>
-      set({ authModalOpen: false, qrMatrix: null, need2Fa: null, steamAuthError: null }),
+    closeSteamAuthModal: () => {
+      const signingIn = get().steamSigningIn;
+      steamLoginRun += 1;
+      set({ authModalOpen: false, qrMatrix: null, need2Fa: null, steamAuthError: null, steamSigningIn: false });
+      // Stop the downloader too, or its refreshed QR codes keep arriving.
+      if (signingIn) void invoke('steam_cancel_login').catch(() => {});
+    },
 
     startSteamQrLogin: async () => {
-      set({ qrMatrix: null, need2Fa: null, authModalOpen: true, steamAuthError: null });
+      const run = ++steamLoginRun;
+      set({ qrMatrix: null, need2Fa: null, authModalOpen: true, steamAuthError: null, steamSigningIn: true });
       try {
-        await invoke('steam_login_qr');
+        const account = await invoke<string>('steam_login_qr');
+        if (run === steamLoginRun) set({ steamAccount: account, steamSigningIn: false, authModalOpen: false, qrMatrix: null });
       } catch (err) {
-        set({ steamAuthError: errorMessage(err) });
+        // A newer sign-in or a closed window replaced this run, so its error is stale.
+        if (run === steamLoginRun) set({ steamAuthError: errorMessage(err), steamSigningIn: false, qrMatrix: null });
       }
     },
 
     submitSteamCredentials: async (username, password) => {
-      set({ need2Fa: null, steamAuthError: null });
+      const run = ++steamLoginRun;
+      set({ need2Fa: null, steamAuthError: null, steamSigningIn: true });
       try {
-        await invoke('steam_login_credentials', { username, password });
+        const account = await invoke<string>('steam_login_credentials', { username, password });
+        if (run === steamLoginRun) set({ steamAccount: account, steamSigningIn: false, authModalOpen: false, need2Fa: null });
       } catch (err) {
-        set({ steamAuthError: errorMessage(err) });
+        if (run === steamLoginRun) set({ steamAuthError: errorMessage(err), steamSigningIn: false, need2Fa: null });
       }
     },
 
@@ -449,6 +468,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     steamLogout: async () => {
       await invoke('steam_logout');
+      set({ steamAccount: null, steamSigningIn: false });
     },
 
     selectMonitor: (monitorId) => set({ selectedMonitorId: monitorId }),

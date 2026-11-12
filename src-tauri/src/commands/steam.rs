@@ -40,8 +40,14 @@ pub struct SteamSession {
     downloads: Mutex<HashSet<String>>,
     two_fa_tx: Mutex<Option<(u64, mpsc::Sender<String>)>>,
     tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
+    /// Task ids of sign-in runs, so a closed sign-in window can stop its QR session.
+    logins: Mutex<HashSet<u64>>,
     next_id: AtomicU64,
 }
+
+/// DepotDownloader keeps refreshing the QR code and reconnecting. Stop after this long.
+const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const SIGN_IN_CANCELLED: &str = "Steam sign-in was cancelled.";
 
 struct DownloadGuard<'a> {
     downloads: &'a Mutex<HashSet<String>>,
@@ -81,12 +87,26 @@ impl SteamSession {
         self.tasks.lock().insert(id, handle);
         if let Some(two_fa) = two_fa {
             *self.two_fa_tx.lock() = Some((id, two_fa));
+            self.logins.lock().insert(id);
         }
         id
     }
 
+    /// Stops every running sign-in. Downloads keep running.
+    pub fn cancel_logins(&self) {
+        let ids: Vec<u64> = self.logins.lock().drain().collect();
+        let mut tasks = self.tasks.lock();
+        for id in ids {
+            if let Some(handle) = tasks.remove(&id) {
+                handle.abort();
+            }
+        }
+        *self.two_fa_tx.lock() = None;
+    }
+
     fn unregister(&self, id: u64) {
         self.tasks.lock().remove(&id);
+        self.logins.lock().remove(&id);
         let mut tx = self.two_fa_tx.lock();
         if tx.as_ref().is_some_and(|(owner, _)| *owner == id) {
             *tx = None;
@@ -106,6 +126,7 @@ impl SteamSession {
         for (_, handle) in self.tasks.lock().drain() {
             handle.abort();
         }
+        self.logins.lock().clear();
         *self.two_fa_tx.lock() = None;
     }
 }
@@ -165,6 +186,10 @@ async fn run_sidecar(
     mut on_event: impl FnMut(SidecarEvent) + Send,
 ) -> Result<(), String> {
     let bin = resolve_sidecar()?;
+    if signing_in {
+        // Only one sign-in at a time, so an old QR session cannot reopen the window later.
+        session.cancel_logins();
+    }
     let working_dir = session.working_dir.clone();
     let (two_fa_tx, two_fa_rx) = mpsc::channel::<String>(4);
     let (event_tx, mut event_rx) = mpsc::channel::<SidecarEvent>(64);
@@ -198,6 +223,7 @@ async fn run_sidecar(
             Err("Steam ended the sign-in without confirming the session.".into())
         }
         Ok(r) => r,
+        Err(err) if err.is_cancelled() && signing_in => Err(SIGN_IN_CANCELLED.into()),
         Err(err) if err.is_cancelled() => Err("Steam task was cancelled".into()),
         Err(err) => Err(err.to_string()),
     }
@@ -396,17 +422,38 @@ pub async fn steam_download_workshop_item(
     }
 }
 
-/// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves the account name on success.
+/// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves and returns the account name.
 #[tauri::command]
-pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let mut account = None;
-    run_sidecar(&state.steam, qr_login_args(), true, |ev| match &ev {
+    let run = run_sidecar(&state.steam, qr_login_args(), true, |ev| match &ev {
         SidecarEvent::LoggedInUsername(user) => account = Some(user.clone()),
         other => emit_auth(&app, other),
-    })
-    .await?;
+    });
+    let result = tokio::time::timeout(SIGN_IN_TIMEOUT, run).await;
+    if result.is_err() {
+        state.steam.cancel_logins();
+        return Err(
+            "The QR code expired. Close this window and sign in again for a new code.".into(),
+        );
+    }
+    result.unwrap()?;
     let account = account.ok_or_else(|| "Steam signed in, but the downloader did not report the account name. Try Username & 2FA.".to_string())?;
-    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))
+    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))?;
+    Ok(account)
+}
+
+/// Stops a QR or password sign-in that the user closed.
+#[tauri::command]
+pub async fn steam_cancel_login(state: State<'_, AppState>) -> Result<(), String> {
+    state.steam.cancel_logins();
+    Ok(())
+}
+
+/// Saved Steam account name, or `None` when signed out.
+#[tauri::command]
+pub async fn steam_account() -> Result<Option<String>, String> {
+    VAULT.get(SECRET_STEAM_USERNAME)
 }
 
 /// `-username -password` login; `steam-auth://need-2fa` is emitted when Steam Guard asks.
@@ -416,11 +463,13 @@ pub async fn steam_login_credentials(
     state: State<'_, AppState>,
     username: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let args = password_login_args(&username, &password).map_err(|e| e.to_string())?;
     drop(password);
     run_sidecar(&state.steam, args, true, |ev| emit_auth(&app, &ev)).await?;
-    VAULT.put(SECRET_STEAM_USERNAME, Some(username.trim()))
+    let account = username.trim().to_string();
+    VAULT.put(SECRET_STEAM_USERNAME, Some(&account))?;
+    Ok(account)
 }
 
 #[tauri::command]
@@ -511,6 +560,26 @@ mod tests {
         assert!(session.two_fa_sender().is_none());
         session.unregister(id);
         assert_eq!(session.running_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_logins_stops_sign_in_but_not_downloads() {
+        let session = SteamSession::default();
+        let sleep = || {
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            })
+        };
+        let (download, login) = (sleep(), sleep());
+        session.register(download.abort_handle(), None);
+        let (tx, _rx) = mpsc::channel(1);
+        session.register(login.abort_handle(), Some(tx));
+        session.cancel_logins();
+        assert!(login.await.unwrap_err().is_cancelled());
+        assert!(session.two_fa_sender().is_none());
+        assert_eq!(session.running_count(), 1);
+        assert!(!download.is_finished());
+        session.abort_all();
     }
 }
 

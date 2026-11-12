@@ -42,6 +42,7 @@ export const SettingsView: React.FC = () => {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const openSteamAuthModal = useAppStore((s) => s.openSteamAuthModal);
   const steamLogout = useAppStore((s) => s.steamLogout);
+  const steamAccount = useAppStore((s) => s.steamAccount);
 
   const [version, setVersion] = useState<string | null>(null);
   const [update, setUpdate] = useState<AvailableUpdate | null>(availableUpdate());
@@ -143,13 +144,18 @@ export const SettingsView: React.FC = () => {
       </div>
 
       <SectionTitle>Steam Account</SectionTitle>
-      <div className="card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div className="card" style={{ padding: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ flex: '1 1 100%', fontSize: 13, color: 'var(--text-secondary)' }}>
+          {steamAccount ? `Signed in as ${steamAccount}.` : 'Not signed in.'}
+        </div>
         <button type="button" className="button" onClick={openSteamAuthModal}>
-          <LogIn size={14} /> Sign in to Steam
+          <LogIn size={14} /> {steamAccount ? 'Switch Steam Account' : 'Sign in to Steam'}
         </button>
-        <button type="button" className="button" onClick={() => void steamLogout()}>
-          <LogOut size={14} /> Sign Out & Forget Refresh Token
-        </button>
+        {steamAccount && (
+          <button type="button" className="button" onClick={() => void steamLogout()}>
+            <LogOut size={14} /> Sign Out & Forget Refresh Token
+          </button>
+        )}
       </div>
 
       <SectionTitle>Updates</SectionTitle>

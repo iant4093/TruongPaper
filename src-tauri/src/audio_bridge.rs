@@ -18,6 +18,25 @@ struct AudioBridge {
     _worker: truongpaper_audio::AudioWorkerHandle,
 }
 
+/// Requested analyzer rate (`f32::to_bits`), applied to the running worker and to new ones.
+static TICK_HZ: AtomicU32 = AtomicU32::new(0x4270_0000); // 60.0
+
+/// Analyzer tick rate for a render fps cap: `min(60, fps)`, never below 5.
+pub fn analyzer_hz(fps: u32) -> f32 {
+    (fps as f32).clamp(5.0, 60.0)
+}
+
+/// Aligns the analyzer tick with the render frame rate (no-op when unchanged).
+pub fn set_tick_hz(hz: f32) {
+    let bits = hz.to_bits();
+    if TICK_HZ.swap(bits, Ordering::Relaxed) == bits {
+        return;
+    }
+    if let Some(bridge) = BRIDGE.lock().as_ref() {
+        bridge._worker.set_tick_hz(hz);
+    }
+}
+
 static BRIDGE: Mutex<Option<AudioBridge>> = parking_lot::const_mutex(None);
 
 fn start() -> AudioBridge {
@@ -31,6 +50,7 @@ fn start() -> AudioBridge {
         Arc::clone(&gain),
         Arc::clone(&all_paused),
     );
+    worker.set_tick_hz(f32::from_bits(TICK_HZ.load(Ordering::Relaxed)));
     tracing::info!("system audio loopback worker started");
     AudioBridge {
         read: Box::new(move || latest.load_full()),
@@ -109,6 +129,17 @@ mod tests {
         assert_eq!(sensitivity_gain(9.0), 5.0);
         assert_eq!(sensitivity_gain(-1.0), 0.0);
         assert_eq!(sensitivity_gain(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn analyzer_follows_the_fps_cap_up_to_sixty() {
+        assert_eq!(analyzer_hz(30), 30.0);
+        assert_eq!(analyzer_hz(144), 60.0);
+        assert_eq!(analyzer_hz(1), 5.0);
+        assert_eq!(
+            truongpaper_audio::tick_period_for_hz(30.0),
+            std::time::Duration::from_secs_f64(1.0 / 30.0)
+        );
     }
 
     #[test]

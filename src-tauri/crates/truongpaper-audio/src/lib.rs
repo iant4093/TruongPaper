@@ -329,7 +329,11 @@ pub struct AudioWorkerHandle {
 
 /// Analyzer tick period for a requested rate: clamped to 5..=60 Hz (non-finite = 60 Hz).
 pub fn tick_period_for_hz(hz: f32) -> Duration {
-    let hz = if hz.is_finite() { hz.clamp(5.0, 60.0) } else { 60.0 };
+    let hz = if hz.is_finite() {
+        hz.clamp(5.0, 60.0)
+    } else {
+        60.0
+    };
     Duration::from_secs_f64(1.0 / f64::from(hz))
 }
 

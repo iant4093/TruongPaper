@@ -19,10 +19,11 @@ pub mod video_runtime;
 pub mod web_runtime;
 
 pub use compositor::{
-    clamp_transition_duration, fitted_layer_sample, load_rgba_image, transition_progress,
-    upload_rgba_texture, next_view_id, downscale_for_display, photo_display_target, PHOTO_DISPLAY_HEADROOM, BlurUniforms, CompositorPipeline, CompositorUniforms, FitMode,
-    FittedSample, RgbaImageData, TransitionMode, DEFAULT_TRANSITION_DURATION_SECS,
-    MAX_PHOTO_TEXTURE_DIMENSION, MAX_TRANSITION_DURATION_SECS, MIN_TRANSITION_DURATION_SECS,
+    clamp_transition_duration, downscale_for_display, fitted_layer_sample, load_rgba_image,
+    next_view_id, photo_display_target, transition_progress, upload_rgba_texture, BlurUniforms,
+    CompositorPipeline, CompositorUniforms, FitMode, FittedSample, RgbaImageData, TransitionMode,
+    DEFAULT_TRANSITION_DURATION_SECS, MAX_PHOTO_TEXTURE_DIMENSION, MAX_TRANSITION_DURATION_SECS,
+    MIN_TRANSITION_DURATION_SECS, PHOTO_DISPLAY_HEADROOM,
 };
 pub use diagnostics::{DiagnosticsLog, MAX_DIAGNOSTICS};
 pub use effect_chain::{

@@ -25,18 +25,20 @@ use crate::models::UniversalAdjustments;
 use crate::scene_runtime::{SceneRuntime, SoundRng};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use truongpaper_core::AppSettings;
 use truongpaper_platform::ScreenRect;
 use truongpaper_renderer::{
-    clamp_transition_duration, transition_progress, upload_rgba_texture, CompositorPipeline,
-    CompositorUniforms, FitMode, FrameUniformInputs, RgbaImageData, SceneRenderer,
-    VideoFrameSource, VideoPlaybackSettings, WebCursorEventKind,
+    clamp_transition_duration, downscale_for_display, next_view_id, transition_progress,
+    upload_rgba_texture, CompositorPipeline, CompositorUniforms, FitMode, FrameUniformInputs,
+    RgbaImageData, SceneRenderer, VideoFrameSource, VideoPlaybackSettings, WebCursorEventKind,
 };
 use truongpaper_scenescript::CursorEventKind;
 use truongpaper_we_formats::WeVirtualFileSystem;
@@ -44,10 +46,17 @@ use truongpaper_we_formats::WeVirtualFileSystem;
 /// Frame interval used for `fps_cap = "display_native"` (Tauri reports no refresh rate) and
 /// for invalid values.
 pub const DEFAULT_FPS: u32 = 60;
-/// Poll interval while nothing animates (static photos, paused monitors, webview wallpapers).
-pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// How often the monitor geometry used for cursor normalization is refreshed.
-const GEOMETRY_REFRESH: Duration = Duration::from_secs(2);
+/// Longest sleep while nothing animates. The render thread blocks on the host's change signal
+/// ([`WallpaperHost::wait_for_change`]); this timeout only covers state that has no signal
+/// (display sleep, platform window notifications).
+pub const IDLE_WAIT: Duration = Duration::from_millis(250);
+/// Retry delay after a frame could not be drawn (surface lost / timeout).
+const RETRY_WAIT: Duration = Duration::from_millis(50);
+/// Safety-net refresh of the shared monitor geometry; real changes arrive as display
+/// notifications (`take_changed`) which invalidate the cache immediately.
+const GEOMETRY_REFRESH: Duration = Duration::from_secs(15);
+/// Age after which other threads re-query the shared monitor list.
+const LIVE_MONITORS_TTL: Duration = Duration::from_secs(5);
 /// Largest offscreen scene target edge.
 const MAX_SCENE_TARGET_DIMENSION: f32 = 8192.0;
 /// Scene load failed on a monitor: `{ monitorId, wallpaperId, message }`.
@@ -55,6 +64,12 @@ pub const EVENT_WALLPAPER_ERROR: &str = "wallpaper://error";
 /// Non-fatal scene problems (skipped scripts, fallback shaders, ...):
 /// `{ monitorId, wallpaperId, messages }`.
 pub const EVENT_WALLPAPER_DIAGNOSTICS: &str = "wallpaper://diagnostics";
+/// A newly applied wallpaper reached the screen: `{ monitorId, wallpaperId }` (`wallpaperId` is
+/// `null` for Photo API images). The UI clears the monitor's error card on it.
+pub const EVENT_WALLPAPER_LOADED: &str = "wallpaper://loaded";
+/// Span mode is on but this wallpaper cannot span (Web / Video / Application): it stays on its
+/// own display. `{ monitorId, wallpaperId, message }`; Span applies to photos and scenes.
+pub const EVENT_SPAN_UNSUPPORTED: &str = "wallpaper://span-unsupported";
 /// First delay before the render thread retries after a setup failure / panic.
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest delay between render thread restarts.
@@ -78,6 +93,163 @@ pub struct WallpaperDiagnosticsPayload {
     pub monitor_id: String,
     pub wallpaper_id: Option<String>,
     pub messages: Vec<String>,
+}
+
+/// Payload of [`EVENT_WALLPAPER_LOADED`].
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperLoadedPayload {
+    pub monitor_id: String,
+    pub wallpaper_id: Option<String>,
+}
+
+/// Payload of [`EVENT_SPAN_UNSUPPORTED`].
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpanUnsupportedPayload {
+    pub monitor_id: String,
+    pub wallpaper_id: Option<String>,
+    pub message: String,
+}
+
+/// Web, Video and Application wallpapers run in their own per-display window and cannot span.
+pub fn span_unsupported(active: &ActiveRuntime) -> bool {
+    matches!(
+        active,
+        ActiveRuntime::Webview { .. } | ActiveRuntime::Application { .. }
+    )
+}
+
+/// Emits [`EVENT_WALLPAPER_LOADED`] (also used by the webview manager once a page is up).
+pub fn emit_loaded(app: &AppHandle, monitor_id: &str, wallpaper_id: Option<String>) {
+    emit_json(
+        app,
+        EVENT_WALLPAPER_LOADED,
+        WallpaperLoadedPayload {
+            monitor_id: monitor_id.to_string(),
+            wallpaper_id,
+        },
+    );
+}
+
+/// Monitors whose last persisted source must be applied again after a display change: every
+/// monitor that appeared or came back (their runtime was dropped with the display, so they
+/// would stay black) plus those that disappeared (so the scheduler restores their closed
+/// window on replug). The scheduler skips ids it has no source for.
+pub fn hotplug_restore_ids(old: &[String], new: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = new.iter().filter(|id| !old.contains(id)).cloned().collect();
+    out.extend(old.iter().filter(|id| !new.contains(id)).cloned());
+    out
+}
+
+/// Largest pixel size a photo may be displayed at: the biggest display, or the union canvas
+/// in span mode. Photos are decoded no larger than this (plus headroom).
+pub fn photo_display_cap(geoms: &[MonitorGeometry], span: bool) -> (u32, u32) {
+    if geoms.is_empty() {
+        return (1920, 1080);
+    }
+    if span && geoms.len() > 1 {
+        let min_x = geoms
+            .iter()
+            .map(|g| i64::from(g.physical.0))
+            .min()
+            .unwrap_or(0);
+        let min_y = geoms
+            .iter()
+            .map(|g| i64::from(g.physical.1))
+            .min()
+            .unwrap_or(0);
+        let max_x = geoms
+            .iter()
+            .map(|g| i64::from(g.physical.0) + i64::from(g.physical.2))
+            .max()
+            .unwrap_or(0);
+        let max_y = geoms
+            .iter()
+            .map(|g| i64::from(g.physical.1) + i64::from(g.physical.3))
+            .max()
+            .unwrap_or(0);
+        return (
+            u32::try_from(max_x - min_x).unwrap_or(u32::MAX).max(1),
+            u32::try_from(max_y - min_y).unwrap_or(u32::MAX).max(1),
+        );
+    }
+    geoms.iter().fold((1, 1), |acc, g| {
+        (acc.0.max(g.physical.2), acc.1.max(g.physical.3))
+    })
+}
+
+/// What the render loop has seen since its last full pass, to decide whether it can go back to
+/// sleep without touching any state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleState {
+    /// The previous pass ended with nothing animating and nothing waiting to be redrawn.
+    pub was_idle: bool,
+    pub host_changed: bool,
+    pub suspended_changed: bool,
+    pub span_changed: bool,
+    /// A display / space / desktop notification arrived.
+    pub platform_event: bool,
+    pub photo_ready: bool,
+}
+
+/// `true` when the pass can be skipped entirely (no snapshot clone, no settings lookups).
+pub fn can_skip_idle_pass(s: IdleState) -> bool {
+    s.was_idle
+        && !s.host_changed
+        && !s.suspended_changed
+        && !s.span_changed
+        && !s.platform_event
+        && !s.photo_ready
+}
+
+/// How long the render loop sleeps after a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopWait {
+    /// Pace to the frame interval.
+    Frame,
+    /// A frame could not be presented: retry soon.
+    Retry,
+    /// Nothing to do: sleep on the host change signal.
+    Idle,
+}
+
+pub fn loop_wait(animating: bool, stalled: bool) -> LoopWait {
+    if animating {
+        LoopWait::Frame
+    } else if stalled {
+        LoopWait::Retry
+    } else {
+        LoopWait::Idle
+    }
+}
+
+/// Next frame deadline on a monotonic grid (`prev + interval`), re-anchored to `now` when the
+/// loop fell more than one interval behind (no catch-up burst).
+pub fn next_frame_deadline(prev: Instant, now: Instant, interval: Duration) -> Instant {
+    let next = prev + interval;
+    if next + interval < now {
+        now + interval
+    } else {
+        next
+    }
+}
+
+/// Present mode: vsync (`Fifo`) for a single display. With several displays one display's
+/// vsync wait would stall the others' acquire in the shared loop, so prefer a non-blocking
+/// mode and let the loop's frame timer pace them.
+pub fn pick_present_mode(
+    supported: &[wgpu::PresentMode],
+    multi_display: bool,
+) -> wgpu::PresentMode {
+    if multi_display {
+        for mode in [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate] {
+            if supported.contains(&mode) {
+                return mode;
+            }
+        }
+    }
+    wgpu::PresentMode::Fifo
 }
 
 /// `Some(current)` when there are diagnostics and they differ from what was last emitted.
@@ -209,9 +381,30 @@ pub fn surface_geometry_changed(current: &[MonitorGeometry], next: &[MonitorGeom
             || current.iter().any(|old| !next.iter().any(|new| old == new)))
 }
 
+static LIVE_CACHE: Mutex<Option<(Instant, Vec<crate::commands::monitor::LiveMonitor>)>> =
+    parking_lot::const_mutex(None);
+
+/// The monitor list, queried at most once per [`LIVE_MONITORS_TTL`] and shared by the render
+/// loop, the webview manager and Smart Pause (each query hops to the main thread).
+pub fn live_monitors_cached(app: &AppHandle) -> Vec<crate::commands::monitor::LiveMonitor> {
+    if let Some((at, list)) = LIVE_CACHE.lock().as_ref() {
+        if at.elapsed() < LIVE_MONITORS_TTL {
+            return list.clone();
+        }
+    }
+    let list = live_monitors(app);
+    *LIVE_CACHE.lock() = Some((Instant::now(), list.clone()));
+    list
+}
+
+/// Forgets the shared monitor list (a display notification arrived).
+pub fn invalidate_live_monitors() {
+    *LIVE_CACHE.lock() = None;
+}
+
 /// Geometry of every connected monitor (ids as in `commands::monitor::live_monitors`).
 pub fn monitor_geometries(app: &AppHandle) -> Vec<MonitorGeometry> {
-    live_monitors(app)
+    live_monitors_cached(app)
         .into_iter()
         .map(|m| {
             let (x, y, w, h) = m.logical_rect();
@@ -1003,6 +1196,109 @@ struct LayerTexture {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     aspect: f32,
+    /// Unique id for the compositor's bind-group / blur caches.
+    id: u64,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Photo decode worker (keeps decoding and resizing off the render thread)
+// ---------------------------------------------------------------------------------------------
+
+enum PhotoInput {
+    Path(PathBuf),
+    /// Already decoded by a command; may still be larger than the display needs.
+    Image(Arc<RgbaImageData>),
+}
+
+struct PhotoJob {
+    monitor_id: String,
+    generation: u64,
+    input: PhotoInput,
+    max_display: (u32, u32),
+    /// Webview preview still instead of a regular photo.
+    preview: bool,
+}
+
+struct PhotoDone {
+    monitor_id: String,
+    generation: u64,
+    preview: bool,
+    result: Result<Arc<RgbaImageData>, String>,
+}
+
+fn run_photo_job(job: PhotoJob) -> PhotoDone {
+    let PhotoJob {
+        monitor_id,
+        generation,
+        input,
+        max_display,
+        preview,
+    } = job;
+    let result = match input {
+        PhotoInput::Image(img) => Ok(img),
+        PhotoInput::Path(path) => crate::commands::photo::decode_photo_for_display(true, &path)
+            .and_then(|img| img.ok_or_else(|| format!("photo {} was not decoded", path.display()))),
+    }
+    .map(|img| downscale_for_display(img, max_display));
+    PhotoDone {
+        monitor_id,
+        generation,
+        preview,
+        result,
+    }
+}
+
+/// Newest job per `(monitor, preview)`: a burst of applies decodes only the last photo.
+fn coalesce_jobs(jobs: Vec<PhotoJob>) -> Vec<PhotoJob> {
+    let mut out: Vec<PhotoJob> = Vec::new();
+    for job in jobs {
+        match out
+            .iter_mut()
+            .find(|j| j.monitor_id == job.monitor_id && j.preview == job.preview)
+        {
+            Some(slot) => *slot = job,
+            None => out.push(job),
+        }
+    }
+    out
+}
+
+struct PhotoWorker {
+    jobs: mpsc::Sender<PhotoJob>,
+    done: mpsc::Receiver<PhotoDone>,
+}
+
+impl PhotoWorker {
+    fn spawn(host: Arc<WallpaperHost>) -> Option<Self> {
+        let (jobs, job_rx) = mpsc::channel::<PhotoJob>();
+        let (done_tx, done) = mpsc::channel::<PhotoDone>();
+        std::thread::Builder::new()
+            .name("truongpaper-photo-decode".into())
+            .spawn(move || {
+                while let Ok(first) = job_rx.recv() {
+                    let mut batch = vec![first];
+                    batch.extend(job_rx.try_iter());
+                    for job in coalesce_jobs(batch) {
+                        if done_tx.send(run_photo_job(job)).is_err() {
+                            return;
+                        }
+                        host.wake();
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, done })
+    }
+
+    fn submit(&self, job: PhotoJob) {
+        if self.jobs.send(job).is_err() {
+            tracing::warn!("photo decode worker is gone");
+        }
+    }
+
+    fn drain(&self) -> Vec<PhotoDone> {
+        self.done.try_iter().collect()
+    }
 }
 
 struct SceneState {
@@ -1014,6 +1310,10 @@ struct SceneState {
     _target: wgpu::Texture,
     render_view: wgpu::TextureView,
     sample_view: wgpu::TextureView,
+    /// Cache id of `sample_view` (compositor bind group).
+    view_id: u64,
+    /// Changes whenever the scene texture got new pixels (fit-blur is recomputed only then).
+    content_serial: u64,
     aspect: f32,
     /// Only the sound owner (see [`sound_owners`]) opens an audio output and plays the scene's
     /// sound layers / embedded-video audio, so a scene on several monitors is heard once.
@@ -1148,6 +1448,12 @@ struct MonitorRenderer {
     load_failed: bool,
     /// Scene load error waiting to be emitted as `wallpaper://error`.
     pending_error: Option<WallpaperErrorPayload>,
+    /// A photo for this generation is being decoded on the worker; the previous frame stays.
+    awaiting_photo: Option<u64>,
+    /// The last acquire failed: the loop retries soon instead of idling.
+    stalled: bool,
+    /// A scene was replaced by something else: tell the UI to drop its diagnostics.
+    diag_clear: Option<Option<String>>,
 }
 
 /// Renderer state that survives a surface rebuild of an unchanged display.
@@ -1159,6 +1465,7 @@ struct Carry {
     transition_started: Option<Instant>,
     last_uniforms: Option<CompositorUniforms>,
     started: Instant,
+    awaiting_photo: Option<u64>,
 }
 
 /// Prefers an sRGB swapchain format (photos are uploaded as `Rgba8UnormSrgb`).
@@ -1171,7 +1478,12 @@ fn pick_surface_format(caps: &wgpu::SurfaceCapabilities) -> Option<wgpu::Texture
 }
 
 impl MonitorRenderer {
-    fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, target: SurfaceTarget) -> Option<Self> {
+    fn new(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        target: SurfaceTarget,
+        multi_display: bool,
+    ) -> Option<Self> {
         let caps = target.surface.get_capabilities(adapter);
         let Some(format) = pick_surface_format(&caps) else {
             tracing::warn!(
@@ -1194,7 +1506,7 @@ impl MonitorRenderer {
             format,
             width: target.width.clamp(1, max),
             height: target.height.clamp(1, max),
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: pick_present_mode(&caps.present_modes, multi_display),
             desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
@@ -1217,6 +1529,9 @@ impl MonitorRenderer {
             started: Instant::now(),
             load_failed: false,
             pending_error: None,
+            awaiting_photo: None,
+            stalled: false,
+            diag_clear: None,
         })
     }
 
@@ -1231,6 +1546,7 @@ impl MonitorRenderer {
             transition_started,
             last_uniforms,
             started,
+            awaiting_photo,
             ..
         } = self;
         Carry {
@@ -1241,6 +1557,7 @@ impl MonitorRenderer {
             transition_started,
             last_uniforms,
             started,
+            awaiting_photo,
         }
     }
 
@@ -1252,21 +1569,42 @@ impl MonitorRenderer {
         self.transition_started = carry.transition_started;
         self.last_uniforms = carry.last_uniforms;
         self.started = carry.started;
+        self.awaiting_photo = carry.awaiting_photo;
         self.dirty = true;
     }
 
     /// Scene diagnostics to emit now: once after load and once after the first seconds of frames,
     /// each only when non-empty and changed.
     fn take_diagnostics(&mut self) -> Option<WallpaperDiagnosticsPayload> {
+        if let Some(wallpaper_id) = self.diag_clear.take() {
+            return Some(WallpaperDiagnosticsPayload {
+                monitor_id: self.monitor_id.clone(),
+                wallpaper_id,
+                messages: Vec::new(),
+            });
+        }
         let Content::Scene(scene) = &mut self.content else {
             return None;
         };
-        match scene.diag.stage {
-            0 => scene.diag.stage = 1,
-            1 if scene.runtime.elapsed() >= DIAGNOSTICS_SETTLE_SECS => scene.diag.stage = 2,
+        let first = match scene.diag.stage {
+            0 => {
+                scene.diag.stage = 1;
+                true
+            }
+            1 if scene.runtime.elapsed() >= DIAGNOSTICS_SETTLE_SECS => {
+                scene.diag.stage = 2;
+                false
+            }
             _ => return None,
-        }
-        let messages = diagnostics_to_emit(&scene.diagnostics(), &scene.diag.last_sent)?;
+        };
+        let current = scene.diagnostics();
+        // Every new load replaces the UI's list (an empty list clears the previous scene's
+        // messages); the settle snapshot only adds when something new showed up.
+        let messages = if first {
+            current
+        } else {
+            diagnostics_to_emit(&current, &scene.diag.last_sent)?
+        };
         scene.diag.last_sent = messages.clone();
         Some(WallpaperDiagnosticsPayload {
             monitor_id: self.monitor_id.clone(),
@@ -1285,6 +1623,8 @@ impl MonitorRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         host: &WallpaperHost,
+        worker: &PhotoWorker,
+        max_display: (u32, u32),
         rt: Option<&MonitorRuntime>,
     ) {
         let generation = rt.map_or(0, |r| r.generation);
@@ -1305,40 +1645,39 @@ impl MonitorRenderer {
         self.dirty = true;
         self.load_failed = false;
         let active = rt.map(|r| r.active.clone()).unwrap_or_default();
+        self.awaiting_photo = None;
+        if matches!(self.content, Content::Scene(_)) && !matches!(active, ActiveRuntime::Scene(_)) {
+            if let Content::Scene(old) = &self.content {
+                self.diag_clear = Some(old.wallpaper_id.clone());
+            }
+        }
         match active {
             ActiveRuntime::Photo { path } => {
                 let was_photo = matches!(self.content, Content::Photo);
                 self.content = Content::Photo;
-                let image: Option<Arc<RgbaImageData>> = host
-                    .take_pending_photo(&self.monitor_id, generation)
-                    .or_else(|| {
-                        let path = path.as_ref()?;
-                        match crate::commands::photo::decode_photo_for_display(true, path) {
-                            Ok(img) => img,
-                            Err(err) => {
-                                tracing::warn!("photo {}: {err}", path.display());
-                                None
-                            }
-                        }
-                    });
-                let Some(image) = image else {
-                    if !was_photo {
-                        self.from = None;
-                        self.to = None;
-                    }
+                if !was_photo {
+                    self.from = None;
+                    self.to = None;
+                    self.compositor.invalidate_caches();
+                }
+                let pending = host.take_pending_photo(&self.monitor_id, generation);
+                let input = match (pending, path) {
+                    (Some(img), _) => Some(PhotoInput::Image(img)),
+                    (None, Some(path)) => Some(PhotoInput::Path(path)),
+                    (None, None) => None,
+                };
+                let Some(input) = input else {
                     return;
                 };
-                let texture = upload_rgba_texture(device, queue, &image, "photo");
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let layer = LayerTexture {
-                    _texture: texture,
-                    view,
-                    aspect: image.aspect(),
-                };
-                // Photo -> photo changes run the configured transition.
-                self.from = if was_photo { self.to.take() } else { None };
-                self.transition_started = self.from.as_ref().map(|_| Instant::now());
-                self.to = Some(layer);
+                // The previous frame stays on screen until the worker delivers this one.
+                self.awaiting_photo = Some(generation);
+                worker.submit(PhotoJob {
+                    monitor_id: self.monitor_id.clone(),
+                    generation,
+                    input,
+                    max_display,
+                    preview: false,
+                });
             }
             ActiveRuntime::Scene(desc) => {
                 self.from = None;
@@ -1392,17 +1731,15 @@ impl MonitorRenderer {
                 self.from = None;
                 self.to = None;
                 self.transition_started = None;
-                if let Ok(Some(image)) =
-                    crate::commands::photo::decode_photo_for_display(true, &path)
-                {
-                    let texture = upload_rgba_texture(device, queue, &image, "webview_preview");
-                    self.to = Some(LayerTexture {
-                        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                        _texture: texture,
-                        aspect: image.aspect(),
-                    });
-                    self.content = Content::WebviewPreview;
-                }
+                self.compositor.invalidate_caches();
+                self.awaiting_photo = Some(generation);
+                worker.submit(PhotoJob {
+                    monitor_id: self.monitor_id.clone(),
+                    generation,
+                    input: PhotoInput::Path(path),
+                    max_display,
+                    preview: true,
+                });
             }
             ActiveRuntime::None
             | ActiveRuntime::Webview {
@@ -1413,13 +1750,57 @@ impl MonitorRenderer {
                 self.from = None;
                 self.to = None;
                 self.transition_started = None;
+                self.compositor.invalidate_caches();
             }
         }
     }
 
+    /// Uploads a decoded photo delivered by the worker. A result for a generation that has been
+    /// replaced since is dropped.
+    fn finish_photo(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, done: PhotoDone) {
+        if self.generation != Some(done.generation) || self.awaiting_photo != Some(done.generation)
+        {
+            return;
+        }
+        self.awaiting_photo = None;
+        let image = match done.result {
+            Ok(image) => image,
+            Err(err) => {
+                tracing::warn!("{err}");
+                return;
+            }
+        };
+        let label = if done.preview {
+            "webview_preview"
+        } else {
+            "photo"
+        };
+        let texture = upload_rgba_texture(device, queue, &image, label);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let layer = LayerTexture {
+            _texture: texture,
+            view,
+            aspect: image.aspect(),
+            id: next_view_id(),
+        };
+        if done.preview {
+            self.to = Some(layer);
+            self.content = Content::WebviewPreview;
+        } else {
+            // Photo -> photo changes run the configured transition.
+            self.from = self.to.take();
+            self.transition_started = self.from.as_ref().map(|_| Instant::now());
+            self.to = Some(layer);
+        }
+        self.compositor.invalidate_caches();
+        self.dirty = true;
+    }
+
     /// Acquires the next surface texture, reconfiguring on `Lost` / `Outdated`.
     fn acquire(&mut self, device: &wgpu::Device) -> Option<wgpu::SurfaceTexture> {
-        match self.surface.get_current_texture() {
+        let result = self.surface.get_current_texture();
+        self.stalled = result.is_err();
+        match result {
             Ok(frame) => Some(frame),
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.surface.configure(device, &self.config);
@@ -1531,6 +1912,8 @@ impl MonitorRenderer {
             if progress >= 1.0 && animating {
                 self.transition_started = None;
                 self.from = None;
+                // Do not keep the old photo alive through the cached bind group while idle.
+                self.compositor.release_bind_group();
             }
         }
         self.transition_started.is_some()
@@ -1580,6 +1963,7 @@ impl MonitorRenderer {
             return false;
         };
         let from_view = self.from.as_ref().map_or(&to.view, |f| &f.view);
+        let from_id = self.from.as_ref().map_or(to.id, |f| f.id);
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1588,18 +1972,34 @@ impl MonitorRenderer {
         });
         let blur = uniforms.from_fit_mode == FitMode::FitBlur as u32
             || uniforms.to_fit_mode == FitMode::FitBlur as u32;
+        // The backdrop is blurred once per source texture; without a transition source
+        // (`from` is `to`) one blur serves both slots.
+        let shared_blur = self.from.is_none();
         if blur {
-            self.compositor
-                .precompute_kawase_blur(device, &mut encoder, from_view, false);
-            self.compositor
-                .precompute_kawase_blur(device, &mut encoder, &to.view, true);
+            self.compositor.precompute_kawase_blur_keyed(
+                device,
+                &mut encoder,
+                &to.view,
+                true,
+                to.id,
+            );
+            if !shared_blur {
+                self.compositor.precompute_kawase_blur_keyed(
+                    device,
+                    &mut encoder,
+                    from_view,
+                    false,
+                    from_id,
+                );
+            }
         }
-        self.compositor.render_frame(
+        self.compositor.render_frame_keyed(
             device,
             queue,
             &mut encoder,
-            from_view,
-            &to.view,
+            (from_view, from_id),
+            (&to.view, to.id),
+            shared_blur,
             &view,
             uniforms,
         );
@@ -1680,19 +2080,26 @@ impl MonitorRenderer {
                 },
             );
             scene.has_frame = true;
+            scene.content_serial = next_view_id();
         }
+        // `from` and `to` are the same scene texture: blur it once, and only when the scene
+        // actually drew new pixels this frame.
         if uniforms.to_fit_mode == FitMode::FitBlur as u32 {
-            self.compositor
-                .precompute_kawase_blur(device, &mut encoder, &scene.sample_view, false);
-            self.compositor
-                .precompute_kawase_blur(device, &mut encoder, &scene.sample_view, true);
+            self.compositor.precompute_kawase_blur_keyed(
+                device,
+                &mut encoder,
+                &scene.sample_view,
+                true,
+                scene.content_serial,
+            );
         }
-        self.compositor.render_frame(
+        self.compositor.render_frame_keyed(
             device,
             queue,
             &mut encoder,
-            &scene.sample_view,
-            &scene.sample_view,
+            (&scene.sample_view, scene.view_id),
+            (&scene.sample_view, scene.view_id),
+            true,
             &view,
             &uniforms,
         );
@@ -1767,6 +2174,8 @@ fn load_scene(
         _target: target,
         render_view,
         sample_view,
+        view_id: next_view_id(),
+        content_serial: next_view_id(),
         aspect: w / h,
         sounds: None,
         sound_owner: false,
@@ -1933,9 +2342,10 @@ fn run_renderer(
             }
         });
     }
+    let multi_display = targets.len() > 1;
     let mut monitors: Vec<MonitorRenderer> = targets
         .drain(..)
-        .filter_map(|t| MonitorRenderer::new(&gpu.adapter, &gpu.device, t))
+        .filter_map(|t| MonitorRenderer::new(&gpu.adapter, &gpu.device, t, multi_display))
         .collect();
     if monitors.is_empty() {
         drop(monitors);
@@ -1948,6 +2358,17 @@ fn run_renderer(
         gpu.adapter.get_info().name
     );
     let mut cursor = CursorPoller::new();
+    let Some(worker) = PhotoWorker::spawn(Arc::clone(host)) else {
+        tracing::error!("could not start the photo decode worker");
+        monitors.clear();
+        return RunEnd::SetupFailed;
+    };
+    let mut last_epoch = u64::MAX;
+    let mut was_idle = false;
+    let mut last_suspended = false;
+    let mut last_span = false;
+    let mut next_frame_at = Instant::now();
+    let mut span_notified: HashSet<(String, u64)> = HashSet::new();
 
     let end = loop {
         if host.is_shutting_down() {
@@ -1958,7 +2379,10 @@ fn run_renderer(
         }
         let loop_start = Instant::now();
         desktop.pump();
+        let mut platform_event = false;
         if desktop.take_changed() {
+            platform_event = true;
+            invalidate_live_monitors();
             let next = monitor_geometries(app);
             // Windows must rebuild on Explorer restart even when geometry is unchanged.
             // macOS screen-parameter notifications alone must not tear down live drawables.
@@ -1971,6 +2395,13 @@ fn run_renderer(
                     diff.changed
                 );
                 // Unchanged displays keep their loaded scene / photo; only their surface is new.
+                let restore_ids = hotplug_restore_ids(
+                    &surface_geoms
+                        .iter()
+                        .map(|g| g.id.clone())
+                        .collect::<Vec<_>>(),
+                    &next.iter().map(|g| g.id.clone()).collect::<Vec<_>>(),
+                );
                 let mut carried: HashMap<String, Carry> = HashMap::new();
                 for m in monitors.drain(..) {
                     if diff.unchanged.contains(&m.monitor_id) {
@@ -1981,10 +2412,13 @@ fn run_renderer(
                 geoms = next;
                 surface_geoms = geoms.clone();
                 geoms_at = Instant::now();
-                monitors = desktop
-                    .create(app, instance, &geoms)
+                let targets = desktop.create(app, instance, &geoms);
+                let multi_display = targets.len() > 1;
+                monitors = targets
                     .into_iter()
-                    .filter_map(|t| MonitorRenderer::new(&gpu.adapter, &gpu.device, t))
+                    .filter_map(|t| {
+                        MonitorRenderer::new(&gpu.adapter, &gpu.device, t, multi_display)
+                    })
                     .map(|mut m| {
                         if let Some(carry) = carried.remove(&m.monitor_id) {
                             m.restore(carry);
@@ -1996,6 +2430,11 @@ fn run_renderer(
                     let ids: Vec<String> = geoms.iter().map(|g| g.id.clone()).collect();
                     host.retain_monitors(&ids);
                 }
+                // Displays that came back (or are new) lost their runtime: have the scheduler
+                // re-apply their persisted source so they are not left black.
+                for id in &restore_ids {
+                    crate::scheduler::note_monitor_disconnected(id);
+                }
                 host.set_live_renderer_attached(!monitors.is_empty());
                 crate::wallpaper_webview::reattach_all();
             } else {
@@ -2004,15 +2443,30 @@ fn run_renderer(
         }
         #[cfg(target_os = "macos")]
         if platform::take_space_changed() {
+            platform_event = true;
             for monitor in &mut monitors {
                 monitor.dirty = true;
             }
         }
         if geoms_at.elapsed() >= GEOMETRY_REFRESH {
+            invalidate_live_monitors();
             geoms = monitor_geometries(app);
             geoms_at = Instant::now();
         }
 
+        // Decoded photos delivered by the worker.
+        let finished = worker.drain();
+        let photo_ready = !finished.is_empty();
+        for done in finished {
+            if let Some(m) = monitors
+                .iter_mut()
+                .find(|m| m.monitor_id == done.monitor_id)
+            {
+                m.finish_photo(&gpu.device, &gpu.queue, done);
+            }
+        }
+
+        let epoch = host.epoch();
         let (interval, transition_secs, span_mode) = {
             let s = settings.lock();
             (
@@ -2021,13 +2475,55 @@ fn run_renderer(
                 is_span_mode(&s.multi_monitor_mode),
             )
         };
+        let suspended = crate::power::rendering_suspended();
+        if can_skip_idle_pass(IdleState {
+            was_idle,
+            host_changed: epoch != last_epoch,
+            suspended_changed: suspended != last_suspended,
+            span_changed: span_mode != last_span,
+            platform_event,
+            photo_ready,
+        }) {
+            host.wait_for_change(epoch, IDLE_WAIT);
+            continue;
+        }
+        last_epoch = epoch;
+        last_suspended = suspended;
+        last_span = span_mode;
+        crate::audio_bridge::set_tick_hz(crate::audio_bridge::analyzer_hz(
+            (1.0 / interval.as_secs_f32().max(0.001)).round() as u32,
+        ));
         let snapshot = host.monitors_snapshot();
         let events = host.drain_render_events();
-        let suspended = crate::power::rendering_suspended();
 
         let mut animating = false;
         // Span mode: every display shows the source of the span source monitor.
         let span_on = span_mode && geoms.len() > 1;
+        host.set_span_source(
+            span_on
+                .then(|| span_source_monitor(&geoms).map(str::to_string))
+                .flatten(),
+        );
+        if span_on {
+            for (id, rt) in &snapshot {
+                if span_unsupported(&rt.active) && span_notified.insert((id.clone(), rt.generation))
+                {
+                    emit_json(
+                        app,
+                        EVENT_SPAN_UNSUPPORTED,
+                        SpanUnsupportedPayload {
+                            monitor_id: id.clone(),
+                            wallpaper_id: rt.wallpaper_id.clone(),
+                            message: "Span applies to photos and scenes; this wallpaper stays on its own display.".into(),
+                        },
+                    );
+                }
+            }
+        }
+        if span_notified.len() > 64 {
+            span_notified.clear();
+        }
+        let max_display = photo_display_cap(&geoms, span_on);
         let span_rt = span_on
             .then(|| span_source_monitor(&geoms))
             .flatten()
@@ -2042,7 +2538,7 @@ fn run_renderer(
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
         for m in &mut monitors {
             let rt = rt_of(&m.monitor_id);
-            m.sync_content(&gpu.device, &gpu.queue, host, rt);
+            m.sync_content(&gpu.device, &gpu.queue, host, &worker, max_display, rt);
             if let Content::Scene(scene) = &mut m.content {
                 for RenderEvent::SceneProperties {
                     wallpaper_id,
@@ -2091,10 +2587,12 @@ fn run_renderer(
                 if m.generation == Some(rt.generation)
                     && rt.presented_generation != rt.generation
                     && !m.dirty
+                    && m.awaiting_photo.is_none()
                     && (matches!(m.content, Content::Scene(_))
                         || matches!(m.content, Content::Photo) && m.to.is_some())
+                    && host.note_presented(&m.monitor_id, rt.generation)
                 {
-                    host.note_presented(&m.monitor_id, rt.generation);
+                    emit_loaded(app, &m.monitor_id, rt.wallpaper_id.clone());
                 }
             }
             if let Some(err) = m.pending_error.take() {
@@ -2105,13 +2603,23 @@ fn run_renderer(
             }
         }
 
-        let budget = if animating {
-            interval
-        } else {
-            IDLE_POLL_INTERVAL.max(interval)
-        };
-        if let Some(rest) = budget.checked_sub(loop_start.elapsed()) {
-            std::thread::sleep(rest);
+        let stalled = monitors.iter().any(|m| m.stalled);
+        was_idle = !animating && !stalled;
+        match loop_wait(animating, stalled) {
+            LoopWait::Frame => {
+                // Monotonic frame grid: no drift, and no display's vsync paces the others.
+                next_frame_at = next_frame_deadline(next_frame_at, loop_start, interval);
+                if let Some(rest) = next_frame_at.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(rest);
+                }
+            }
+            LoopWait::Retry => {
+                host.wait_for_change(epoch, RETRY_WAIT);
+            }
+            LoopWait::Idle => {
+                next_frame_at = Instant::now();
+                host.wait_for_change(epoch, IDLE_WAIT);
+            }
         }
     };
 
@@ -2239,7 +2747,7 @@ mod tests {
         let i60 = frame_interval(&json!(60));
         assert!((i60.as_secs_f64() - 1.0 / 60.0).abs() < 1e-9);
         assert!(frame_interval(&json!(120)) < frame_interval(&json!(30)));
-        assert!(IDLE_POLL_INTERVAL >= frame_interval(&json!(30)));
+        assert!(IDLE_WAIT >= RETRY_WAIT);
     }
 
     #[test]
@@ -2466,6 +2974,166 @@ mod tests {
         assert_eq!(span_transform(&neg, "N").unwrap().offset, [0.0, 0.0]);
         assert_eq!(span_transform(&neg, "P").unwrap().offset, [0.5, 0.0]);
         assert_eq!(span_source_monitor(&neg), Some("P"));
+    }
+
+    fn job(monitor: &str, generation: u64, preview: bool) -> PhotoJob {
+        PhotoJob {
+            monitor_id: monitor.into(),
+            generation,
+            input: PhotoInput::Path(PathBuf::from("x.jpg")),
+            max_display: (100, 100),
+            preview,
+        }
+    }
+
+    #[test]
+    fn decode_jobs_keep_only_the_newest_per_monitor() {
+        let jobs = coalesce_jobs(vec![
+            job("A", 1, false),
+            job("B", 2, false),
+            job("A", 3, false),
+            job("A", 4, true),
+        ]);
+        let ids: Vec<(String, u64, bool)> = jobs
+            .iter()
+            .map(|j| (j.monitor_id.clone(), j.generation, j.preview))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("A".to_string(), 3, false),
+                ("B".to_string(), 2, false),
+                ("A".to_string(), 4, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_job_downscales_pending_images_off_thread() {
+        let big = Arc::new(RgbaImageData {
+            width: 400,
+            height: 200,
+            pixels: vec![9; 400 * 200 * 4],
+        });
+        let done = run_photo_job(PhotoJob {
+            monitor_id: "A".into(),
+            generation: 7,
+            input: PhotoInput::Image(big),
+            max_display: (100, 50),
+            preview: false,
+        });
+        let img = done.result.unwrap();
+        assert_eq!((done.generation, img.width, img.height), (7, 126, 63));
+        let missing = run_photo_job(job("A", 1, false));
+        assert!(missing.result.is_err());
+    }
+
+    #[test]
+    fn photo_cap_is_the_biggest_display_or_the_span_canvas() {
+        let mut a = geom("A", 0.0, 0.0, 1920.0, 1080.0, 1.0);
+        a.physical = (0, 0, 1920, 1080);
+        let mut b = geom("B", 1920.0, 0.0, 1920.0, 1080.0, 2.0);
+        b.physical = (1920, 0, 3840, 2160);
+        let geoms = [a, b];
+        assert_eq!(photo_display_cap(&geoms, false), (3840, 2160));
+        assert_eq!(photo_display_cap(&geoms, true), (5760, 2160));
+        assert_eq!(photo_display_cap(&[], false), (1920, 1080));
+    }
+
+    #[test]
+    fn idle_pass_is_skipped_only_when_nothing_changed() {
+        let idle = IdleState {
+            was_idle: true,
+            host_changed: false,
+            suspended_changed: false,
+            span_changed: false,
+            platform_event: false,
+            photo_ready: false,
+        };
+        assert!(can_skip_idle_pass(idle));
+        for changed in [
+            IdleState {
+                was_idle: false,
+                ..idle
+            },
+            IdleState {
+                host_changed: true,
+                ..idle
+            },
+            IdleState {
+                suspended_changed: true,
+                ..idle
+            },
+            IdleState {
+                span_changed: true,
+                ..idle
+            },
+            IdleState {
+                platform_event: true,
+                ..idle
+            },
+            IdleState {
+                photo_ready: true,
+                ..idle
+            },
+        ] {
+            assert!(!can_skip_idle_pass(changed));
+        }
+        assert_eq!(loop_wait(true, true), LoopWait::Frame);
+        assert_eq!(loop_wait(false, true), LoopWait::Retry);
+        assert_eq!(loop_wait(false, false), LoopWait::Idle);
+    }
+
+    #[test]
+    fn frame_deadlines_stay_on_a_grid_and_never_burst() {
+        let t0 = Instant::now();
+        let step = Duration::from_millis(16);
+        assert_eq!(
+            next_frame_deadline(t0, t0 + Duration::from_millis(5), step),
+            t0 + step
+        );
+        // Far behind: re-anchor instead of catching up with a burst of frames.
+        let late = t0 + Duration::from_secs(1);
+        assert_eq!(next_frame_deadline(t0, late, step), late + step);
+    }
+
+    #[test]
+    fn multi_display_avoids_blocking_present_modes() {
+        use wgpu::PresentMode::*;
+        assert_eq!(pick_present_mode(&[Fifo, Immediate], false), Fifo);
+        assert_eq!(pick_present_mode(&[Fifo, Immediate], true), Immediate);
+        assert_eq!(
+            pick_present_mode(&[Fifo, Mailbox, Immediate], true),
+            Mailbox
+        );
+        assert_eq!(pick_present_mode(&[Fifo], true), Fifo);
+    }
+
+    #[test]
+    fn hotplug_restores_added_and_removed_displays() {
+        let old = vec!["A".to_string(), "B".to_string()];
+        let new = vec!["A".to_string(), "C".to_string()];
+        assert_eq!(hotplug_restore_ids(&old, &new), vec!["C", "B"]);
+        assert!(hotplug_restore_ids(&old, &old).is_empty());
+    }
+
+    #[test]
+    fn only_web_video_and_application_wallpapers_cannot_span() {
+        assert!(!span_unsupported(&ActiveRuntime::Photo { path: None }));
+        assert!(!span_unsupported(&ActiveRuntime::None));
+        assert!(span_unsupported(&ActiveRuntime::Application {
+            exe_path: PathBuf::from("a.exe")
+        }));
+    }
+
+    #[test]
+    fn new_event_payloads_serialize_camel_case() {
+        let loaded = serde_json::to_value(WallpaperLoadedPayload {
+            monitor_id: "A".into(),
+            wallpaper_id: None,
+        })
+        .unwrap();
+        assert_eq!(loaded, json!({ "monitorId": "A", "wallpaperId": null }));
     }
 
     #[test]

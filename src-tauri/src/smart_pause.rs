@@ -1,4 +1,5 @@
-//! Smart Pause loop (docs/01 §6): every 250 ms (`POLICY_POLL_INTERVAL`) evaluate each monitor's
+//! Smart Pause loop (docs/01 §6): every 250 ms (`POLICY_POLL_INTERVAL`) while the policy is
+//! changing, backing off to once a second after a stable stretch, evaluate each monitor's
 //! playback policy (fullscreen / maximized occlusion, battery, display sleep) and emit
 //! `policy://state-changed` on transitions tracked by `truongpaper_platform::PolicyMonitor`.
 
@@ -13,9 +14,22 @@ use truongpaper_platform::{
     SystemPowerState, POLICY_POLL_INTERVAL,
 };
 
-/// Monitor list and battery state are refreshed every N ticks (2 s) instead of every 250 ms:
-/// both require OS round-trips (main-thread dispatch for the monitor list).
-const SLOW_REFRESH_TICKS: u32 = 8;
+/// Monitor list and battery state are refreshed every 2 s instead of every tick: both require
+/// OS round-trips (the monitor list comes from the shared cache in `desktop_host`).
+const SLOW_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+/// Ticks without any policy change after which polling backs off.
+const STABLE_TICKS_BEFORE_BACKOFF: u32 = 8;
+/// Poll interval once the policy has been stable (window list queries are the main cost).
+const STABLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Poll interval for the next tick: fast while things are changing, 1 Hz when stable.
+pub fn next_poll_interval(stable_ticks: u32) -> std::time::Duration {
+    if stable_ticks >= STABLE_TICKS_BEFORE_BACKOFF {
+        STABLE_POLL_INTERVAL
+    } else {
+        POLICY_POLL_INTERVAL
+    }
+}
 
 /// One evaluated tick: combines per-monitor occlusion with system state and returns the
 /// transitions to publish (pure; unit tested).
@@ -63,7 +77,7 @@ impl OcclusionProbe {
     }
 
     fn refresh_monitors(&mut self, app: &AppHandle) {
-        self.monitors = crate::commands::monitor::live_monitors(app)
+        self.monitors = crate::desktop_host::live_monitors_cached(app)
             .into_iter()
             .map(|m| {
                 let (x, y, w, h) = m.logical_rect();
@@ -155,7 +169,7 @@ impl OcclusionProbe {
     }
 
     fn refresh_monitors(&mut self, app: &AppHandle) {
-        self.monitors = crate::commands::monitor::live_monitors(app)
+        self.monitors = crate::desktop_host::live_monitors_cached(app)
             .into_iter()
             .map(|m| m.id)
             .collect();
@@ -177,14 +191,16 @@ pub fn spawn(app: AppHandle, settings: Arc<Mutex<AppSettings>>, host: Arc<Wallpa
             let mut pm = PolicyMonitor::new();
             let mut probe = OcclusionProbe::new();
             let mut on_battery = false;
-            let mut ticks_until_refresh: u32 = 0;
+            let mut refresh_at = std::time::Instant::now();
+            let mut first = true;
+            let mut stable_ticks: u32 = 0;
             loop {
-                if ticks_until_refresh == 0 {
+                if first || refresh_at.elapsed() >= SLOW_REFRESH {
+                    first = false;
                     probe.refresh_monitors(&app);
                     on_battery = truongpaper_platform::is_on_battery_or_low_power();
-                    ticks_until_refresh = SLOW_REFRESH_TICKS;
+                    refresh_at = std::time::Instant::now();
                 }
-                ticks_until_refresh -= 1;
 
                 let (prefs, battery) = prefs_from(&settings.lock());
                 let system = SystemPowerState {
@@ -192,13 +208,19 @@ pub fn spawn(app: AppHandle, settings: Arc<Mutex<AppSettings>>, host: Arc<Wallpa
                     display_asleep: crate::power::rendering_suspended(),
                 };
                 let occlusion = probe.evaluate(prefs);
-                for change in evaluate_tick(&mut pm, &occlusion, system, battery) {
+                let changes = evaluate_tick(&mut pm, &occlusion, system, battery);
+                stable_ticks = if changes.is_empty() {
+                    stable_ticks.saturating_add(1)
+                } else {
+                    0
+                };
+                for change in changes {
                     if let Some(policy) = pm.get(&change.monitor_id) {
                         host.set_policy(&change.monitor_id, policy);
                     }
                     let _ = app.emit(EVENT_POLICY_STATE_CHANGED, change);
                 }
-                std::thread::sleep(POLICY_POLL_INTERVAL);
+                std::thread::sleep(next_poll_interval(stable_ticks));
             }
         });
     if let Err(err) = spawned {
@@ -240,6 +262,13 @@ mod tests {
         assert_eq!(changes[0].state, "paused_display_sleep");
         // Unplugged monitor B is forgotten and re-reported when it comes back.
         assert_eq!(pm.get("B"), None);
+    }
+
+    #[test]
+    fn polling_backs_off_when_stable() {
+        assert_eq!(next_poll_interval(0), POLICY_POLL_INTERVAL);
+        assert_eq!(next_poll_interval(7), POLICY_POLL_INTERVAL);
+        assert_eq!(next_poll_interval(8), STABLE_POLL_INTERVAL);
     }
 
     #[test]

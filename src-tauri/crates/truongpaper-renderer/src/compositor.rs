@@ -465,6 +465,11 @@ impl CompositorPipeline {
         true
     }
 
+    /// Drops only the cached compositor bind group (and the texture references it holds).
+    pub fn release_bind_group(&mut self) {
+        self.cached_bg = None;
+    }
+
     /// Forgets cached blur results and bind groups (releases the textures they reference).
     pub fn invalidate_caches(&mut self) {
         self.blur_keys = [None, None];

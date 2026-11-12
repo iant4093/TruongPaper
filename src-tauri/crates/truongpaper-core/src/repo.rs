@@ -168,20 +168,38 @@ pub fn get_cached_photo(conn: &Connection, photo_id: &str) -> CoreResult<Option<
     Ok(row)
 }
 
-/// Oldest-downloaded unused photo whose file still exists. Rows whose file vanished from disk
-/// are healed (`file_present = 0`) and the search continues.
+#[derive(Clone, Copy)]
+pub enum RotationPhotoPool {
+    Unused,
+    Favorites,
+    PreviouslyShown,
+}
+
+/// Picks the oldest unused or least recently shown eligible photo. Missing files are skipped
+/// and their cache rows are marked unavailable.
 fn pop_candidate(
     conn: &Connection,
     app_data_dir: &Path,
     filter: &PhotoFilter,
     exclude_ids: &[String],
+    pool: RotationPhotoPool,
 ) -> CoreResult<Option<(String, PathBuf)>> {
     let (clause, mut values) = filter_clause(filter);
     let (excl, excl_values) = exclusion_clause("id", exclude_ids);
     values.extend(excl_values);
+    let (predicate, order) = match pool {
+        RotationPhotoPool::Unused => (UNUSED_PREDICATE, "downloaded_at ASC, id"),
+        RotationPhotoPool::Favorites => (
+            "file_present = 1 AND is_favorite = 1 AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
+            "last_shown_at ASC, downloaded_at ASC, id",
+        ),
+        RotationPhotoPool::PreviouslyShown => (
+            "file_present = 1 AND last_shown_at IS NOT NULL AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
+            "last_shown_at ASC, downloaded_at ASC, id",
+        ),
+    };
     let sql = format!(
-        "SELECT id, file_path FROM photos_cache WHERE {UNUSED_PREDICATE}{clause}{excl}
-         ORDER BY downloaded_at ASC LIMIT 1"
+        "SELECT id, file_path FROM photos_cache WHERE {predicate}{clause}{excl} ORDER BY {order} LIMIT 1"
     );
     loop {
         let row: Option<(String, String)> = conn
@@ -210,7 +228,7 @@ pub fn pop_next_queued_photo(
     app_data_dir: &Path,
     filter: &PhotoFilter,
 ) -> CoreResult<Option<(String, PathBuf)>> {
-    pop_candidate(conn, app_data_dir, filter, &[])
+    pop_candidate(conn, app_data_dir, filter, &[], RotationPhotoPool::Unused)
 }
 
 /// Like [`pop_next_queued_photo`] but skips ids already on screen and returns an IPC item.
@@ -220,7 +238,24 @@ pub fn pop_next_queued_photo_with_exclusions(
     filter: &PhotoFilter,
     currently_displayed_ids: &[String],
 ) -> CoreResult<Option<PhotoItem>> {
-    match pop_candidate(conn, app_data_dir, filter, currently_displayed_ids)? {
+    pick_cached_rotation_photo(
+        conn,
+        app_data_dir,
+        filter,
+        currently_displayed_ids,
+        RotationPhotoPool::Unused,
+    )
+}
+
+/// Reads a rotation candidate from disk without updating its shown history.
+pub fn pick_cached_rotation_photo(
+    conn: &Connection,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    exclude_ids: &[String],
+    pool: RotationPhotoPool,
+) -> CoreResult<Option<PhotoItem>> {
+    match pop_candidate(conn, app_data_dir, filter, exclude_ids, pool)? {
         Some((id, _)) => query_photo_item_by_id(conn, app_data_dir, &id),
         None => Ok(None),
     }
@@ -901,7 +936,11 @@ pub fn load_active_filter(
     };
     let filter = PhotoFilter {
         album_slugs,
-        featured_only: settings.filter_mode == FilterMode::Featured || settings.featured_only,
+        featured_only: match settings.filter_mode {
+            FilterMode::All => false,
+            FilterMode::Featured => true,
+            FilterMode::Albums => settings.featured_only,
+        },
         required_orientation,
         auto_reset_history_on_exhaustion: settings.exhaustion_auto_reset,
     };
@@ -1326,6 +1365,11 @@ mod tests {
         assert!(f.featured_only && !f.auto_reset_history_on_exhaustion);
         assert_eq!(f.required_orientation.as_deref(), Some("portrait"));
         assert!(displayed.is_empty());
+
+        save_photo_filter(&conn, FilterMode::All, true).unwrap();
+        let (_, all, _) = load_active_filter(&conn, None).unwrap();
+        assert!(!all.featured_only);
+        assert!(all.album_slugs.is_empty());
 
         remove_saved_album(&conn, "cape-horn-11-7").unwrap();
         assert!(list_saved_albums(&conn).unwrap().is_empty());

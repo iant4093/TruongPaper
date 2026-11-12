@@ -291,6 +291,10 @@ export const PhotosApiView: React.FC = () => {
               {photoDims(currentPhoto)} · {formatBytes(currentPhoto.bytes)}
             </div>
             <div className="photo-actions">
+              <button type="button" className="button" disabled={!activeMonitorId || photoActionPending}
+                onClick={() => void runPhotoAction(() => rotateNextPhoto(activeMonitorId))}>
+                <SkipForward size={14} /> Next photo
+              </button>
               <button
                 type="button"
                 className="button"
@@ -319,7 +323,7 @@ export const PhotosApiView: React.FC = () => {
 
       <section ref={favoritesSection} className="photo-favorites" aria-labelledby="photo-favorites-title">
         <h3 className="section-title" id="photo-favorites-title">Favorites{favorites.length ? ` · ${favorites.length}` : ''}</h3>
-        <p className="photo-section-description">Favorited photos stay on disk when the cache is cleared.</p>
+        <p className="photo-section-description">Favorites stay on disk and can come up again when they match your photo filters.</p>
         {favorites.length ? (
           <div style={cardGrid}>
             {favorites.map((photo) => (
@@ -421,7 +425,7 @@ export const PhotosApiView: React.FC = () => {
         <div style={{ marginTop: 14 }}>
           <ToggleRow
             label="Auto-reset album/filter history when all photos have been shown (Recommended)"
-            description="When off, TruongPaper holds on the last photo once the pool is exhausted."
+            description="When off, only new photos and matching favorites rotate."
             checked={settings?.exhaustionAutoReset ?? true}
             onChange={(next) => void updateSettings({ exhaustionAutoReset: next })}
           />

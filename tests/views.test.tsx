@@ -194,6 +194,8 @@ describe('Main studio window', () => {
     await act(async () => { fireEvent.click(tile.getByRole('button', { name: 'Apply' })); });
     expect(useAppStore.getState().photoStatus!.currentPhotoByMonitor['DISPLAY-1']?.id).toBe(before.id);
     expect(tile.getByRole('button', { name: 'Current' })).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Next photo' })); });
+    expect(useAppStore.getState().photoStatus!.currentPhotoByMonitor['DISPLAY-1']?.id).not.toBe(before.id);
   });
 });
 

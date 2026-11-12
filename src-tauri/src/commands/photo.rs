@@ -2,7 +2,7 @@
 //!
 //! The doc's inline types (`FilterMode`, `PhotoItem`, `SavedAlbum`, `PublicCatalogAlbum`,
 //! `PhotoStatus`) and SQL helpers (`query_photo_item_by_id`,
-//! `pop_next_queued_photo_with_exclusions`, `evict_old_cached_files_preserving_history_unlocked`)
+//! `pick_cached_rotation_photo`, `evict_old_cached_files_preserving_history_unlocked`)
 //! are provided by `truongpaper-photo-api` / `truongpaper-core` and reused here. Those helpers
 //! bind every value as a SQL parameter instead of interpolating strings.
 
@@ -139,13 +139,19 @@ impl PhotoServiceState {
         Ok(())
     }
 
-    fn pop(&self, filter: &PhotoFilter, displayed: &[String]) -> Result<Option<PhotoItem>, String> {
+    fn pop(
+        &self,
+        filter: &PhotoFilter,
+        displayed: &[String],
+        pool: RotationPhotoPool,
+    ) -> Result<Option<PhotoItem>, String> {
         loop {
-            let item = pop_next_queued_photo_with_exclusions(
+            let item = pick_cached_rotation_photo(
                 &self.db.lock(),
                 &self.app_data_dir,
                 filter,
                 displayed,
+                pool,
             )
             .map_err(e)?;
             let Some(mut item) = item else {
@@ -176,6 +182,31 @@ impl PhotoServiceState {
                 return Ok(Some(item));
             }
         }
+    }
+
+    fn rotation_candidate(
+        &self,
+        filter: &PhotoFilter,
+        displayed: &[String],
+        prefer_favorite: bool,
+    ) -> Result<Option<PhotoItem>, String> {
+        use RotationPhotoPool::{Favorites, PreviouslyShown, Unused};
+        let fallback = if filter.auto_reset_history_on_exhaustion {
+            Some(PreviouslyShown)
+        } else if !prefer_favorite {
+            Some(Favorites)
+        } else {
+            None
+        };
+        for pool in [prefer_favorite.then_some(Favorites), Some(Unused), fallback]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(item) = self.pop(filter, displayed, pool)? {
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
     }
 
     async fn refill(
@@ -394,7 +425,7 @@ pub(crate) async fn rotate_photo_next(
             unchanged && photo_rotation_allowed(&source, monitor_id.is_some(), photo_runtime)
         })
         .collect();
-    rotate_photo_targets(app, state, monitor_id, targets).await
+    rotate_photo_targets(app, state, monitor_id, targets, false).await
 }
 
 /// Only called by `show_photo` while its caller holds this monitor's apply lock.
@@ -402,10 +433,18 @@ pub(crate) async fn rotate_photo_for_locked_monitor(
     app: &AppHandle,
     state: &PhotoServiceState,
     monitor_id: &str,
+    mix_favorites: bool,
 ) -> Result<PhotoItem, String> {
     let live = live_monitor_orientations(app);
     let targets = select_rotation_targets(&live, &HashMap::new(), Some(monitor_id));
-    rotate_photo_targets(app, state, Some(monitor_id.to_string()), targets).await
+    rotate_photo_targets(
+        app,
+        state,
+        Some(monitor_id.to_string()),
+        targets,
+        mix_favorites,
+    )
+    .await
 }
 
 fn photo_rotation_allowed(source: &WallpaperSource, explicit: bool, photo_runtime: bool) -> bool {
@@ -418,6 +457,7 @@ async fn rotate_photo_targets(
     state: &PhotoServiceState,
     monitor_id: Option<String>,
     target_monitors: Vec<(String, bool)>,
+    mix_favorites: bool,
 ) -> Result<PhotoItem, String> {
     if target_monitors.is_empty() {
         return Err("No monitor is showing the Photos API source".into());
@@ -450,10 +490,10 @@ async fn rotate_photo_targets(
         base_filter.required_orientation =
             skip_mismatched.then(|| display_orientation(target_monitors[0].1).as_str().into());
         let mut item =
-            photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids).await?;
+            photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids, false).await?;
         let mut attempts = 0;
         let (chosen, decoded) = loop {
-            let chosen = item.ok_or_else(|| "No eligible photos available in queue".to_string())?;
+            let chosen = item.ok_or_else(no_other_photo_ready)?;
             match prepare_photo(host.as_ref(), &chosen).await {
                 Ok(decoded) => break (chosen, decoded),
                 Err(err) => {
@@ -466,7 +506,7 @@ async fn rotate_photo_targets(
                         return Err(err);
                     }
                     displayed_ids.push(chosen.id.clone());
-                    item = state.pop(&base_filter, &displayed_ids)?;
+                    item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
                 }
             }
         };
@@ -488,8 +528,17 @@ async fn rotate_photo_targets(
             base_filter.required_orientation =
                 skip_mismatched.then(|| display_orientation(*is_portrait).as_str().into());
 
-            let mut item =
-                photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids).await?;
+            // Keep the API queue first for manual Next and occasionally mix in a favorite
+            // for automatic rotation. A low queue still triggers a background refill.
+            let prefer_favorite = mix_favorites && rand::random::<u8>() < 64;
+            let mut item = photo_for_rotation(
+                state,
+                &base_filter,
+                max_cache_bytes,
+                &displayed_ids,
+                prefer_favorite,
+            )
+            .await?;
 
             let mut attempts = 0;
             while let Some(chosen) = item.take() {
@@ -503,7 +552,7 @@ async fn rotate_photo_targets(
                         displayed_ids.push(chosen.id.clone());
                         attempts += 1;
                         if attempts < MAX_DECODE_ATTEMPTS {
-                            item = state.pop(&base_filter, &displayed_ids)?;
+                            item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
                         }
                         continue;
                     }
@@ -532,13 +581,11 @@ async fn rotate_photo_targets(
         });
     }
 
-    last_applied_item.ok_or_else(|| {
-        if skip_mismatched {
-            "No eligible photo matches the selected display orientation yet".into()
-        } else {
-            "No eligible photo found".into()
-        }
-    })
+    last_applied_item.ok_or_else(no_other_photo_ready)
+}
+
+fn no_other_photo_ready() -> String {
+    "No other photo is ready for this display yet. Try a different photo source or refill the queue.".into()
 }
 
 async fn photo_for_rotation(
@@ -546,16 +593,17 @@ async fn photo_for_rotation(
     filter: &PhotoFilter,
     max_cache_bytes: u64,
     displayed_ids: &[String],
+    prefer_favorite: bool,
 ) -> Result<Option<PhotoItem>, String> {
-    if let Some(item) = state.pop(filter, displayed_ids)? {
+    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
         return Ok(Some(item));
     }
     let _refill = state.refill_mutex.lock().await;
-    if let Some(item) = state.pop(filter, displayed_ids)? {
+    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
         return Ok(Some(item));
     }
     let _ = state.refill(filter, max_cache_bytes, displayed_ids).await;
-    state.pop(filter, displayed_ids)
+    state.rotation_candidate(filter, displayed_ids, prefer_favorite)
 }
 
 /// 4. `photo_trigger_refill`
@@ -1033,11 +1081,77 @@ mod tests {
             required_orientation: Some("portrait".into()),
             ..Default::default()
         };
-        assert!(state.pop(&filter, &[]).unwrap().is_none());
+        assert!(state
+            .rotation_candidate(&filter, &[], false)
+            .unwrap()
+            .is_none());
         filter.required_orientation = Some("landscape".into());
-        let photo = state.pop(&filter, &[]).unwrap().unwrap();
+        let photo = state
+            .rotation_candidate(&filter, &[], false)
+            .unwrap()
+            .unwrap();
         assert_eq!((photo.width, photo.height), (Some(1), Some(1)));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn next_from_a_favorite_uses_fresh_photos_then_reuses_eligible_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "truongpaper-photo-favorite-rotation-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = service();
+        state.app_data_dir = dir.clone();
+        for (id, favorite, shown) in [
+            ("current", true, true),
+            ("favorite", true, true),
+            ("cached", false, true),
+            ("fresh", false, false),
+        ] {
+            let rel_path = format!("{id}.png");
+            std::fs::write(dir.join(&rel_path), TINY_PNG).unwrap();
+            let mut conn = state.db.lock();
+            upsert_cached_photo(
+                &conn,
+                &NewCachedPhoto {
+                    id: id.into(),
+                    rel_path,
+                    album_slug: "album".into(),
+                    album_url: "https://example.com/album".into(),
+                    featured: true,
+                    fallback_used: false,
+                    width: 1,
+                    height: 1,
+                    bytes: TINY_PNG.len() as u64,
+                    downloaded_at: 1,
+                },
+            )
+            .unwrap();
+            if shown {
+                mark_photo_shown(&mut conn, id).unwrap();
+            }
+            set_favorite(&conn, id, favorite).unwrap();
+        }
+        let mut filter = PhotoFilter {
+            required_orientation: Some("landscape".into()),
+            auto_reset_history_on_exhaustion: true,
+            ..Default::default()
+        };
+        let mut displayed = vec!["current".into()];
+        let pick = |filter: &PhotoFilter, displayed: &[String], prefer_favorite| {
+            state
+                .rotation_candidate(filter, displayed, prefer_favorite)
+                .unwrap()
+                .map(|photo| photo.id)
+        };
+        assert_eq!(pick(&filter, &displayed, false).as_deref(), Some("fresh"));
+        assert_eq!(pick(&filter, &displayed, true).as_deref(), Some("favorite"));
+        displayed.extend(["fresh".into(), "favorite".into()]);
+        assert_eq!(pick(&filter, &displayed, false).as_deref(), Some("cached"));
+        filter.auto_reset_history_on_exhaustion = false;
+        assert_eq!(pick(&filter, &displayed, false), None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

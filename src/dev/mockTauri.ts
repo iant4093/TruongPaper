@@ -366,7 +366,7 @@ export function createMockBackend(
 
   const photoStatus = (): PhotoStatus => ({
     filterMode,
-    featuredOnly,
+    featuredOnly: filterMode === 'featured' || (filterMode === 'albums' && featuredOnly),
     unusedQueue: queue,
     favoritePhotos: [...favorites.values()],
     currentPhotoByMonitor: currentByMonitor,

@@ -603,7 +603,9 @@ pub(crate) async fn show_photo(
         }
         None => {
             // The source is already persisted; an empty queue / offline API is not fatal here.
-            if let Err(err) = rotate_photo_for_locked_monitor(app, photo, monitor_id).await {
+            if let Err(err) =
+                rotate_photo_for_locked_monitor(app, photo, monitor_id, draw_new).await
+            {
                 tracing::warn!("no photo available for {monitor_id} yet: {err}");
                 if let Some(previous) = state.host.monitor(monitor_id).filter(|rt| {
                     !matches!(rt.active, ActiveRuntime::None | ActiveRuntime::Photo { .. })

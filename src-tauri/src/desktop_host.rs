@@ -1787,6 +1787,8 @@ impl MonitorRenderer {
             Ok(image) => image,
             Err(err) => {
                 tracing::warn!("{err}");
+                // Lets the outgoing Web/Video window go instead of covering the desktop.
+                self.load_failed = true;
                 return;
             }
         };
@@ -2616,6 +2618,10 @@ fn run_renderer(
                     && host.note_presented(&m.monitor_id, rt.generation)
                 {
                     emit_loaded(app, &m.monitor_id, rt.wallpaper_id.clone());
+                } else if m.load_failed && m.generation == Some(rt.generation) {
+                    // Nothing will be presented; release the outgoing Web/Video window so the
+                    // error card is not hidden behind the old wallpaper.
+                    host.note_presented(&m.monitor_id, rt.generation);
                 }
             }
             if let Some(err) = m.pending_error.take() {

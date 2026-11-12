@@ -27,7 +27,6 @@ afterEach(() => {
 });
 
 const NEON = 'workshop:2841928371';
-const openDetails = (title: string) => fireEvent.click(screen.getByRole('button', { name: `Details for ${title}` }));
 const tileNames = () => screen.getAllByRole('button', { name: /^Select / }).map((b) => b.getAttribute('aria-label')!.replace('Select ', ''));
 
 describe('wallpaper load errors', () => {
@@ -262,7 +261,8 @@ describe('settings and displays additions', () => {
 
   it('toggles span mode and writes per-display volume once after the drag', async () => {
     await open('Displays');
-    await act(async () => { fireEvent.click(await screen.findByRole('checkbox', { name: /Span one wallpaper/ }, { timeout: 5000 })); });
+    const span = await screen.findByRole('checkbox', { name: /Span one wallpaper/ });
+    await act(async () => { fireEvent.click(span); });
     expect(screen.getByText('Works for photos and scenes. Videos and web wallpapers show on each display.')).toBeTruthy();
     expect(useAppStore.getState().settings!.multiMonitorMode).toBe('span');
     const volume = screen.getByRole('slider', { name: /^Volume for / });

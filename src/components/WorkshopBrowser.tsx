@@ -57,7 +57,7 @@ export const WorkshopBrowser: React.FC = () => {
     const request = ++previewRequest.current;
     setPreviewing(id); setPreviewError(null);
     try { await inspect(id); }
-    catch (err) { if (request === previewRequest.current) setPreviewError(String(err)); }
+    catch (err) { if (request === previewRequest.current) setPreviewError(err instanceof Error ? err.message : String(err)); }
     finally { if (request === previewRequest.current) setPreviewing(null); }
   };
   const update = (partial: Partial<WorkshopBrowseQuery>) => setQuery((q) => ({ ...q, ...partial, page: 1 }));

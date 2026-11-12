@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Listener, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use truongpaper_core::{get_setting, set_setting, CoreResult};
 
@@ -112,7 +112,52 @@ pub fn restore_persisted(conn: &Connection, host: &WallpaperHost) {
 // Actions shared by the tray menu and the global hotkeys
 // ---------------------------------------------------------------------------------------------
 
-/// Next wallpaper on the primary display: the next photo, or the next playlist item.
+/// Event the frontend emits when the user selects a display in Studio: `{ "monitorId": "..." }`.
+pub const EVENT_SELECTED_MONITOR: &str = "ui://selected-monitor";
+
+/// Display currently selected in Studio (`None` until the UI reports one).
+static SELECTED_MONITOR: Mutex<Option<String>> = parking_lot::const_mutex(None);
+
+pub fn set_selected_monitor(monitor_id: Option<String>) {
+    *SELECTED_MONITOR.lock() = monitor_id.filter(|id| !id.trim().is_empty());
+}
+
+pub fn selected_monitor() -> Option<String> {
+    SELECTED_MONITOR.lock().clone()
+}
+
+/// Parses an `ui://selected-monitor` payload.
+fn parse_selected_payload(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    value
+        .get("monitorId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Tracks the Studio display selection so the tray and hotkeys act on it.
+pub fn listen_selected_monitor(app: &AppHandle) {
+    app.listen(EVENT_SELECTED_MONITOR, |event| {
+        set_selected_monitor(parse_selected_payload(event.payload()));
+    });
+}
+
+/// The display Next acts on: the one selected in Studio while it is connected, else the primary
+/// display, else the first one.
+pub fn pick_target_monitor<'a, T>(
+    selected: Option<&str>,
+    monitors: &'a [T],
+    id_of: impl Fn(&T) -> &str,
+    is_primary: impl Fn(&T) -> bool,
+) -> Option<&'a T> {
+    selected
+        .and_then(|id| monitors.iter().find(|m| id_of(m) == id))
+        .or_else(|| monitors.iter().find(|m| is_primary(m)))
+        .or_else(|| monitors.first())
+}
+
+/// Next wallpaper on the display selected in Studio (primary when none): the next photo, or the
+/// next playlist item.
 pub fn next_wallpaper(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -127,10 +172,15 @@ pub async fn next_wallpaper_now(app: &AppHandle) -> Result<(), String> {
     let photo = app
         .try_state::<PhotoServiceState>()
         .ok_or("App is starting")?;
-    let primary = live_monitors(app)
-        .into_iter()
-        .find(|m| m.is_primary)
-        .ok_or("No display is connected")?;
+    let monitors = live_monitors(app);
+    let primary = pick_target_monitor(
+        selected_monitor().as_deref(),
+        &monitors,
+        |m| m.id.as_str(),
+        |m| m.is_primary,
+    )
+    .cloned()
+    .ok_or("No display is connected")?;
     let source = crate::db::monitor_sources(&state.db.lock())?
         .remove(&primary.id)
         .unwrap_or_default();
@@ -145,12 +195,13 @@ pub async fn next_wallpaper_now(app: &AppHandle) -> Result<(), String> {
             Ok(())
         }
         WallpaperSource::Workshop { .. } => {
-            Err("The primary display shows a single wallpaper: nothing to advance".into())
+            Err("This display shows a single wallpaper: nothing to advance".into())
         }
     }
 }
 
-/// Pause every display, or resume them all when every display is already paused.
+/// Pause every display, or resume them all when every display is already paused. This is
+/// deliberately "all displays", whatever display Studio has selected.
 pub fn toggle_pause(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -284,6 +335,35 @@ mod tests {
         assert_eq!(parse_accelerator("").unwrap(), None);
         let err = parse_accelerator("Banana+Nope").unwrap_err();
         assert!(err.contains("Banana+Nope"), "{err}");
+    }
+
+    #[test]
+    fn next_targets_the_selected_display_with_primary_fallback() {
+        let monitors = [("A", true), ("B", false), ("C", false)];
+        let pick = |sel: Option<&str>, list: &[(&'static str, bool)]| {
+            pick_target_monitor(sel, list, |m| m.0, |m| m.1).map(|m| m.0)
+        };
+        assert_eq!(pick(Some("B"), &monitors), Some("B"));
+        assert_eq!(pick(None, &monitors), Some("A"));
+        // A selection that is no longer connected falls back to the primary display.
+        assert_eq!(pick(Some("gone"), &monitors), Some("A"));
+        // No primary flagged: first display.
+        assert_eq!(pick(None, &[("X", false), ("Y", false)]), Some("X"));
+        assert_eq!(pick(Some("B"), &[]), None);
+    }
+
+    #[test]
+    fn selected_monitor_event_payload_is_stored() {
+        assert_eq!(
+            parse_selected_payload(r#"{"monitorId":"DISPLAY-2"}"#).as_deref(),
+            Some("DISPLAY-2")
+        );
+        assert_eq!(parse_selected_payload(r#"{"monitorId":null}"#), None);
+        assert_eq!(parse_selected_payload("garbage"), None);
+        set_selected_monitor(Some("DISPLAY-2".into()));
+        assert_eq!(selected_monitor().as_deref(), Some("DISPLAY-2"));
+        set_selected_monitor(Some("  ".into()));
+        assert_eq!(selected_monitor(), None);
     }
 
     #[test]

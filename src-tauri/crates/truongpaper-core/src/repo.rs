@@ -109,29 +109,43 @@ pub fn query_photo_item_by_id(
 ) -> CoreResult<Option<PhotoItem>> {
     let item = conn
         .query_row(
-            "SELECT id, album_slug, album_url, file_path, width, height, bytes,
-                    featured, is_favorite, downloaded_at, last_shown_at
-             FROM photos_cache WHERE id = ?1",
+            &format!("SELECT {PHOTO_ITEM_COLUMNS} FROM photos_cache WHERE id = ?1"),
             params![photo_id],
-            |r| {
-                let rel_path: String = r.get(3)?;
-                Ok(PhotoItem {
-                    id: r.get(0)?,
-                    album_slug: r.get(1)?,
-                    album_url: r.get(2)?,
-                    file_path: app_data_dir.join(rel_path).to_string_lossy().into_owned(),
-                    width: Some(to_u32(r.get(4)?)),
-                    height: Some(to_u32(r.get(5)?)),
-                    bytes: to_u64(r.get(6)?),
-                    featured: r.get::<_, i64>(7)? != 0,
-                    is_favorite: r.get::<_, i64>(8)? != 0,
-                    downloaded_at: r.get(9)?,
-                    last_shown_at: r.get(10)?,
-                })
-            },
+            |r| photo_item_from_row(r, app_data_dir),
         )
         .optional()?;
     Ok(item)
+}
+
+/// Column list read by [`photo_item_from_row`].
+const PHOTO_ITEM_COLUMNS: &str = "id, album_slug, album_url, file_path, width, height, bytes,
+    featured, is_favorite, downloaded_at, last_shown_at";
+
+/// Maps a row selected with [`PHOTO_ITEM_COLUMNS`].
+fn photo_item_from_row(r: &rusqlite::Row<'_>, app_data_dir: &Path) -> rusqlite::Result<PhotoItem> {
+    photo_item_from_row_at(r, 0, app_data_dir)
+}
+
+/// Like [`photo_item_from_row`] with the photo columns starting at index `o`.
+fn photo_item_from_row_at(
+    r: &rusqlite::Row<'_>,
+    o: usize,
+    app_data_dir: &Path,
+) -> rusqlite::Result<PhotoItem> {
+    let rel_path: String = r.get(o + 3)?;
+    Ok(PhotoItem {
+        id: r.get(o)?,
+        album_slug: r.get(o + 1)?,
+        album_url: r.get(o + 2)?,
+        file_path: app_data_dir.join(rel_path).to_string_lossy().into_owned(),
+        width: Some(to_u32(r.get(o + 4)?)),
+        height: Some(to_u32(r.get(o + 5)?)),
+        bytes: to_u64(r.get(o + 6)?),
+        featured: r.get::<_, i64>(o + 7)? != 0,
+        is_favorite: r.get::<_, i64>(o + 8)? != 0,
+        downloaded_at: r.get(o + 9)?,
+        last_shown_at: r.get(o + 10)?,
+    })
 }
 
 fn cached_row(r: &Row<'_>) -> rusqlite::Result<CachedPhotoRow> {
@@ -310,34 +324,27 @@ pub fn list_unused_queue(
 ) -> CoreResult<Vec<PhotoItem>> {
     let (clause, values) = filter_clause(filter);
     let sql = format!(
-        "SELECT id FROM photos_cache WHERE {UNUSED_PREDICATE}{clause} ORDER BY downloaded_at ASC"
+        "SELECT {PHOTO_ITEM_COLUMNS} FROM photos_cache
+         WHERE {UNUSED_PREDICATE}{clause} ORDER BY downloaded_at ASC"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let ids = stmt
-        .query_map(params_from_iter(values), |r| r.get::<_, String>(0))?
+    let items = stmt
+        .query_map(params_from_iter(values), |r| {
+            photo_item_from_row(r, app_data_dir)
+        })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut items = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(item) = query_photo_item_by_id(conn, app_data_dir, &id)? {
-            items.push(item);
-        }
-    }
     Ok(items)
 }
 
 /// Favorites belong to the local collection regardless of the active rotation filter.
 pub fn list_favorite_photos(conn: &Connection, app_data_dir: &Path) -> CoreResult<Vec<PhotoItem>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM photos_cache WHERE file_present = 1 AND is_favorite = 1
-         ORDER BY last_shown_at DESC, downloaded_at DESC, id",
-    )?;
-    let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut photos = Vec::new();
-    for id in ids {
-        if let Some(photo) = query_photo_item_by_id(conn, app_data_dir, &id?)? {
-            photos.push(photo);
-        }
-    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {PHOTO_ITEM_COLUMNS} FROM photos_cache WHERE file_present = 1 AND is_favorite = 1
+         ORDER BY last_shown_at DESC, downloaded_at DESC, id"
+    ))?;
+    let photos = stmt
+        .query_map([], |r| photo_item_from_row(r, app_data_dir))?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(photos)
 }
 
@@ -750,18 +757,24 @@ pub fn current_photo_by_monitor(
     conn: &Connection,
     app_data_dir: &Path,
 ) -> CoreResult<HashMap<String, Option<PhotoItem>>> {
-    let mut stmt = conn.prepare("SELECT monitor_id, current_photo_id FROM monitor_assignments")?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut map = HashMap::new();
-    for (monitor_id, photo_id) in rows {
-        let item = match photo_id {
-            Some(pid) => query_photo_item_by_id(conn, app_data_dir, &pid)?,
-            None => None,
+    // One LEFT JOIN instead of a lookup per monitor.
+    let mut stmt = conn.prepare(
+        "SELECT m.monitor_id, p.id, p.album_slug, p.album_url, p.file_path, p.width, p.height,
+                p.bytes, p.featured, p.is_favorite, p.downloaded_at, p.last_shown_at
+         FROM monitor_assignments m LEFT JOIN photos_cache p ON p.id = m.current_photo_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let monitor_id: String = r.get(0)?;
+        let item = if r.get::<_, Option<String>>(1)?.is_some() {
+            Some(photo_item_from_row_at(r, 1, app_data_dir)?)
+        } else {
+            None
         };
+        Ok((monitor_id, item))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (monitor_id, item) = row?;
         map.insert(monitor_id, item);
     }
     Ok(map)

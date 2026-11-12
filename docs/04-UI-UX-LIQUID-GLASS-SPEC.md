@@ -2063,6 +2063,7 @@ invoke<PhotoStatus>('photo_get_status');
 invoke<PublicCatalogAlbum[]>('photo_fetch_public_catalog');
 invoke<PhotoItem>('photo_rotate_next', { monitorId?: string });
 invoke<void>('photo_trigger_refill');
+invoke<void>('photo_retry_now'); // clears the offline / throttle backoff, then refills
 invoke<SavedAlbum>('photo_add_album', { urlOrSlug: string, displayName?: string });
 invoke<void>('photo_toggle_album', { albumSlug: string, enabled: boolean });
 invoke<void>('photo_remove_album', { albumSlug: string });

@@ -15,7 +15,7 @@ use crate::models::{
     IpcTransitionType, WallpaperChangedPayload, WallpaperSource, EVENT_PHOTO_QUEUE_UPDATED,
     EVENT_WALLPAPER_CHANGED,
 };
-use crate::state::{AppState, SETTING_MULTI_MONITOR_MODE, SETTING_SKIP_MISMATCHED_ORIENTATION};
+use crate::state::{AppState, SETTING_SKIP_MISMATCHED_ORIENTATION};
 use parking_lot::Mutex;
 use reqwest::Client;
 use rusqlite::Connection;
@@ -471,7 +471,7 @@ pub(crate) async fn rotate_photo_next(
             unchanged && photo_rotation_allowed(&source, monitor_id.is_some(), photo_runtime)
         })
         .collect();
-    rotate_photo_targets(app, state, monitor_id, targets, false).await
+    rotate_photo_targets(app, state, targets, false).await
 }
 
 /// Only called by `show_photo` while its caller holds this monitor's apply lock.
@@ -483,14 +483,7 @@ pub(crate) async fn rotate_photo_for_locked_monitor(
 ) -> Result<PhotoItem, String> {
     let live = live_monitor_orientations(app);
     let targets = select_rotation_targets(&live, &HashMap::new(), Some(monitor_id));
-    rotate_photo_targets(
-        app,
-        state,
-        Some(monitor_id.to_string()),
-        targets,
-        mix_favorites,
-    )
-    .await
+    rotate_photo_targets(app, state, targets, mix_favorites).await
 }
 
 fn photo_rotation_allowed(source: &WallpaperSource, explicit: bool, photo_runtime: bool) -> bool {
@@ -501,7 +494,6 @@ fn photo_rotation_allowed(source: &WallpaperSource, explicit: bool, photo_runtim
 async fn rotate_photo_targets(
     app: &AppHandle,
     state: &PhotoServiceState,
-    monitor_id: Option<String>,
     target_monitors: Vec<(String, bool)>,
     mix_favorites: bool,
 ) -> Result<PhotoItem, String> {
@@ -511,110 +503,61 @@ async fn rotate_photo_targets(
     let (_, mut base_filter, max_cache_bytes, mut displayed_ids) =
         state.load_active_filter(None)?;
     let host = app.try_state::<AppState>().map(|s| Arc::clone(&s.host));
-    let (skip_mismatched, multi_monitor_mode) = {
+    // Every display draws its own photo; "span" is a presentation mode handled by the renderer
+    // (the source display's runtime is stretched), so there is no clone branch here.
+    let skip_mismatched: bool = {
         let conn = state.db.lock();
-        let skip: bool = get_setting(&conn, SETTING_SKIP_MISMATCHED_ORIENTATION)
+        get_setting(&conn, SETTING_SKIP_MISMATCHED_ORIENTATION)
             .map_err(e)?
-            .unwrap_or(true);
-        let mode: String = get_setting(&conn, SETTING_MULTI_MONITOR_MODE)
-            .map_err(e)?
-            .unwrap_or_else(|| "independent".to_string());
-        (skip, mode)
+            .unwrap_or(true)
     };
-
-    let orientations = target_monitors
-        .iter()
-        .map(|(_, portrait)| display_orientation(*portrait));
-    let can_clone = !skip_mismatched
-        || orientations
-            .clone()
-            .all(|orientation| orientation == display_orientation(target_monitors[0].1));
     let mut last_applied_item: Option<PhotoItem> = None;
     let mut refill_needed = false;
 
-    if multi_monitor_mode == "clone" && monitor_id.is_none() && can_clone {
+    for (mid, is_portrait) in &target_monitors {
         base_filter.required_orientation =
-            skip_mismatched.then(|| display_orientation(target_monitors[0].1).as_str().into());
-        let mut item =
-            photo_for_rotation(state, &base_filter, max_cache_bytes, &displayed_ids, false).await?;
+            skip_mismatched.then(|| display_orientation(*is_portrait).as_str().into());
+
+        // Keep the API queue first for manual Next and occasionally mix in a favorite
+        // for automatic rotation. A low queue still triggers a background refill.
+        let prefer_favorite = mix_favorites && rand::random::<u8>() < 64;
+        let mut item = photo_for_rotation(
+            state,
+            &base_filter,
+            max_cache_bytes,
+            &displayed_ids,
+            prefer_favorite,
+        )
+        .await?;
+
         let mut attempts = 0;
-        let (chosen, decoded) = loop {
-            let chosen = item.ok_or_else(no_other_photo_ready)?;
-            match prepare_photo(host.as_ref(), &chosen).await {
-                Ok(decoded) => break (chosen, decoded),
+        while let Some(chosen) = item.take() {
+            let decoded = match prepare_photo(host.as_ref(), &chosen).await {
+                Ok(decoded) => decoded,
                 Err(err) => {
                     // Not recorded as shown: the desktop never displayed it. Evicted so the
                     // next rotation does not pick it again.
-                    tracing::warn!("{err}; skipping");
+                    tracing::warn!("{err}; skipping for {mid}");
                     drop_undecodable_photo(state, &chosen).await;
-                    attempts += 1;
-                    if attempts >= MAX_DECODE_ATTEMPTS {
-                        return Err(err);
-                    }
                     displayed_ids.push(chosen.id.clone());
-                    item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
+                    attempts += 1;
+                    if attempts < MAX_DECODE_ATTEMPTS {
+                        item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
+                    }
+                    continue;
                 }
-            }
-        };
-        {
-            let mut conn = state.db.lock();
-            mark_photo_shown(&mut conn, &chosen.id).map_err(e)?;
-            for (mid, _) in &target_monitors {
+            };
+            {
+                let mut conn = state.db.lock();
+                mark_photo_shown(&mut conn, &chosen.id).map_err(e)?;
                 assign_photo_to_monitor(&conn, mid, &chosen.id).map_err(e)?;
             }
+            displayed_ids.push(chosen.id.clone());
+            state.show_prepared(app, mid, &chosen, decoded)?;
+            last_applied_item = Some(chosen);
         }
-        for (mid, _) in &target_monitors {
-            state.show_prepared(app, mid, &chosen, decoded.clone())?;
-        }
-        last_applied_item = Some(chosen);
-        refill_needed =
+        refill_needed |=
             needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
-    } else {
-        for (mid, is_portrait) in &target_monitors {
-            base_filter.required_orientation =
-                skip_mismatched.then(|| display_orientation(*is_portrait).as_str().into());
-
-            // Keep the API queue first for manual Next and occasionally mix in a favorite
-            // for automatic rotation. A low queue still triggers a background refill.
-            let prefer_favorite = mix_favorites && rand::random::<u8>() < 64;
-            let mut item = photo_for_rotation(
-                state,
-                &base_filter,
-                max_cache_bytes,
-                &displayed_ids,
-                prefer_favorite,
-            )
-            .await?;
-
-            let mut attempts = 0;
-            while let Some(chosen) = item.take() {
-                let decoded = match prepare_photo(host.as_ref(), &chosen).await {
-                    Ok(decoded) => decoded,
-                    Err(err) => {
-                        // Not recorded as shown: the desktop never displayed it. Evicted so the
-                        // next rotation does not pick it again.
-                        tracing::warn!("{err}; skipping for {mid}");
-                        drop_undecodable_photo(state, &chosen).await;
-                        displayed_ids.push(chosen.id.clone());
-                        attempts += 1;
-                        if attempts < MAX_DECODE_ATTEMPTS {
-                            item = state.rotation_candidate(&base_filter, &displayed_ids, false)?;
-                        }
-                        continue;
-                    }
-                };
-                {
-                    let mut conn = state.db.lock();
-                    mark_photo_shown(&mut conn, &chosen.id).map_err(e)?;
-                    assign_photo_to_monitor(&conn, mid, &chosen.id).map_err(e)?;
-                }
-                displayed_ids.push(chosen.id.clone());
-                state.show_prepared(app, mid, &chosen, decoded)?;
-                last_applied_item = Some(chosen);
-            }
-            refill_needed |=
-                needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
-        }
     }
 
     state.emit_status(app);
@@ -669,6 +612,16 @@ pub async fn photo_trigger_refill(
     app: AppHandle,
     state: State<'_, PhotoServiceState>,
 ) -> Result<(), String> {
+    trigger_refill(&app, &state).await
+}
+
+/// `photo_retry_now`: ends the offline / throttling backoff and refills right away.
+#[tauri::command]
+pub async fn photo_retry_now(
+    app: AppHandle,
+    state: State<'_, PhotoServiceState>,
+) -> Result<(), String> {
+    state.limiter.clear_backoff();
     trigger_refill(&app, &state).await
 }
 

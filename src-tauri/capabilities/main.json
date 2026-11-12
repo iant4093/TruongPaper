@@ -29,6 +29,7 @@
     "allow-photo-fetch-public-catalog",
     "allow-photo-rotate-next",
     "allow-photo-trigger-refill",
+    "allow-photo-retry-now",
     "allow-photo-add-album",
     "allow-photo-toggle-album",
     "allow-photo-remove-album",

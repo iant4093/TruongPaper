@@ -3,8 +3,40 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
+    AppHandle, Listener, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
 };
+
+const PAUSE_LABEL: &str = "Pause All Displays";
+const RESUME_LABEL: &str = "Resume All Displays";
+
+/// Label of the tray's pause item: resuming only when every connected display is paused (the
+/// condition `controls::toggle_pause_now` uses).
+pub fn pause_label(all_paused: bool) -> &'static str {
+    if all_paused {
+        RESUME_LABEL
+    } else {
+        PAUSE_LABEL
+    }
+}
+
+/// Managed handle of the tray's pause item, so its label can follow the pause state.
+struct PauseItem(MenuItem<tauri::Wry>);
+
+fn refresh_pause_label(app: &AppHandle) {
+    let (Some(item), Some(state)) = (
+        app.try_state::<PauseItem>(),
+        app.try_state::<crate::AppState>(),
+    ) else {
+        return;
+    };
+    let monitors = crate::commands::monitor::live_monitors(app);
+    let all_paused = if monitors.is_empty() {
+        state.host.user_paused("")
+    } else {
+        monitors.iter().all(|m| state.host.user_paused(&m.id))
+    };
+    let _ = item.0.set_text(pause_label(all_paused));
+}
 
 pub(crate) fn show_studio(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -24,13 +56,8 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
     )?;
     let next_wallpaper =
         MenuItem::with_id(app, "next_wallpaper", "Next Wallpaper", true, None::<&str>)?;
-    let toggle_pause = MenuItem::with_id(
-        app,
-        "toggle_pause",
-        "Pause / Resume Wallpapers",
-        true,
-        None::<&str>,
-    )?;
+    let toggle_pause = MenuItem::with_id(app, "toggle_pause", PAUSE_LABEL, true, None::<&str>)?;
+    app.manage(PauseItem(toggle_pause.clone()));
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit TruongPaper", true, None::<&str>)?;
 
@@ -88,6 +115,11 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
 
+    let handle = app.clone();
+    app.listen(crate::models::EVENT_PLAYBACK_PAUSE_CHANGED, move |_| {
+        refresh_pause_label(&handle);
+    });
+    refresh_pause_label(app);
     Ok(())
 }
 
@@ -141,4 +173,15 @@ fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
     )));
     let _ = popover.show();
     let _ = popover.set_focus();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pause_item_says_all_displays() {
+        assert_eq!(pause_label(false), "Pause All Displays");
+        assert_eq!(pause_label(true), "Resume All Displays");
+    }
 }

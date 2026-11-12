@@ -505,7 +505,8 @@ describe('Workshop page', () => {
     await act(async () => { useAppStore.setState({ downloadsById: { '77': { workshopId: '77', title: 'Broken', progressPercent: 10, state: 'error', error: 'Disk full' } } }); });
     expect(screen.getByText('Disk full')).toBeTruthy();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Dismiss' })); });
-    expect(useAppStore.getState().downloadsById).toEqual({});
+    // Mock downloads started by earlier tests can still report progress, so check only this one.
+    expect(useAppStore.getState().downloadsById['77']).toBeUndefined();
   });
 });
 

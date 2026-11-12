@@ -9,6 +9,7 @@ import { WindowControls } from './components/WindowControls';
 import { AllWallpapersView } from './components/views/AllWallpapersView';
 import { useAppStore } from './store/useAppStore';
 import { toast } from './store/feedback';
+import { usePageVisible } from './lib/hooks';
 
 // Everything except the Library is split out, so the first screen loads (and parses) less code.
 const lazyView = <K extends string>(load: () => Promise<Record<K, React.ComponentType<any>>>, name: K) =>
@@ -48,6 +49,15 @@ function useEverTrue(flag: boolean) {
 
 export const App: React.FC = () => {
   const initAppListeners = useAppStore((s) => s.initAppListeners);
+  // While Studio sits hidden in the menu bar, drop the open view (and its decoded images)
+  // after a short delay. The web view then gives that memory back; reopening rebuilds it.
+  const pageVisible = usePageVisible();
+  const [dormant, setDormant] = useState(false);
+  useEffect(() => {
+    if (pageVisible) { setDormant(false); return; }
+    const timer = window.setTimeout(() => setDormant(true), 20_000);
+    return () => window.clearTimeout(timer);
+  }, [pageVisible]);
   // A primitive key keeps this from re-rendering on unrelated display changes (pause, volume, ...).
   const monitorKey = useAppStore((s) => s.monitors.map((m) => `${m.monitorId}\u0000${m.name}`).join('\u0001'));
   const monitors = useMemo(
@@ -177,7 +187,7 @@ export const App: React.FC = () => {
           }}>
             {loadError && <div role="alert" className="error-banner">{loadError}</div>}
             <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}>
-              <Suspense fallback={<div className="view-loading" role="status">Loading…</div>}>{view}</Suspense>
+              <Suspense fallback={<div className="view-loading" role="status">Loading…</div>}>{dormant ? null : view}</Suspense>
             </div>
           </main>
           {showInspector && <div className="inspector-scrim" aria-hidden="true" onClick={closeDetails} />}

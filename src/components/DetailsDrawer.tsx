@@ -7,7 +7,7 @@ import { SceneReport } from './SceneReport';
 import { Thumb } from './ui';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import { confirmAction, toast } from '../store/feedback';
-import { WALLPAPER_TYPE_LABEL, formatBytes, photoPreviewSrc } from '../lib/format';
+import { WALLPAPER_TYPE_LABEL, formatBytes, photoPreviewSrc, wallpaperPreviewSrc } from '../lib/format';
 import type { WallpaperSource } from '../types/ipc';
 import type { StudioTab } from '../App';
 
@@ -100,7 +100,7 @@ export const DetailsDrawer: React.FC<{
         </div>
       ) : selected && (
         <>
-          <div className="inspector-preview"><Thumb src={selected.previewPath} alt={selected.title} height={150} /></div>
+          <div className="inspector-preview"><Thumb src={wallpaperPreviewSrc(selected)} alt={selected.title} height={150} /></div>
           <SceneReport messages={diagnostics} />
           <PresetBar key={`presets:${selected.wallpaperId}`} wallpaperId={selected.wallpaperId} />
           <PropertyInspector key={`properties:${selected.wallpaperId}`} wallpaperId={selected.wallpaperId}

@@ -15,6 +15,7 @@ pub mod secrets;
 pub mod smart_pause;
 pub mod state;
 pub mod tray;
+mod wallpaper_preview;
 pub mod wallpaper_webview;
 
 pub use state::AppState;
@@ -164,6 +165,24 @@ pub fn run() {
                 };
                 tauri::async_runtime::spawn(async move {
                     responder.respond(photo_preview::serve(state, request).await);
+                });
+            },
+        )
+        .register_asynchronous_uri_scheme_protocol(
+            wallpaper_preview::SCHEME,
+            |ctx, request, responder| {
+                let preview = if matches!(ctx.webview_label(), "main" | "tray-popover") {
+                    ctx.app_handle()
+                        .try_state::<state::AppState>()
+                        .map(|state| wallpaper_preview::PreviewContext {
+                            db: state.db.clone(),
+                            cache_dir: state.app_data_dir.join("cache").join("wallpaper-previews"),
+                        })
+                } else {
+                    None
+                };
+                tauri::async_runtime::spawn(async move {
+                    responder.respond(wallpaper_preview::serve(preview, request).await);
                 });
             },
         )

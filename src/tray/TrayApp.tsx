@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { Thumb } from '../components/ui';
-import { OFFLINE_NOTICE, formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { OFFLINE_NOTICE, formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL, wallpaperPreviewSrc } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { WallpaperSource } from '../types/ipc';
 import { LoadErrorCard } from '../components/LoadErrorCard';
@@ -89,7 +89,7 @@ export const TrayApp: React.FC = () => {
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const canRotate = !!currentPhoto || activeMonitor?.activeSource.kind === 'photo_api';
   const currentTitle = currentWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
-  const currentPreview = currentWallpaper?.previewPath || photoPreviewSrc(currentPhoto);
+  const currentPreview = wallpaperPreviewSrc(currentWallpaper) || photoPreviewSrc(currentPhoto);
   const currentDetails = currentWallpaper
     ? `${WALLPAPER_TYPE_LABEL[currentWallpaper.type]} · ${formatBytes(currentWallpaper.bytes)}`
     : currentPhoto?.width && currentPhoto?.height

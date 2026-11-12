@@ -162,6 +162,8 @@ const SELECTED_MONITOR_KEY = 'truongpaper.selectedMonitor';
 export const SELECTED_MONITOR_EVENT = 'ui://selected-monitor';
 /** Counts sign-in attempts so a replaced attempt cannot change the sign-in window. */
 let steamLoginRun = 0;
+/** Counts wallpaper applies so a slow older one cannot overwrite the display list. */
+let applySeq = 0;
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -643,8 +645,11 @@ export const useAppStore = create<AppState>((set, get) => {
     selectPhotoSource: () => set({ selectedWallpaperId: null, selectedPhotoSource: true }),
 
     applyMonitorSource: async (monitorId, source) => {
+      const seq = ++applySeq;
       await invoke('monitor_apply_wallpaper', { monitorId, source });
       const monitors = await invoke<MonitorInfo[]>('monitors_list');
+      // An older apply can finish after a newer one; its display list would be stale.
+      if (seq !== applySeq) return;
       set((state) => ({
         monitors: monitors.map((monitor) => ({
           ...monitor,

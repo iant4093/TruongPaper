@@ -1,6 +1,6 @@
 // src/lib/format.ts
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { FilterMode, MonitorInfo, PhotoItem, PhotoStatus, WallpaperSource, WallpaperType } from '../types/ipc';
+import type { FilterMode, MonitorInfo, PhotoItem, PhotoStatus, WallpaperItem, WallpaperSource, WallpaperType } from '../types/ipc';
 
 export const MB = 1024 * 1024;
 export const GB = 1024 * MB;
@@ -35,12 +35,25 @@ export function photoPreviewSrc(photo: PhotoItem | null | undefined): string | u
 }
 
 /**
+ * A small still of a library wallpaper's preview (512 px, first frame of a GIF). Full-size
+ * and animated previews made the Studio window hold hundreds of MB of image memory.
+ */
+export function wallpaperPreviewSrc(item: Pick<WallpaperItem, 'wallpaperId' | 'previewPath' | 'bytes'> | null | undefined): string | undefined {
+  if (!item?.previewPath) return undefined;
+  // The browser demo and remote previews pass through unchanged.
+  if (/^(https?:|data:|blob:)/i.test(item.previewPath)) return item.previewPath;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: unknown } }).__TAURI_INTERNALS__;
+  if (!internals || typeof internals.convertFileSrc !== 'function') return item.previewPath;
+  return `${convertFileSrc(item.wallpaperId, 'wallpaper-preview')}?v=${item.bytes}`;
+}
+
+/**
  * Converts an on-disk path returned by the Rust backend into a URL the webview
  * can load through Tauri's `asset:` protocol. Remote, data and blob URLs pass through.
  */
 export function toAssetUrl(pathOrUrl: string | null | undefined): string | null {
   if (!pathOrUrl) return null;
-  if (/^(https?:|data:|blob:|asset:|photo-preview:)/i.test(pathOrUrl)) return pathOrUrl;
+  if (/^(https?:|data:|blob:|asset:|photo-preview:|wallpaper-preview:)/i.test(pathOrUrl)) return pathOrUrl;
   try {
     const internals = (window as unknown as { __TAURI_INTERNALS__?: { convertFileSrc?: unknown } })
       .__TAURI_INTERNALS__;

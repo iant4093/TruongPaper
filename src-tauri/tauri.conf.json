@@ -43,7 +43,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost photo-preview: http://photo-preview.localhost https://*.iantruongphotography.com https://*.cloudfront.net https://*.steamusercontent.com https://*.steamstatic.com https://*.akamaihd.net data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://photos-api.iantruongphotography.com https://iantruongphotography.com https://api.steampowered.com",
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost photo-preview: http://photo-preview.localhost wallpaper-preview: http://wallpaper-preview.localhost https://*.iantruongphotography.com https://*.cloudfront.net https://*.steamusercontent.com https://*.steamstatic.com https://*.akamaihd.net data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://photos-api.iantruongphotography.com https://iantruongphotography.com https://api.steampowered.com",
       "assetProtocol": {
         "enable": true,
         "scope": [

@@ -2,7 +2,7 @@ import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useSt
 import { Images, Search, X } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { toast } from '../../store/feedback';
-import { WALLPAPER_TYPE_LABEL, OFFLINE_NOTICE, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, OFFLINE_NOTICE, offlinePhotosForDisplay, photoPreviewSrc, wallpaperPreviewSrc } from '../../lib/format';
 import { useSlashToFocus } from '../../lib/hooks';
 import type { WallpaperItem, WallpaperType } from '../../types/ipc';
 import { Dropdown } from '../Dropdown';
@@ -119,15 +119,18 @@ export const AllWallpapersView: React.FC<{
     return list;
   }, [wallpapers, filter, search, sort]);
 
+  const applySeq = useRef(0);
   const apply = useCallback(async (id: string) => {
     if (!activeMonitorId) return;
+    // Clicks are never blocked: the newest one wins, and older ones finish silently.
+    const seq = ++applySeq.current;
     setApplying(id);
     const title = id === PHOTOS_ID ? 'Photography' : useAppStore.getState().wallpapers.find((w) => w.wallpaperId === id)?.title ?? 'Wallpaper';
     try {
       await applyMonitorSource(activeMonitorId, id === PHOTOS_ID ? { kind: 'photo_api' } : { kind: 'workshop', wallpaperId: id });
-      toast.success(`Now showing ${title}`);
-    } catch (err) { toast.error(err, `Could not set ${title}`); }
-    finally { setApplying(null); }
+      if (seq === applySeq.current) toast.success(`Now showing ${title}`);
+    } catch (err) { if (seq === applySeq.current) toast.error(err, `Could not set ${title}`); }
+    finally { if (seq === applySeq.current) setApplying(null); }
   }, [activeMonitorId, applyMonitorSource]);
   const select = useCallback((id: string) => { if (id === PHOTOS_ID) selectPhotoSource(); else selectWallpaper(id); }, [selectPhotoSource, selectWallpaper]);
   const details = useCallback((id: string) => { select(id); onOpenDetails(); }, [select, onOpenDetails]);
@@ -138,7 +141,7 @@ export const AllWallpapersView: React.FC<{
     );
   }, [setWallpaperFavorite]);
 
-  const canApply = !!activeMonitorId && applying === null;
+  const canApply = !!activeMonitorId;
   const emptyLibrary = wallpapers.length === 0;
 
   return (
@@ -182,7 +185,7 @@ export const AllWallpapersView: React.FC<{
             active={activeSource?.kind === 'photo_api'} canApply={canApply} applying={applying === PHOTOS_ID}
             tabIndex={cell.tabIndex} onSelect={select} onApply={apply} onDetails={details} />
         ) : (
-          <WallpaperCard id={entry.id} title={entry.item.title} preview={entry.item.previewPath}
+          <WallpaperCard id={entry.id} title={entry.item.title} preview={wallpaperPreviewSrc(entry.item)}
             kind={WALLPAPER_TYPE_LABEL[entry.item.type]} badge={entry.item.windowsOnly ? 'Windows only' : undefined}
             audioReactive={entry.item.audioReactive} favorite={!!entry.item.isFavorite}
             selected={entry.id === selectedWallpaperId}

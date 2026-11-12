@@ -1263,6 +1263,22 @@ fn coalesce_jobs(jobs: Vec<PhotoJob>) -> Vec<PhotoJob> {
     out
 }
 
+/// Hands freed heap pages back to macOS. After a large scene or photo is dropped, the system
+/// allocator keeps its empty pages (over 200 MB was measured), and Activity Monitor counts
+/// them against TruongPaper until something else needs the memory.
+fn release_free_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone means "all zones", and a goal of 0 means "as much as possible".
+        unsafe {
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+}
+
 struct PhotoWorker {
     jobs: mpsc::Sender<PhotoJob>,
     done: mpsc::Receiver<PhotoDone>,
@@ -1659,6 +1675,7 @@ impl MonitorRenderer {
                     self.from = None;
                     self.to = None;
                     self.compositor.invalidate_caches();
+                    release_free_memory();
                 }
                 let pending = host.take_pending_photo(&self.monitor_id, generation);
                 let input = match (pending, path) {
@@ -1700,25 +1717,27 @@ impl MonitorRenderer {
                         return;
                     }
                 }
+                // Free the old scene first. Keeping it for a rollback held two scenes in memory
+                // at once (well over 1 GB for large 4K scenes).
+                let had_scene = matches!(self.content, Content::Scene(_));
+                if had_scene {
+                    self.content = Content::None;
+                    release_free_memory();
+                }
                 match load_scene(device, queue, &self.config, &desc, rt) {
-                    Ok(state) => self.content = Content::Scene(Box::new(state)),
+                    Ok(state) => {
+                        self.content = Content::Scene(Box::new(state));
+                        release_free_memory();
+                    }
                     Err(err) => {
                         tracing::warn!("scene {} failed to load: {err}", desc.scene_file);
-                        // A previous scene is still intact: roll back to it. Anything else
-                        // becomes a black surface instead of a stale frame.
-                        let rolled_back = matches!(self.content, Content::Scene(_));
-                        if !rolled_back {
-                            self.content = Content::None;
-                            self.load_failed = true;
-                        }
+                        // A black surface instead of a stale frame.
+                        self.content = Content::None;
+                        self.load_failed = true;
                         self.pending_error = Some(WallpaperErrorPayload {
                             monitor_id: self.monitor_id.clone(),
                             wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
-                            message: if rolled_back {
-                                format!("Scene failed to load ({err}); kept the previous scene.")
-                            } else {
-                                format!("Scene failed to load: {err}")
-                            },
+                            message: format!("Scene failed to load: {err}"),
                         });
                     }
                 }
@@ -1751,6 +1770,7 @@ impl MonitorRenderer {
                 self.to = None;
                 self.transition_started = None;
                 self.compositor.invalidate_caches();
+                release_free_memory();
             }
         }
     }
@@ -1794,6 +1814,9 @@ impl MonitorRenderer {
         }
         self.compositor.invalidate_caches();
         self.dirty = true;
+        // The decoded pixels now live on the GPU; return the CPU copy's pages.
+        drop(image);
+        release_free_memory();
     }
 
     /// Acquires the next surface texture, reconfiguring on `Lost` / `Outdated`.

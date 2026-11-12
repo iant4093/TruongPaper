@@ -152,6 +152,22 @@ pub(crate) async fn lock_monitor_apply(monitor_id: &str) -> tokio::sync::OwnedMu
     lock.lock_owned().await
 }
 
+/// Newest user apply request per monitor. When several clicks queue behind a slow apply,
+/// only the newest one runs; the ones in between are skipped instead of each loading in turn.
+static APPLY_TICKETS: LazyLock<parking_lot::Mutex<HashMap<String, u64>>> =
+    LazyLock::new(Default::default);
+
+fn take_apply_ticket(monitor_id: &str) -> u64 {
+    let mut tickets = APPLY_TICKETS.lock();
+    let ticket = tickets.entry(monitor_id.to_string()).or_default();
+    *ticket += 1;
+    *ticket
+}
+
+fn is_latest_apply(monitor_id: &str, ticket: u64) -> bool {
+    APPLY_TICKETS.lock().get(monitor_id).copied() == Some(ticket)
+}
+
 /// Multi-monitor applies always lock sorted, unique IDs to avoid opposing clone deadlocks.
 pub(crate) async fn lock_monitor_applies<'a>(
     monitor_ids: impl IntoIterator<Item = &'a str>,
@@ -759,8 +775,13 @@ pub async fn monitor_apply_wallpaper(
     source: WallpaperSource,
 ) -> Result<(), String> {
     validate_monitor_id(&monitor_id)?;
+    let ticket = take_apply_ticket(&monitor_id);
     {
         let _apply = lock_monitor_apply(&monitor_id).await;
+        // A newer click arrived while this one waited behind a slower apply.
+        if !is_latest_apply(&monitor_id, ticket) {
+            return Ok(());
+        }
         apply_source(&app, &state, &photo, &monitor_id, &source).await?;
     }
     // The scheduler restarts this monitor's timer (and playlist position) from now.
@@ -864,6 +885,15 @@ pub async fn monitor_set_volume(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_queued_apply_runs() {
+        let first = take_apply_ticket("TEST-APPLY");
+        let second = take_apply_ticket("TEST-APPLY");
+        assert!(!is_latest_apply("TEST-APPLY", first));
+        assert!(is_latest_apply("TEST-APPLY", second));
+        assert!(!is_latest_apply("TEST-OTHER", 0));
+    }
 
     #[test]
     fn monitor_ids_are_unique_and_named() {

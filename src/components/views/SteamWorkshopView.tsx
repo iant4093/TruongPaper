@@ -8,7 +8,7 @@ import { WallpaperCard } from '../WallpaperCard';
 import { VirtualGrid } from '../VirtualGrid';
 import { useAppStore } from '../../store/useAppStore';
 import { toast } from '../../store/feedback';
-import { WALLPAPER_TYPE_LABEL } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, wallpaperPreviewSrc } from '../../lib/format';
 import { useSlashToFocus } from '../../lib/hooks';
 import type { WallpaperItem } from '../../types/ipc';
 import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
@@ -190,7 +190,7 @@ const InstalledWorkshopView: React.FC<{ onBrowse: () => void; onOpenDetails: () 
 
       <VirtualGrid items={items} getKey={(w) => w.wallpaperId} label="Installed Workshop wallpapers"
         renderItem={(w, cell) => (
-          <WallpaperCard id={w.wallpaperId} title={w.title} preview={w.previewPath}
+          <WallpaperCard id={w.wallpaperId} title={w.title} preview={wallpaperPreviewSrc(w)}
             kind={WALLPAPER_TYPE_LABEL[w.type]} badge={isLocalSteamItem(w) ? 'Steam app' : w.windowsOnly ? 'Windows only' : undefined}
             selected={w.wallpaperId === selectedWallpaperId} audioReactive={w.audioReactive}
             active={activeSource?.kind === 'workshop' && activeSource.wallpaperId === w.wallpaperId}

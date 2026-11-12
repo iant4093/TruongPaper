@@ -279,7 +279,21 @@ impl SceneRuntime {
                 rt.pull_layers()?;
             }
         }
+        rt.settle_scripts();
         Ok(rt)
+    }
+
+    /// Runs one zero-length script frame so `update` outputs (text, origin, visibility) are in
+    /// the graph before anything is drawn: a text layer must never show its editor placeholder.
+    fn settle_scripts(&mut self) {
+        if self.registered_slots.is_empty() {
+            return;
+        }
+        let cursor = [0.5, 0.5];
+        let world = cursor_world_position(cursor, self.scene_size());
+        if let Err(err) = self.step_scripts(0.0, cursor, world, false, &[0.0; 64], &[0.0; 64]) {
+            tracing::warn!("scene {}: SceneScript settle failed: {err}", self.graph.scene_path);
+        }
     }
 
     pub fn graph(&self) -> &SceneGraph {
@@ -437,6 +451,7 @@ impl SceneRuntime {
         self.push_layers()?;
         self.engine.apply_user_properties(&changed_json)?;
         self.pull_layers()?;
+        self.settle_scripts();
         Ok(())
     }
 

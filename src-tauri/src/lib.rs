@@ -25,7 +25,7 @@ use tauri::Manager;
 pub const DB_FILE_NAME: &str = "truongpaper.db";
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(target_os = "macos")]
+    // Closing Studio hides it. The tray keeps running and uses it for Pause and Next.
     if let Some(window) = app.get_webview_window("main") {
         let studio = window.clone();
         window.on_window_event(move |event| {

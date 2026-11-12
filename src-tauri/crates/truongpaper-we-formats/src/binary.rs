@@ -445,7 +445,17 @@ pub fn decode_tex_mipmap_to_rgba8(
 
     // 1. Embedded standard image container (PNG / JPEG / BMP / GIF / WEBP).
     if free_image_format != FIF_UNKNOWN {
-        let img = image::load_from_memory(&mipmap.raw_bytes)
+        // Downloaded files can declare huge sizes, so cap them before decoding.
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(16_384);
+        limits.max_image_height = Some(16_384);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(&mipmap.raw_bytes))
+            .with_guessed_format()
+            .map_err(|e| invalid(format!("FreeImage decode failed: {e}")))?;
+        reader.limits(limits);
+        let img = reader
+            .decode()
             .map_err(|e| invalid(format!("FreeImage decode failed: {e}")))?;
         return Ok(img.to_rgba8().into_raw());
     }

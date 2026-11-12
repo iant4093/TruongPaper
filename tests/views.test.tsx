@@ -83,6 +83,25 @@ describe('Main studio window', () => {
     expect(screen.queryByRole('complementary', { name: 'Wallpaper details' })).toBeNull();
   });
 
+  it('saves scene framing from the wallpaper details without changing Photography fit', async () => {
+    await act(async () => { render(<App />); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Select Neon Rain City' })); });
+    const { wallpapers, settings, updateWallpaperAdjustments } = useAppStore.getState();
+    const scene = wallpapers.find((wallpaper) => wallpaper.title === 'Neon Rain City')!;
+    const photoFit = settings!.defaultFitMode;
+    const fit = screen.getByRole('combobox', { name: 'Scene fit mode' });
+    fireEvent.click(fit);
+    try {
+      await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Fit + Black Bars' })); });
+      expect(fit.textContent).toBe('Fit + Black Bars');
+      const saved = await invoke<typeof wallpapers>('library_list_wallpapers');
+      expect(saved.find((wallpaper) => wallpaper.wallpaperId === scene.wallpaperId)?.adjustments.fitMode).toBe('fit_black');
+      expect(useAppStore.getState().settings!.defaultFitMode).toBe(photoFit);
+    } finally {
+      await act(async () => { await updateWallpaperAdjustments(scene.wallpaperId, scene.adjustments); });
+    }
+  });
+
   it('edits shared Photography settings from the Library details drawer', async () => {
     await act(async () => { render(<App />); });
     const selectPhotography = screen.getByRole('button', { name: 'Select Ian Truong Photography' });

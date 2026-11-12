@@ -194,7 +194,10 @@ export const useAppStore = create<AppState>((set, get) => {
       set((state) => ({
         photoStatus,
         monitors,
-        selectedMonitorId: state.selectedMonitorId ?? monitors[0]?.monitorId ?? null,
+        // A display can disappear between refreshes, so drop a stale selection.
+        selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
+          ? state.selectedMonitorId
+          : monitors[0]?.monitorId ?? null,
         wallpapers,
         selectedWallpaperId: wallpapers.some((w) => w.wallpaperId === state.selectedWallpaperId) ? state.selectedWallpaperId : null,
         settings,

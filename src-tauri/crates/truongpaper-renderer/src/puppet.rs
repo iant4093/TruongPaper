@@ -420,6 +420,12 @@ pub fn animation_frame_pair(
         return None;
     }
     let len = length as usize;
+    if mode == PuppetAnimationMode::Single {
+        let last = len - 1;
+        let frame = (t * fps).clamp(0.0, last as f32);
+        let a = frame as usize;
+        return Some((a, (a + 1).min(last), frame.fract()));
+    }
     let frame_time = 1.0 / fps;
     let (frames, max_time) = match mode {
         PuppetAnimationMode::Mirror => (2 * len, 2.0 * length as f32 / fps),
@@ -545,8 +551,8 @@ impl BonePose {
     }
 }
 
-/// Evaluates the scene's animation layers together. Additive clips apply their motion from
-/// their starting pose, which allows independent clips to animate different parts of a rig.
+/// Evaluates the scene's animation layers together. Looping additive clips apply motion from
+/// their starting pose, while a one-shot clip applies its offset from the rig's reference pose.
 pub fn layered_bone_matrices(
     skeleton: &PuppetSkeleton,
     layers: &[PuppetLayer],
@@ -582,29 +588,36 @@ pub fn layered_bone_matrices(
                 let start = BonePose::from(track[0]);
                 let frame = BonePose::from(track.get(*a).copied().unwrap_or(last))
                     .interpolate(track.get(*b).copied().unwrap_or(last).into(), *t);
-                Some((*layer, start, frame))
+                Some((*layer, clip.mode, start, frame))
             })
         };
         let opaque_weight: f32 = samples()
-            .filter(|(layer, _, _)| !layer.additive)
-            .map(|(layer, _, _)| layer.blend.min(1.0))
+            .filter(|(layer, _, _, _)| !layer.additive)
+            .map(|(layer, _, _, _)| layer.blend.min(1.0))
             .sum();
         let mut pose = rest;
         let mut accumulated = (1.0 - opaque_weight).max(0.0);
         if opaque_weight == 0.0 {
             // Character sheets can store their assembled starting pose in the clip, while the
             // bind pose still describes the separate pieces on the source texture.
-            if let Some((_, start, _)) = samples().next() {
+            if let Some((_, _, start, _)) =
+                samples().find(|(_, mode, _, _)| *mode != PuppetAnimationMode::Single)
+            {
                 pose = start;
             }
         }
-        for (layer, _, frame) in samples().filter(|(layer, _, _)| !layer.additive) {
+        for (layer, _, _, frame) in samples().filter(|(layer, _, _, _)| !layer.additive) {
             let weight = layer.blend.min(1.0);
             accumulated += weight;
             pose = pose.interpolate(frame, weight / accumulated);
         }
-        for (layer, start, frame) in samples().filter(|(layer, _, _)| layer.additive) {
-            pose.add_delta(start, frame, layer.blend.min(1.0));
+        for (layer, mode, start, frame) in samples().filter(|(layer, _, _, _)| layer.additive) {
+            let reference = if mode == PuppetAnimationMode::Single {
+                rest
+            } else {
+                start
+            };
+            pose.add_delta(reference, frame, layer.blend.min(1.0));
         }
         let parent = bone
             .parent

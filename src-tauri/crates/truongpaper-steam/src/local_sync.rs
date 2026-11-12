@@ -194,9 +194,17 @@ pub fn scan_workshop_roots(roots: &[PathBuf]) -> Vec<DiscoveredWorkshopWallpaper
                 .and_then(|v| v.as_str())
                 .unwrap_or("scene")
                 .to_ascii_lowercase();
+            // `preview` comes from downloaded content, so keep it inside the item folder.
             let preview_rel = project_json
                 .get("preview")
                 .and_then(|v| v.as_str())
+                .filter(|p| {
+                    let path = Path::new(p);
+                    !p.is_empty()
+                        && path
+                            .components()
+                            .all(|c| matches!(c, std::path::Component::Normal(_)))
+                })
                 .unwrap_or("preview.jpg");
             let audio_reactive = project_json
                 .pointer("/general/supportsaudioprocessing")
@@ -414,6 +422,15 @@ mod tests {
         assert!(!w.windows_only);
         assert!(w.bytes >= 10);
         assert!(w.preview_path.ends_with("p.png"));
+
+        // A preview path that leaves the item folder falls back to the default.
+        std::fs::write(
+            item.join("project.json"),
+            "{\"title\":\"Neon\",\"preview\":\"../../secret.png\"}",
+        )
+        .unwrap();
+        let found = scan_workshop_roots(std::slice::from_ref(&root));
+        assert!(Path::new(&found[0].preview_path).ends_with("2841928371/preview.jpg"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

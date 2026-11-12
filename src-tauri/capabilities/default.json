@@ -26,16 +26,6 @@
     "process:allow-restart",
     "shell:default",
     "shell:allow-open",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "bin/DepotDownloader",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    },
     "allow-photo-get-status",
     "allow-photo-fetch-public-catalog",
     "allow-photo-rotate-next",

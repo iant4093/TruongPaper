@@ -438,10 +438,10 @@ mod cpal_backend {
         let devices = host.input_devices().ok()?;
         for dev in devices {
             let name = dev.name().unwrap_or_default().to_ascii_lowercase();
+            // A bare "tap" match would also hit names such as "Laptop Microphone".
             if name.contains("blackhole")
                 || name.contains("loopback")
                 || name.contains("soundflower")
-                || name.contains("tap")
             {
                 if let Ok(cfg) = dev.default_input_config() {
                     return Some((dev, cfg));

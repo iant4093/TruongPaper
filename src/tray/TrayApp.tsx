@@ -21,8 +21,13 @@ export const TrayApp: React.FC = () => {
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const refreshAll = useAppStore((s) => s.refreshAll);
   const [switching, setSwitching] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const run = (action: () => Promise<unknown>) => {
+    setActionError(null);
+    action().catch((error) => setActionError(String(error)));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -32,12 +37,33 @@ export const TrayApp: React.FC = () => {
         if (cancelled) fn();
         else cleanup = fn;
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (!cancelled) setActionError(`Could not load TruongPaper status: ${String(error)}`);
+      });
     return () => {
       cancelled = true;
       cleanup?.();
     };
   }, [initAppListeners]);
+
+  // The popover keeps its own store, so reload edits made in Studio each time it opens.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void getCurrentWebviewWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) refreshAll().then(() => setActionError(null)).catch((error) => setActionError(String(error)));
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [refreshAll]);
 
   const activeMonitor = monitors.find((monitor) => monitor.monitorId === selectedMonitorId) ?? monitors[0];
   const activeMonitorId = activeMonitor?.monitorId;
@@ -157,7 +183,7 @@ export const TrayApp: React.FC = () => {
                 type="button"
                 className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                onClick={() => void setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite)}
+                onClick={() => run(() => setPhotoFavorite(currentPhoto.id, !currentPhoto.isFavorite))}
               >
                 {currentPhoto.isFavorite ? '★ Favorited' : '☆ Favorite'}
               </button>
@@ -165,7 +191,7 @@ export const TrayApp: React.FC = () => {
                 type="button"
                 className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                onClick={() => void blacklistAndSkipPhoto(currentPhoto.id)}
+                onClick={() => run(() => blacklistAndSkipPhoto(currentPhoto.id))}
               >
                 Hide
               </button>
@@ -173,7 +199,7 @@ export const TrayApp: React.FC = () => {
                 type="button"
                 className="button"
                 style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
-                onClick={() => void open(currentPhoto.albumUrl)}
+                onClick={() => run(() => open(currentPhoto.albumUrl))}
               >
                 Open Album
               </button>
@@ -192,7 +218,7 @@ export const TrayApp: React.FC = () => {
             ['blur_dissolve', 'Blur-Dissolve'],
             ['crossfade', 'Smooth Crossfade'],
           ]}
-          onChange={(transitionType: TransitionType) => void updateSettings({ transitionType })} />
+          onChange={(transitionType: TransitionType) => run(() => updateSettings({ transitionType }))} />
       </div>
 
       {photoStatus && (

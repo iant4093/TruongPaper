@@ -4,11 +4,15 @@ import React, { useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ColorPicker, normalizeHex } from './ColorPicker';
+import { FIT_MODE_LABEL } from '../lib/format';
 import type {
+  FitMode,
   ProjectJsonSchema,
   UniversalAdjustments,
   WallpaperPreset,
 } from '../types/ipc';
+
+const SCENE_FIT_OPTIONS = Object.entries(FIT_MODE_LABEL) as [FitMode, string][];
 
 /**
  * Converts Wallpaper Engine normalized float color string ("0.15 0.45 0.85")
@@ -168,9 +172,28 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
     });
   };
 
+  const handleAdjustmentChange = (patch: Partial<UniversalAdjustments>) => {
+    const previous = adjustments;
+    const next = { ...adjustments, ...patch };
+    onAdjustmentChange(next);
+    // Put the old value back if it was not saved, so the control matches the wallpaper.
+    invoke('monitor_update_adjustments', { wallpaperId, adjustments: next })
+      .catch(() => onAdjustmentChange(previous));
+  };
+
   return (
     <div className="property-inspector">
-      {/* Universal Color & Audio Adjustments */}
+      {project.type === 'scene' && (
+        <section>
+          <h4>Framing</h4>
+          <Dropdown
+            label="Scene fit mode"
+            value={adjustments.fitMode}
+            options={SCENE_FIT_OPTIONS}
+            onChange={(fitMode) => handleAdjustmentChange({ fitMode })}
+          />
+        </section>
+      )}
       <section>
         <h4>Playback &amp; audio</h4>
         <label className="property-field">
@@ -185,11 +208,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             max={1}
             step={0.01}
             value={adjustments.volume}
-            onChange={(e) => {
-              const next = { ...adjustments, volume: Number(e.target.value) };
-              onAdjustmentChange(next);
-              void invoke('monitor_update_adjustments', { wallpaperId, adjustments: next });
-            }}
+            onChange={(e) => handleAdjustmentChange({ volume: Number(e.target.value) })}
           />
         </label>
         <label className="property-field">
@@ -204,11 +223,7 @@ export const PropertyInspector: React.FC<PropertyInspectorProps> = ({
             max={2.0}
             step={0.05}
             value={Math.min(2, adjustments.playbackSpeed)}
-            onChange={(e) => {
-              const next = { ...adjustments, playbackSpeed: Number(e.target.value) };
-              onAdjustmentChange(next);
-              void invoke('monitor_update_adjustments', { wallpaperId, adjustments: next });
-            }}
+            onChange={(e) => handleAdjustmentChange({ playbackSpeed: Number(e.target.value) })}
           />
         </label>
       </section>

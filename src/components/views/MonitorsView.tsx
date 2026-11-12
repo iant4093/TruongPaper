@@ -66,6 +66,10 @@ export const MonitorsView: React.FC = () => {
       setMsg(err instanceof Error ? err.message : String(err));
     }
   };
+  const report = (action: Promise<unknown>) => {
+    setMsg(null);
+    action.catch((err) => setMsg(err instanceof Error ? err.message : String(err)));
+  };
   const setLockScreen = async () => {
     if (!active) return;
     setLockScreenPending(true);
@@ -160,7 +164,7 @@ export const MonitorsView: React.FC = () => {
               type="button"
               className="button"
               style={{ marginTop: 10 }}
-              onClick={() => void applyMonitorSource(active.monitorId, { kind: 'photo_api' })}
+              onClick={() => report(applyMonitorSource(active.monitorId, { kind: 'photo_api' }))}
             >
               <ImageIcon size={14} /> Switch to Ian's Photo API
             </button>
@@ -197,13 +201,13 @@ export const MonitorsView: React.FC = () => {
         <ToggleRow
           label="Skip portrait photos on landscape monitors (and vice-versa)"
           checked={settings?.skipMismatchedOrientation ?? true}
-          onChange={(next) => void updateSettings({ skipMismatchedOrientation: next })}
+          onChange={(next) => report(updateSettings({ skipMismatchedOrientation: next }))}
         />
         <div style={{ fontSize: 13, marginBottom: 8 }}>Photo fit mode</div>
         <SegmentedControl
           value={settings?.defaultFitMode ?? 'fill'}
           options={(Object.keys(FIT_MODE_LABEL) as FitMode[]).map((k) => [k, FIT_MODE_LABEL[k]] as const)}
-          onChange={(next) => void updateSettings({ defaultFitMode: next })}
+          onChange={(next) => report(updateSettings({ defaultFitMode: next }))}
         />
       </div>
 

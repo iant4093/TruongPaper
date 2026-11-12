@@ -540,10 +540,15 @@ impl WallpaperHost {
     }
 
     pub fn set_policy(&self, monitor_id: &str, policy: MonitorPlaybackPolicy) {
+        // A display seen for the first time here must still honor "pause all".
+        let global = *self.global_paused.lock();
         self.monitors
             .lock()
             .entry(monitor_id.to_string())
-            .or_default()
+            .or_insert_with(|| MonitorRuntime {
+                user_paused: global,
+                ..MonitorRuntime::default()
+            })
             .policy = policy;
     }
 
@@ -655,6 +660,9 @@ mod tests {
             CompositorUniforms::default(),
         );
         assert!(host.monitor("B").unwrap().user_paused);
+        // So do displays first reported by Smart Pause.
+        host.set_policy("C", MonitorPlaybackPolicy::Playing);
+        assert!(!host.monitor("C").unwrap().should_render());
         host.set_user_paused(Some("A"), false);
         assert!(host.monitor("A").unwrap().should_render());
         host.set_policy("A", MonitorPlaybackPolicy::PausedFullscreen);

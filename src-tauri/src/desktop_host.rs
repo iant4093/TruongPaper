@@ -295,6 +295,37 @@ fn same_uniforms(a: &CompositorUniforms, b: &CompositorUniforms) -> bool {
         && a.to_fit_mode == b.to_fit_mode
 }
 
+/// Maps desktop coordinates through the same fit transform as the compositor.
+fn scene_cursor_sample(
+    sample: CursorSample,
+    uniforms: &CompositorUniforms,
+) -> Option<CursorSample> {
+    let [x, y] = sample.pos;
+    let zoom = uniforms.zoom.max(0.05);
+    let x = (x - 0.5) / zoom - uniforms.offset_x * 0.5;
+    let y = (y - 0.5) / zoom - uniforms.offset_y * 0.5;
+    let ratio = uniforms.monitor_aspect / uniforms.to_image_aspect.max(0.001);
+    let fit = uniforms.to_fit_mode;
+    let (sx, sy) = if fit == FitMode::Stretch as u32 {
+        (1.0, 1.0)
+    } else if fit == FitMode::Fill as u32 {
+        (ratio.min(1.0), ratio.recip().min(1.0))
+    } else {
+        (ratio.max(1.0), ratio.recip().max(1.0))
+    };
+    let pos = [x * sx + 0.5, y * sy + 0.5];
+    if fit == FitMode::Fill as u32 || fit == FitMode::Stretch as u32 {
+        return Some(CursorSample {
+            pos: pos.map(|v| v.clamp(0.0, 1.0)),
+            ..sample
+        });
+    }
+    // The backdrop outside the fitted image is not part of the interactive scene.
+    pos.iter()
+        .all(|v| (0.0..=1.0).contains(v))
+        .then_some(CursorSample { pos, ..sample })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Cursor polling
 // ---------------------------------------------------------------------------------------------
@@ -1180,6 +1211,10 @@ impl MonitorRenderer {
             scene.set_paused(!should_render);
             scene.set_sound_owner(sound_owner);
             scene.apply_adjustments(&adjustments);
+            self.dirty |= self
+                .last_uniforms
+                .as_ref()
+                .is_none_or(|u| !same_uniforms(u, &base));
         }
         let needs_still = self.dirty
             && !matches!(self.content, Content::None)
@@ -1340,21 +1375,27 @@ impl MonitorRenderer {
         let now = Instant::now();
         let dt = now.duration_since(scene.last_frame).as_secs_f32().min(0.1);
         scene.last_frame = now;
+        let uniforms = frame_uniforms(base, 1.0, monitor_aspect, scene.aspect, scene.aspect, time);
 
         // Re-present the last scene texture when a paused desktop is revealed.
         if !scene.paused || !scene.has_frame {
             let (left, right) = crate::audio_bridge::latest_frame()
                 .map(|f| (f.left_64, f.right_64))
                 .unwrap_or(([0.0; 64], [0.0; 64]));
-            let sample = cursor.poll(geoms, &self.monitor_id);
+            let sample = cursor
+                .poll(geoms, &self.monitor_id)
+                .and_then(|sample| scene_cursor_sample(sample, &uniforms));
             for (kind, pos) in cursor_transitions(scene.last_cursor, sample) {
                 if let Err(err) = scene.runtime.dispatch_cursor(scene_cursor_kind(kind), pos) {
                     tracing::debug!("scene cursor event: {err}");
                 }
             }
-            if sample.is_some() {
-                scene.last_cursor = sample;
-            }
+            scene.last_cursor = sample.or_else(|| {
+                scene.last_cursor.map(|last| CursorSample {
+                    left_down: false,
+                    ..last
+                })
+            });
             let c = scene.last_cursor.unwrap_or(CursorSample {
                 pos: [0.5, 0.5],
                 left_down: false,
@@ -1381,7 +1422,6 @@ impl MonitorRenderer {
             );
             scene.has_frame = true;
         }
-        let uniforms = frame_uniforms(base, 1.0, monitor_aspect, scene.aspect, scene.aspect, time);
         if uniforms.to_fit_mode == FitMode::FitBlur as u32 {
             self.compositor
                 .precompute_kawase_blur(device, &mut encoder, &scene.sample_view, false);
@@ -1399,6 +1439,7 @@ impl MonitorRenderer {
         );
         queue.submit(Some(encoder.finish()));
         frame.present();
+        self.last_uniforms = Some(*base);
         self.dirty = false;
     }
 }
@@ -1683,6 +1724,35 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scene_cursor_tracks_crop_and_excludes_fit_backdrop() {
+        let mut uniforms = CompositorUniforms {
+            monitor_aspect: 3456.0 / 2234.0,
+            to_image_aspect: 16.0 / 9.0,
+            to_fit_mode: FitMode::Fill as u32,
+            ..Default::default()
+        };
+        let sample = CursorSample {
+            pos: [0.0, 0.0],
+            left_down: true,
+        };
+        let cropped = scene_cursor_sample(sample, &uniforms).unwrap();
+        assert!((cropped.pos[0] - 0.0649).abs() < 0.0001);
+        assert_eq!(cropped.pos[1], 0.0);
+        assert!(cropped.left_down);
+
+        for mode in [FitMode::FitBlack, FitMode::FitBlur] {
+            uniforms.to_fit_mode = mode as u32;
+            assert!(scene_cursor_sample(sample, &uniforms).is_none());
+            let image_edge = CursorSample {
+                pos: [0.5, 0.06491],
+                ..sample
+            };
+            let fitted = scene_cursor_sample(image_edge, &uniforms).unwrap();
+            assert!(fitted.pos[1].abs() < 0.0001);
+        }
+    }
 
     #[test]
     fn display_notifications_only_rebuild_changed_surface_geometry() {

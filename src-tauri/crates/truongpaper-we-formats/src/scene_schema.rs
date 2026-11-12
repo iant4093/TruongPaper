@@ -66,6 +66,17 @@ impl<T: Clone> UserBoundValue<T> {
         }
     }
 
+    /// Instance-level `scriptproperties` stored next to the script, if any.
+    pub fn script_properties(&self) -> Option<&HashMap<String, serde_json::Value>> {
+        match self {
+            Self::Bound {
+                scriptproperties: Some(p),
+                ..
+            } => Some(p),
+            _ => None,
+        }
+    }
+
     /// The attached SceneScript source, if any.
     pub fn script(&self) -> Option<&str> {
         match self {
@@ -89,6 +100,55 @@ fn user_prop_value<'a>(
     }
 }
 
+/// Whether a property value satisfies a binding `condition` string (a combo value such as `"2"`,
+/// or `"1"`/`"true"` for a checked bool). Numbers compare numerically, so `2.0` matches `"2"`.
+pub fn condition_matches(actual: &serde_json::Value, condition: &str) -> bool {
+    let cond = condition.trim();
+    match actual {
+        serde_json::Value::String(s) => s.trim() == cond,
+        serde_json::Value::Bool(b) => {
+            let truthy = matches!(cond, "1" | "true");
+            let falsy = matches!(cond, "0" | "false");
+            (*b && truthy) || (!*b && falsy)
+        }
+        serde_json::Value::Number(n) => match (n.as_f64(), cond.parse::<f64>()) {
+            (Some(a), Ok(c)) => (a - c).abs() < 1e-9,
+            _ => n.to_string() == cond,
+        },
+        other => *other == cond,
+    }
+}
+
+/// Resolves a raw JSON value that may be a `{ "user": ..., "value": ... }` binding (used for
+/// SceneScript `scriptproperties` and particle `instanceoverride` entries). Non-binding values
+/// are returned unchanged; a condition binding resolves to `true`/`false` like a bool.
+pub fn resolve_json_binding(
+    raw: &serde_json::Value,
+    user_props: &UserPropertyMap,
+) -> serde_json::Value {
+    let Some(obj) = raw.as_object().filter(|o| o.contains_key("user")) else {
+        return raw.clone();
+    };
+    let default = obj.get("value").cloned().unwrap_or(serde_json::Value::Null);
+    let spec: Option<UserConditionSpec> = serde_json::from_value(obj["user"].clone()).ok();
+    match spec {
+        Some(UserConditionSpec::PropertyName(key))
+        | Some(UserConditionSpec::Conditional {
+            name: key,
+            condition: None,
+        }) => user_prop_value(user_props, &key)
+            .cloned()
+            .unwrap_or(default),
+        Some(UserConditionSpec::Conditional {
+            name,
+            condition: Some(cond),
+        }) => user_prop_value(user_props, &name)
+            .map(|v| serde_json::Value::Bool(condition_matches(v, &cond)))
+            .unwrap_or(default),
+        None => default,
+    }
+}
+
 /// Evaluates a UserBoundValue<bool> (such as layer or effect `visible`) against current project.json values
 pub fn resolve_bound_bool(bound: &UserBoundValue<bool>, user_props: &UserPropertyMap) -> bool {
     match bound {
@@ -106,11 +166,7 @@ pub fn resolve_bound_bool(bound: &UserBoundValue<bool>, user_props: &UserPropert
                         return *value;
                     };
                     if let Some(expected_cond) = condition {
-                        let actual_str = match actual {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        actual_str == *expected_cond
+                        condition_matches(actual, expected_cond)
                     } else {
                         actual.as_bool().unwrap_or(*value)
                     }
@@ -377,6 +433,10 @@ pub struct SceneObject {
     pub animation_layers: Vec<ScenePuppetAnimation>,
     #[serde(default)]
     pub effects: Vec<SceneEffectRef>,
+    /// Particle layers: per-instance overrides (`count`, `rate`, `size`, `alpha`, `lifetime`,
+    /// `speed`, `colorn`, `brightness`); values may be bound to user properties.
+    #[serde(default)]
+    pub instanceoverride: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -859,6 +919,40 @@ mod tests {
         assert_eq!(
             again.objects[0].alpha.user_property_name(),
             Some("opacity_slider")
+        );
+    }
+
+    #[test]
+    fn condition_matching_handles_bools_numbers_and_strings() {
+        use serde_json::json;
+        assert!(condition_matches(&json!(true), "1"));
+        assert!(condition_matches(&json!(false), "0"));
+        assert!(!condition_matches(&json!(false), "1"));
+        assert!(condition_matches(&json!(2), "2"));
+        assert!(condition_matches(&json!(2.0), "2"));
+        assert!(condition_matches(&json!("2"), "2"));
+        assert!(!condition_matches(&json!("3"), "2"));
+    }
+
+    #[test]
+    fn json_bindings_resolve_with_defaults_and_conditions() {
+        use serde_json::json;
+        let mut props = UserPropertyMap::new();
+        assert_eq!(
+            resolve_json_binding(&json!({"user": "a", "value": 1}), &props),
+            json!(1)
+        );
+        props.insert("a".into(), json!({"type": "slider", "value": 7}));
+        props.insert("m".into(), json!("2"));
+        assert_eq!(
+            resolve_json_binding(&json!({"user": "a", "value": 1}), &props),
+            json!(7)
+        );
+        let cond = json!({"user": {"name": "m", "condition": "2"}, "value": false});
+        assert_eq!(resolve_json_binding(&cond, &props), json!(true));
+        assert_eq!(
+            resolve_json_binding(&json!("plain"), &props),
+            json!("plain")
         );
     }
 }

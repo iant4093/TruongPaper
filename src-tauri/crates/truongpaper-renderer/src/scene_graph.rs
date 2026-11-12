@@ -26,13 +26,14 @@ use std::collections::{HashMap, HashSet};
 use glam::{Mat4, Vec2, Vec3};
 use truongpaper_we_formats::{
     parse_scene_json, parse_tex, parse_user_properties, parse_vec2_or, parse_vec3_or,
-    parse_vec_components, resolve_bound_bool, resolve_bound_value, SceneEffectRef, SceneFile,
-    SceneObject, UserBoundValue, UserConditionSpec, UserPropertyMap, WeVirtualFileSystem,
+    parse_vec_components, resolve_bound_bool, resolve_bound_value, resolve_json_binding,
+    SceneEffectRef, SceneFile, SceneObject, UserBoundValue, UserConditionSpec, UserPropertyMap,
+    WeVirtualFileSystem,
 };
 
 use crate::diagnostics::DiagnosticsLog;
 use crate::json::Value;
-use crate::particles::{ParticleFile, ParticleSystemInstance};
+use crate::particles::{ParticleFile, ParticleOverrides, ParticleSystemInstance};
 use crate::scene_assets::{material_texture_path, MaterialFile, ModelJsonFile};
 use crate::scene_math::{
     build_pass_matrices, layer_model_matrix, parallax_eye_offset, scene_orthographic_projection,
@@ -394,6 +395,8 @@ pub struct PropertyScriptSlot {
     pub script: String,
     /// The scene's `value` as a string (`"960 540 0"`, `"1"`, `"true"`).
     pub initial_value: String,
+    /// Instance-level `scriptproperties` (user bindings resolved) as a JSON object.
+    pub script_properties_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -425,6 +428,10 @@ pub struct SceneGraph {
     pub diagnostics: DiagnosticsLog,
     nodes: Vec<SceneNode>,
     particles: Vec<(usize, ParticleSystemInstance)>,
+    /// User properties referenced by bindings that the renderer bakes into GPU plans (effect
+    /// visibility / shader constants, bloom).
+    render_bound_keys: HashSet<String>,
+    render_epoch: u64,
 }
 
 impl std::fmt::Debug for SceneGraph {
@@ -660,6 +667,8 @@ impl SceneGraph {
             diagnostics: DiagnosticsLog::default(),
             nodes: Vec::new(),
             particles: Vec::new(),
+            render_bound_keys: HashSet::new(),
+            render_epoch: 0,
         };
         let perspective = raw.is_some()
             && graph
@@ -668,6 +677,8 @@ impl SceneGraph {
                 .is_none_or(Value::is_null);
         graph.resolve_general(perspective);
         graph.build_nodes(vfs);
+        graph.render_bound_keys = collect_render_bound_keys(&graph.scene);
+        graph.resolve_particle_overrides();
         Ok(graph)
     }
 
@@ -1167,63 +1178,82 @@ impl SceneGraph {
         for layer in &self.layers {
             let obj = &self.scene.objects[layer.object_index];
             let key = layer.key();
-            let mut push = |prop: ScriptProperty, script: Option<&str>, initial: String| {
+            let user_props = &self.user_props;
+            let mut push = |prop: ScriptProperty,
+                            script: Option<&str>,
+                            sp: Option<&HashMap<String, serde_json::Value>>,
+                            initial: String| {
                 if let Some(script) = script {
+                    let resolved: serde_json::Map<String, serde_json::Value> = sp
+                        .into_iter()
+                        .flatten()
+                        .map(|(k, v)| (k.clone(), resolve_json_binding(v, user_props)))
+                        .collect();
                     out.push(PropertyScriptSlot {
                         slot_key: format!("{key}/{}", prop.as_str()),
                         layer_name: layer.name.clone(),
                         property: prop.as_str().to_string(),
                         script: script.to_string(),
                         initial_value: initial,
+                        script_properties_json: serde_json::Value::Object(resolved).to_string(),
                     });
                 }
             };
             push(
                 ScriptProperty::Origin,
                 obj.origin.script(),
+                obj.origin.script_properties(),
                 obj.origin.default_value().clone(),
             );
             push(
                 ScriptProperty::Scale,
                 obj.scale.script(),
+                obj.scale.script_properties(),
                 obj.scale.default_value().clone(),
             );
             push(
                 ScriptProperty::Angles,
                 obj.angles.script(),
+                obj.angles.script_properties(),
                 obj.angles.default_value().clone(),
             );
             push(
                 ScriptProperty::Alpha,
                 obj.alpha.script(),
+                obj.alpha.script_properties(),
                 obj.alpha.default_value().to_string(),
             );
             push(
                 ScriptProperty::Visible,
                 obj.visible.script(),
+                obj.visible.script_properties(),
                 obj.visible.default_value().to_string(),
             );
             push(
                 ScriptProperty::Color,
                 obj.color.script(),
+                obj.color.script_properties(),
                 obj.color.default_value().clone(),
             );
             if let Some(size) = &obj.size {
                 push(
                     ScriptProperty::Size,
                     size.script(),
+                    size.script_properties(),
                     size.default_value().clone(),
                 );
             }
             push(
                 ScriptProperty::Brightness,
                 obj.brightness.script(),
+                obj.brightness.script_properties(),
                 obj.brightness.default_value().to_string(),
             );
             if let Some(text) = &obj.text {
                 push(
                     ScriptProperty::Text,
                     text.script(),
+                    text.script_properties(),
                     text.default_value().clone(),
                 );
             }
@@ -1388,7 +1418,14 @@ impl SceneGraph {
     pub fn apply_user_properties(&mut self, json: &str) -> Result<(), SceneLoadError> {
         let changed = parse_user_properties(json)
             .map_err(|e| SceneLoadError::UserProperties(e.to_string()))?;
+        if changed
+            .keys()
+            .any(|k| self.render_bound_keys.contains(k.as_str()))
+        {
+            self.render_epoch += 1;
+        }
         self.user_props.extend(changed);
+        self.resolve_particle_overrides();
         let perspective = self.camera.projection.is_perspective();
         self.resolve_general(perspective);
         for i in 0..self.nodes.len() {
@@ -1404,6 +1441,46 @@ impl SceneGraph {
         }
         self.recompute_world();
         Ok(())
+    }
+
+    /// Counter bumped whenever a changed user property feeds a binding the renderer bakes into
+    /// its GPU plans (effect visibility / shader constants, bloom). The host calls
+    /// `SceneRenderer::load` again when this differs from the value at the last load.
+    pub fn render_epoch(&self) -> u64 {
+        self.render_epoch
+    }
+
+    /// Resolves every particle layer's `instanceoverride` against the current user properties.
+    fn resolve_particle_overrides(&mut self) {
+        for (li, inst) in &mut self.particles {
+            let obj = &self.scene.objects[self.layers[*li].object_index];
+            let mut ov = ParticleOverrides::default();
+            for (key, raw) in obj.instanceoverride.iter().flatten() {
+                let v = resolve_json_binding(raw, &self.user_props);
+                let num = |v: &serde_json::Value| {
+                    v.as_f64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+                        .map(|n| n as f32)
+                        .filter(|n| n.is_finite())
+                };
+                match key.as_str() {
+                    "count" => ov.count = num(&v).unwrap_or(1.0),
+                    "rate" => ov.rate = num(&v).unwrap_or(1.0),
+                    "size" => ov.size = num(&v).unwrap_or(1.0),
+                    "alpha" => ov.alpha = num(&v).unwrap_or(1.0),
+                    "lifetime" => ov.lifetime = num(&v).unwrap_or(1.0),
+                    "speed" => ov.speed = num(&v).unwrap_or(1.0),
+                    "brightness" => ov.brightness = num(&v).unwrap_or(1.0),
+                    "colorn" => {
+                        if let serde_json::Value::String(s) = &v {
+                            ov.color = parse_vec3_or(s, Vec3::ONE);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            inst.set_overrides(ov);
+        }
     }
 
     /// Steps every particle system of a visible layer. `cursor_world` is in scene units and is
@@ -1438,4 +1515,35 @@ impl SceneGraph {
     pub fn particle_systems(&self) -> impl Iterator<Item = (usize, &ParticleSystemInstance)> {
         self.particles.iter().map(|(li, p)| (*li, p))
     }
+}
+
+/// User property names used by bindings the renderer bakes into its GPU plans.
+fn collect_render_bound_keys(scene: &SceneFile) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    let mut add = |name: Option<&str>| {
+        if let Some(n) = name {
+            keys.insert(n.to_string());
+        }
+    };
+    for obj in &scene.objects {
+        for effect in &obj.effects {
+            add(effect.visible.user_property_name());
+            for pass in &effect.passes {
+                for bound in pass.constantshadervalues.values() {
+                    add(bound.user_property_name());
+                }
+            }
+        }
+    }
+    let g = &scene.general;
+    add(g.bloom.as_ref().and_then(|b| b.user_property_name()));
+    add(g
+        .bloomstrength
+        .as_ref()
+        .and_then(|b| b.user_property_name()));
+    add(g
+        .bloomthreshold
+        .as_ref()
+        .and_then(|b| b.user_property_name()));
+    keys
 }

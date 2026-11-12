@@ -116,6 +116,25 @@ impl SoundRng {
     }
 }
 
+/// Normalizes a user-property JSON object to `{ key: value }`: `project.json`-style property
+/// objects (`{ "type": .., "value": v }`) are unwrapped to `v`. Invalid JSON is returned as is
+/// (the caller reports the parse error).
+fn plain_properties_json(json: &str) -> String {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let plain: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::Object(mut o) if o.contains_key("value") => {
+                (k, o.remove("value").unwrap_or_default())
+            }
+            other => (k, other),
+        })
+        .collect();
+    serde_json::Value::Object(plain).to_string()
+}
+
 pub struct SceneRuntime {
     graph: SceneGraph,
     engine: SceneScriptEngine,
@@ -198,7 +217,8 @@ impl SceneRuntime {
         // register_layer has no size/color: sync the full state once.
         rt.push_layers()?;
 
-        if let Some(json) = user_props_json {
+        let initial_props = user_props_json.map(plain_properties_json);
+        if let Some(json) = &initial_props {
             if let Err(err) = rt.engine.apply_user_properties(json) {
                 tracing::warn!("scene {scene_path}: user properties not passed to scripts: {err}");
             }
@@ -221,11 +241,12 @@ impl SceneRuntime {
             } else {
                 slot.initial_value.clone()
             };
-            match rt.engine.register_property_script(
+            match rt.engine.register_property_script_with_props(
                 &slot.slot_key,
                 &layer_key,
                 &slot.script,
                 &initial_value_expr(prop, &raw),
+                &slot.script_properties_json,
             ) {
                 Ok(value) => {
                     rt.registered_slots.push(slot.slot_key.clone());
@@ -246,6 +267,16 @@ impl SceneRuntime {
         }
         for (slot, value) in init_outputs {
             rt.graph.apply_script_output(&slot, &value);
+        }
+        // Scripts only exist now: give each its `applyUserProperties(all values)` call, as
+        // Wallpaper Engine does at load, so saved origin/scale/... settings take effect.
+        if let Some(json) = &initial_props {
+            if !rt.registered_slots.is_empty() && json != "{}" {
+                if let Err(err) = rt.engine.apply_user_properties(json) {
+                    tracing::warn!("scene {scene_path}: applyUserProperties at load: {err}");
+                }
+                rt.pull_layers()?;
+            }
         }
         Ok(rt)
     }
@@ -392,9 +423,18 @@ impl SceneRuntime {
     /// Applies changed user properties (JSON object of `key: value`) to the scene graph (bound
     /// values re-resolve) and calls `applyUserProperties(changedProps)` on every script.
     pub fn apply_user_properties(&mut self, changed_json: &str) -> anyhow::Result<()> {
-        self.graph.apply_user_properties(changed_json)?;
+        let changed_json = plain_properties_json(changed_json);
+        self.graph.apply_user_properties(&changed_json)?;
+        // Instance-level `scriptproperties` bound to the changed properties.
+        for slot in self.graph.property_scripts() {
+            if slot.script_properties_json != "{}" && self.registered_slots.contains(&slot.slot_key)
+            {
+                self.engine
+                    .update_script_properties(&slot.slot_key, &slot.script_properties_json)?;
+            }
+        }
         self.push_layers()?;
-        self.engine.apply_user_properties(changed_json)?;
+        self.engine.apply_user_properties(&changed_json)?;
         self.pull_layers()?;
         Ok(())
     }
@@ -924,5 +964,82 @@ mod tests {
     fn missing_scene_is_an_error() {
         let t = TempDir::new("missing");
         assert!(SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).is_err());
+    }
+
+    fn bound_scene() -> TempDir {
+        let t = TempDir::new("bound");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 10, "height": 10 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 1000, "height": 1000 } }, "objects": [
+                { "name": "Gate", "image": "models/solid.json",
+                  "visible": { "user": { "name": "mode", "condition": "2" }, "value": false } },
+                { "name": "Pick", "image": "models/solid.json",
+                  "visible": { "user": { "name": "flag", "condition": "1" }, "value": false } },
+                { "name": "Fx", "image": "models/solid.json",
+                  "effects": [ { "file": "effects/x/effect.json",
+                    "visible": { "user": "fxon", "value": true },
+                    "passes": [ { "constantshadervalues": { "amount": { "user": "amt", "value": 0.5 } } } ] } ] },
+                { "name": "Scripted", "image": "models/solid.json",
+                  "alpha": { "script": "export var scriptProperties = createScriptProperties().addCheckbox({ name: 'on', value: false }).finish();\nexport function update(v) { return scriptProperties.on ? 1 : 0.2; }",
+                             "scriptproperties": { "on": { "user": "flag", "value": false } }, "value": 1 } },
+                { "name": "Moved", "image": "models/solid.json",
+                  "origin": { "script": "let x = 5;\nexport function update(v) { return new Vec3(x, 7, 0); }\nexport function applyUserProperties(p) { if (p.px !== undefined) x = p.px; }", "value": "0 0 0" } }
+            ] }"#,
+        );
+        t
+    }
+
+    #[test]
+    fn condition_bindings_and_saved_values_apply_at_load_and_live() {
+        let t = bound_scene();
+        // Saved values arrive both as plain values and as project.json property objects.
+        let props = r#"{"mode": {"type":"combo","value":"2"}, "flag": true, "px": 40}"#;
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", Some(props), MONITOR).unwrap();
+        step(&mut rt);
+        assert!(
+            layer(&rt, "Gate").visible,
+            "combo condition matches at load"
+        );
+        assert!(layer(&rt, "Pick").visible, "bool matches condition \"1\"");
+        assert_eq!(
+            layer(&rt, "Scripted").alpha,
+            1.0,
+            "bound scriptproperties at load"
+        );
+        assert_eq!(
+            layer(&rt, "Moved").transform.origin.x,
+            40.0,
+            "applyUserProperties at load"
+        );
+
+        rt.apply_user_properties(r#"{"mode": "3", "flag": false, "px": 80}"#)
+            .unwrap();
+        step(&mut rt);
+        assert!(!layer(&rt, "Gate").visible);
+        assert!(!layer(&rt, "Pick").visible);
+        assert_eq!(
+            layer(&rt, "Scripted").alpha,
+            0.2,
+            "scriptproperties re-bound live"
+        );
+        assert_eq!(layer(&rt, "Moved").transform.origin.x, 80.0);
+    }
+
+    #[test]
+    fn render_epoch_changes_only_for_baked_bindings() {
+        let t = bound_scene();
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        let e0 = rt.graph().render_epoch();
+        rt.apply_user_properties(r#"{"mode": "3"}"#).unwrap();
+        assert_eq!(rt.graph().render_epoch(), e0);
+        rt.apply_user_properties(r#"{"amt": 2}"#).unwrap();
+        let e1 = rt.graph().render_epoch();
+        assert!(e1 > e0, "effect shader constant is baked into the GPU plan");
+        rt.apply_user_properties(r#"{"fxon": false}"#).unwrap();
+        assert!(rt.graph().render_epoch() > e1, "effect visibility too");
     }
 }

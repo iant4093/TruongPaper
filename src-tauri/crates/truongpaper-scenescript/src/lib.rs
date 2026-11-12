@@ -490,6 +490,28 @@ impl SceneScriptEngine {
         raw_es_script: &str,
         initial_value_expr: &str,
     ) -> anyhow::Result<String> {
+        self.register_property_script_with_props(
+            slot_key,
+            layer_name,
+            raw_es_script,
+            initial_value_expr,
+            "{}",
+        )
+    }
+
+    /// Like [`Self::register_property_script`], with the instance-level `scriptproperties`
+    /// (`{ name: value }`, user bindings already resolved) that override the defaults declared
+    /// through `createScriptProperties()`.
+    pub fn register_property_script_with_props(
+        &self,
+        slot_key: &str,
+        layer_name: &str,
+        raw_es_script: &str,
+        initial_value_expr: &str,
+        script_props_json: &str,
+    ) -> anyhow::Result<String> {
+        let script_props: serde_json::Value = serde_json::from_str(script_props_json)?;
+        let script_props = serde_json::to_string(&script_props)?;
         let (valid_body, exported) = prepare_script(raw_es_script);
         let mut export_names: Vec<&str> = LIFECYCLE_FNS.to_vec();
         for n in &exported {
@@ -507,15 +529,20 @@ impl SceneScriptEngine {
                 "(function() {{
                     const exports = {{}};
                     const thisLayer = globalThis.__layers[{layer_name}] || {{}};
-                    const scriptProperties = {{}};
+                    const __spStore = {{}};
+                    var scriptProperties = __spStore;
+                    const __sp = {script_props};
+                    const __pick = function(o, fallback) {{
+                        return Object.prototype.hasOwnProperty.call(__sp, o.name) ? __sp[o.name] : fallback;
+                    }};
                     const createScriptProperties = function() {{
                         const builder = {{
-                            addSlider(o) {{ scriptProperties[o.name] = o.value; return builder; }},
-                            addCheckbox(o) {{ scriptProperties[o.name] = o.value; return builder; }},
-                            addColor(o) {{ scriptProperties[o.name] = new Vec3(o.value); return builder; }},
-                            addText(o) {{ scriptProperties[o.name] = o.value; return builder; }},
-                            addCombo(o) {{ scriptProperties[o.name] = o.options?.[0]?.value ?? 0; return builder; }},
-                            finish() {{ return scriptProperties; }}
+                            addSlider(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
+                            addCheckbox(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
+                            addColor(o) {{ __spStore[o.name] = new Vec3(__pick(o, o.value)); return builder; }},
+                            addText(o) {{ __spStore[o.name] = __pick(o, o.value); return builder; }},
+                            addCombo(o) {{ __spStore[o.name] = __pick(o, o.value ?? o.options?.[0]?.value ?? 0); return builder; }},
+                            finish() {{ return __spStore; }}
                         }};
                         return builder;
                     }};
@@ -526,13 +553,42 @@ impl SceneScriptEngine {
                         const r = exports.init(val);
                         if (r !== undefined) val = r;
                     }}
-                    globalThis.__scripts[{slot_key}] = {{ exports, thisLayer, currentValue: val }};
+                    globalThis.__scripts[{slot_key}] = {{ exports, thisLayer, currentValue: val, scriptProperties: __spStore }};
                     return String(val);
                 }})()",
                 layer_name = js_str(layer_name),
                 slot_key = js_str(slot_key),
             );
             eval_js::<String>(ctx, wrapper)
+        })
+    }
+
+    /// Merges new instance-level `scriptproperties` (`{ name: value }`) into the live
+    /// `scriptProperties` object of one registered slot. Unknown slots are ignored.
+    pub fn update_script_properties(
+        &self,
+        slot_key: &str,
+        script_props_json: &str,
+    ) -> anyhow::Result<()> {
+        let parsed: serde_json::Value = serde_json::from_str(script_props_json)?;
+        let canonical = serde_json::to_string(&parsed)?;
+        self.guarded(INIT_BUDGET, |ctx| {
+            eval_js::<()>(
+                ctx,
+                format!(
+                    "(function() {{
+                        const s = globalThis.__scripts[{slot}];
+                        if (!s || !s.scriptProperties) return;
+                        const props = {canonical};
+                        for (const k of Object.keys(props)) {{
+                            const cur = s.scriptProperties[k];
+                            const isVec = cur !== undefined && cur !== null && typeof cur === 'object' && 'z' in cur;
+                            s.scriptProperties[k] = isVec ? new Vec3(props[k]) : props[k];
+                        }}
+                    }})()",
+                    slot = js_str(slot_key),
+                ),
+            )
         })
     }
 

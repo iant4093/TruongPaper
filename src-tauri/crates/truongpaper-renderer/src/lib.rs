@@ -32,7 +32,7 @@ pub use effect_chain::{
     RT_8_FRAME_BUFFER, RT_BLOOM, RT_FULL_FRAME_BUFFER, RT_SCENE,
 };
 pub use particles::{
-    parse_vec3_str, ParticleControlPointSpec, ParticleEmitterSpec, ParticleFile,
+    parse_vec3_str, ParticleControlPointSpec, ParticleEmitterSpec, ParticleFile, ParticleOverrides,
     ParticleRendererSpec, ParticleSpecError, ParticleSystemInstance, RopeParticleVertex,
     SingleParticle, SpriteParticleVertex,
 };

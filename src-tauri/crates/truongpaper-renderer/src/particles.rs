@@ -242,7 +242,37 @@ pub struct SingleParticle {
     pub alive: bool,
 }
 
+/// Scene-object `instanceoverride` multipliers applied on top of the particle preset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleOverrides {
+    pub count: f32,
+    pub rate: f32,
+    pub size: f32,
+    pub alpha: f32,
+    pub lifetime: f32,
+    pub speed: f32,
+    pub brightness: f32,
+    /// Tint multiplied into the particle color (`colorn`).
+    pub color: Vec3,
+}
+
+impl Default for ParticleOverrides {
+    fn default() -> Self {
+        Self {
+            count: 1.0,
+            rate: 1.0,
+            size: 1.0,
+            alpha: 1.0,
+            lifetime: 1.0,
+            speed: 1.0,
+            brightness: 1.0,
+            color: Vec3::ONE,
+        }
+    }
+}
+
 pub struct ParticleSystemInstance {
+    pub overrides: ParticleOverrides,
     pub spec: ParticleFile,
     pub particles: Vec<SingleParticle>,
     pub emit_accumulators: Vec<f32>,
@@ -268,6 +298,7 @@ impl ParticleSystemInstance {
             rng_state: 0x853C_49E6_748F_EA9B,
             elapsed_time: 0.0,
             spawned_instantaneous: false,
+            overrides: ParticleOverrides::default(),
             spec,
         };
         let prewarm = inst.spec.starttime.min(10.0);
@@ -278,6 +309,21 @@ impl ParticleSystemInstance {
             }
         }
         inst
+    }
+
+    /// Replaces the instance overrides. Particles already alive keep their values; new ones use
+    /// the new multipliers (so a property change shows as the old particles die off).
+    pub fn set_overrides(&mut self, overrides: ParticleOverrides) {
+        self.overrides = overrides;
+    }
+
+    /// Particle cap after the `count` override.
+    fn max_count(&self) -> usize {
+        let base = self.spec.maxcount.clamp(1, 10_000) as f32;
+        // Never above the GPU buffer capacity sized from the preset's own `maxcount`.
+        (base * self.overrides.count.max(0.0))
+            .round()
+            .clamp(0.0, base) as usize
     }
 
     #[inline]
@@ -312,13 +358,13 @@ impl ParticleSystemInstance {
         }
 
         // 2. Spawn new particles from emitters
-        let max_count = self.spec.maxcount.clamp(1, 10_000) as usize;
+        let max_count = self.max_count();
         for (e_idx, emitter) in self.spec.emitter.clone().iter().enumerate() {
             let mut to_spawn = 0usize;
             if !self.spawned_instantaneous && emitter.instantaneous > 0 {
                 to_spawn += emitter.instantaneous as usize;
             }
-            self.emit_accumulators[e_idx] += emitter.rate * dt;
+            self.emit_accumulators[e_idx] += emitter.rate * self.overrides.rate.max(0.0) * dt;
             let periodic = self.emit_accumulators[e_idx].floor() as usize;
             self.emit_accumulators[e_idx] -= periodic as f32;
             to_spawn += periodic;
@@ -580,6 +626,15 @@ impl ParticleSystemInstance {
             }
         }
 
+        let ov = self.overrides;
+        p.lifetime = (p.lifetime * ov.lifetime).max(0.05);
+        p.size *= ov.size;
+        p.initial_size *= ov.size;
+        p.alpha *= ov.alpha;
+        p.initial_alpha *= ov.alpha;
+        p.velocity *= ov.speed;
+        p.color *= ov.color * ov.brightness;
+        p.initial_color *= ov.color * ov.brightness;
         p
     }
 
@@ -692,5 +747,50 @@ fn parse_vec3_json(val: Option<&Value>, default: Vec3) -> Vec3 {
         Some(Value::String(s)) => parse_vec3_str(s, default),
         Some(Value::Number(n)) => Vec3::splat(*n as f32),
         _ => default,
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn system() -> ParticleSystemInstance {
+        let spec = ParticleFile::from_json_str(
+            r#"{ "maxcount": 100, "emitter": [ { "name": "boxrandom", "rate": 100,
+                 "distancemax": "10 10 0" } ],
+                 "initializer": [ { "name": "sizerandom", "min": 10, "max": 10 },
+                                  { "name": "alpharandom", "min": 1, "max": 1 } ] }"#,
+        )
+        .unwrap();
+        ParticleSystemInstance::new(spec)
+    }
+
+    #[test]
+    fn instance_overrides_scale_count_size_alpha_and_color() {
+        let mut base = system();
+        base.step(1.0, Vec3::ZERO);
+        assert_eq!(base.particles.len(), 100);
+
+        let mut ov = system();
+        ov.set_overrides(ParticleOverrides {
+            count: 0.5,
+            size: 2.0,
+            alpha: 0.5,
+            color: Vec3::new(1.0, 0.0, 0.0),
+            ..ParticleOverrides::default()
+        });
+        ov.step(1.0, Vec3::ZERO);
+        assert_eq!(ov.particles.len(), 50);
+        let p = &ov.particles[0];
+        assert_eq!((p.size, p.alpha), (20.0, 0.5));
+        assert_eq!(p.color, Vec3::new(1.0, 0.0, 0.0));
+
+        let mut slow = system();
+        slow.set_overrides(ParticleOverrides {
+            rate: 0.1,
+            ..ParticleOverrides::default()
+        });
+        slow.step(1.0, Vec3::ZERO);
+        assert_eq!(slow.particles.len(), 10);
     }
 }

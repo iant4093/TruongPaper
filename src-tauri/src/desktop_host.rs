@@ -1345,6 +1345,8 @@ struct SceneState {
     has_frame: bool,
     paused: bool,
     diag: DiagState,
+    /// `SceneGraph::render_epoch` at the last `SceneRenderer::load`.
+    loaded_epoch: u64,
 }
 
 /// Diagnostics bookkeeping of one loaded scene.
@@ -1359,6 +1361,25 @@ struct DiagState {
 }
 
 impl SceneState {
+    /// Applies changed user properties: bound values and scripts update live; when a changed
+    /// property feeds an effect / bloom binding (baked into GPU plans) the renderer reloads in
+    /// place (textures stay cached, so this is cheap compared to a scene restart).
+    fn apply_properties(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, json: &str) {
+        if let Err(err) = self.runtime.apply_user_properties(json) {
+            tracing::warn!("scene {}: property update: {err}", self.desc.scene_file);
+            return;
+        }
+        let epoch = self.runtime.graph().render_epoch();
+        if epoch != self.loaded_epoch {
+            self.loaded_epoch = epoch;
+            let warnings = self
+                .renderer
+                .load(device, queue, &self.vfs, self.runtime.graph());
+            self.runtime.add_diagnostics(self.renderer.diagnostics());
+            self.diag.load_warnings = warnings;
+        }
+    }
+
     /// Load warnings plus whatever the scene runtime reports.
     fn diagnostics(&self) -> Vec<String> {
         let mut out = self.diag.load_warnings.clone();
@@ -1709,12 +1730,7 @@ impl MonitorRenderer {
                 if let Content::Scene(scene) = &mut self.content {
                     if same_scene(&scene.desc, &desc) {
                         if scene.desc.user_properties_json != desc.user_properties_json {
-                            if let Err(err) = scene
-                                .runtime
-                                .apply_user_properties(&desc.user_properties_json)
-                            {
-                                tracing::warn!("scene {}: property update: {err}", desc.scene_file);
-                            }
+                            scene.apply_properties(device, queue, &desc.user_properties_json);
                         }
                         scene.wallpaper_id = rt.and_then(|r| r.wallpaper_id.clone());
                         scene.desc = desc;
@@ -2196,7 +2212,9 @@ fn load_scene(
         .map(MonitorRuntime::effective_adjustments)
         .unwrap_or_default();
     let videos = open_embedded_videos(&renderer, &vfs, desc, &adjustments);
+    let loaded_epoch = runtime.graph().render_epoch();
     let mut state = SceneState {
+        loaded_epoch,
         wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
         desc: desc.clone(),
         runtime,
@@ -2577,12 +2595,7 @@ fn run_renderer(
                 } in &events
                 {
                     if scene.wallpaper_id.as_deref() == Some(wallpaper_id.as_str()) {
-                        if let Err(err) = scene.runtime.apply_user_properties(changed_json) {
-                            tracing::warn!(
-                                "scene {}: property update: {err}",
-                                scene.desc.scene_file
-                            );
-                        }
+                        scene.apply_properties(&gpu.device, &gpu.queue, changed_json);
                     }
                 }
             }

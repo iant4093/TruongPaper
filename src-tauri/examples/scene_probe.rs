@@ -35,10 +35,29 @@ async fn render() -> anyhow::Result<()> {
     let vfs = WeVirtualFileSystem::mount(dir.clone(), PathBuf::from(&args[2]));
     let project: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("project.json"))?)?;
-    let defaults = project
-        .get("general")
-        .and_then(|p| p.get("properties"))
-        .map(|v| v.to_string());
+    // Same shape the app passes: project.json defaults overlaid with saved values.
+    let mut merged = truongpaper_lib::commands::monitor::effective_user_properties(
+        &project,
+        &Default::default(),
+    );
+    // PROBE_PROPS='{"rays":false}' changes properties; PROBE_LOAD=1 passes them at load,
+    // otherwise they are applied live after a warm-up frame (the drawer's code path).
+    let probe_props: serde_json::Map<String, serde_json::Value> = match std::env::var("PROBE_PROPS")
+    {
+        Ok(v) => serde_json::from_str(&v)?,
+        Err(_) => Default::default(),
+    };
+    let at_load = std::env::var("PROBE_LOAD").is_ok();
+    if at_load {
+        merged.extend(probe_props.clone());
+    }
+    let defaults = Some(serde_json::Value::Object(merged).to_string());
+    if let Ok(file) = std::env::var("PROBE_FILE") {
+        // Dumps one packaged file (e.g. scene.json) to stdout.
+        use std::io::Write;
+        std::io::stdout().write_all(&vfs.read_bytes(&file)?)?;
+        return Ok(());
+    }
     if let Ok(texture_path) = std::env::var("PROBE_TEXTURE") {
         let bytes = vfs.read_bytes(&texture_path)?;
         let tex = truongpaper_we_formats::parse_tex(&bytes)?;
@@ -96,10 +115,23 @@ async fn render() -> anyhow::Result<()> {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let mut loaded_epoch = runtime.graph().render_epoch();
+    let mut pending_props = (!at_load && !probe_props.is_empty())
+        .then(|| serde_json::Value::Object(probe_props.clone()).to_string());
     let frame_count: u32 = args.get(4).map(|v| v.parse().unwrap()).unwrap_or(2);
     for i in 0..frame_count {
         let mut encoder = device.create_command_encoder(&Default::default());
         runtime.step(1.0 / 30.0, [0.5, 0.5], false, &[0.0; 64], &[0.0; 64]);
+        if i == 1 {
+            if let Some(json) = pending_props.take() {
+                runtime.apply_user_properties(&json)?;
+                if runtime.graph().render_epoch() != loaded_epoch {
+                    loaded_epoch = runtime.graph().render_epoch();
+                    renderer.load(&device, &queue, &vfs, runtime.graph());
+                    eprintln!("renderer reloaded");
+                }
+            }
+        }
         renderer.render(
             &device,
             &queue,
@@ -137,12 +169,19 @@ async fn render() -> anyhow::Result<()> {
         .slice(..)
         .map_async(wgpu::MapMode::Read, |result| result.unwrap());
     device.poll(wgpu::Maintain::Wait);
-    image::save_buffer(
-        &args[3],
-        &output.slice(..).get_mapped_range(),
-        width,
-        height,
-        image::ColorType::Rgba8,
-    )?;
+    let pixels = output.slice(..).get_mapped_range().to_vec();
+    image::save_buffer(&args[3], &pixels, width, height, image::ColorType::Rgba8)?;
+    if let Ok(reference) = std::env::var("PROBE_DIFF") {
+        let other = image::open(&reference)?.to_rgba8();
+        let total: u64 = pixels
+            .iter()
+            .zip(other.as_raw())
+            .map(|(a, b)| a.abs_diff(*b) as u64)
+            .sum();
+        println!(
+            "mean abs diff vs {reference}: {:.3}",
+            total as f64 / pixels.len() as f64
+        );
+    }
     Ok(())
 }

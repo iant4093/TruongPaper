@@ -425,3 +425,11 @@ input[type='number'].text-input { width: 90px; }
 .source-settings > .button { justify-self: start; }
 .source-settings .inspector-danger { padding: 4px 0 0; border-top: 1px solid #2d2d2d; padding-top: 12px; }
 .photo-source-inspector .source-settings { padding: 0; }
+
+/* Workshop results: every card the same height, image fills its frame. */
+.workshop-result { display: flex; flex-direction: column; height: 100%; }
+.workshop-result .thumbnail { height: auto !important; aspect-ratio: 16 / 9; flex-shrink: 0; }
+.workshop-result .thumbnail img { object-fit: cover; }
+.workshop-result-body { display: flex; flex-direction: column; flex: 1; }
+.workshop-result-stats { margin-top: auto; padding-top: 14px; }
+.workshop-result-unrated { color: var(--text-muted); }

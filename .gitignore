@@ -3,7 +3,7 @@ dist
 src-tauri/target
 src-tauri/gen
 release-assets
-smoke
+/smoke
 # Generated sidecar binaries and downloads
 src-tauri/bin
 src-tauri/tauri.macos.conf.json

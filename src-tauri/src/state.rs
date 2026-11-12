@@ -14,7 +14,8 @@ use truongpaper_core::{get_setting, set_setting, AppSettings, CoreResult};
 pub const SETTING_APP_SETTINGS: &str = "app_settings";
 /// `settings` key read by `photo_rotate_next` (docs/02 §6).
 pub const SETTING_SKIP_MISMATCHED_ORIENTATION: &str = "skip_mismatched_orientation";
-/// `settings` key read by `photo_rotate_next`: `"independent"` (default) or `"clone"`.
+/// `settings` key of the multi-monitor mode (`"independent"` by default). Photo rotation always
+/// picks one photo per display; `"span"` is applied by the renderer.
 pub const SETTING_MULTI_MONITOR_MODE: &str = "multi_monitor_mode";
 /// Smallest accepted non-zero rotation interval (`0` = "Never (Manual Only)").
 pub const MIN_ROTATION_INTERVAL_SECONDS: u64 = 10;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub host: Arc<WallpaperHost>,
     pub steam: Arc<SteamSession>,
+    /// Parsed `project.json` cache behind `library_list_wallpapers`.
+    pub library: Arc<crate::commands::library::LibraryCache>,
 }
 
 impl AppState {
@@ -40,6 +43,7 @@ impl AppState {
             http,
             host: Arc::new(WallpaperHost::new()),
             steam,
+            library: Arc::default(),
         }
     }
 

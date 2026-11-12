@@ -242,6 +242,14 @@ impl SlidingRateLimiter {
         self.offline.store(false, Ordering::SeqCst);
     }
 
+    /// Forgets the failure counter and any running cooldown so the next request may go out now
+    /// (manual "Retry now"). The `offline` flag stays until a request succeeds. The sliding
+    /// request window is untouched, so the rate budget is still respected.
+    pub fn clear_backoff(&self) {
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+        *self.cooldown_until.lock() = None;
+    }
+
     /// Consecutive throttled responses since the last success.
     pub fn consecutive_failures(&self) -> u32 {
         self.consecutive_failures.load(Ordering::SeqCst)
@@ -251,6 +259,19 @@ impl SlidingRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_backoff_ends_the_cooldown_but_keeps_offline() {
+        let limiter = SlidingRateLimiter::new();
+        limiter.note_network_error();
+        assert!(limiter.cooldown_remaining().is_some());
+        assert_eq!(limiter.consecutive_failures(), 1);
+        limiter.clear_backoff();
+        assert!(limiter.cooldown_remaining().is_none());
+        assert!(limiter.can_make_request());
+        assert_eq!(limiter.consecutive_failures(), 0);
+        assert!(limiter.is_offline());
+    }
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)

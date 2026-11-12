@@ -471,6 +471,16 @@ export function createMockBackend(
       }, 600);
       return null;
     },
+    photo_retry_now: () => {
+      isRefilling = true;
+      emitEvent('photo-queue://updated', photoStatus());
+      schedule(() => {
+        refillQueue();
+        isRefilling = false;
+        emitEvent('photo-queue://updated', photoStatus());
+      }, 600);
+      return null;
+    },
     photo_add_album: (args) => {
       const raw = String(args.urlOrSlug ?? '').trim();
       const slug = raw.replace(/^.*\/album\//, '').replace(/[/?#].*$/, '').toLowerCase();

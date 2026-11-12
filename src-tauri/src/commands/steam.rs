@@ -341,6 +341,8 @@ pub async fn sync_library(state: &AppState) -> Result<Vec<WallpaperItem>, String
     })
     .await
     .map_err(|e| e.to_string())?;
+    // Downloads and Steam updates rewrite project.json files: drop the parsed copies.
+    state.library.invalidate_all();
     {
         let conn = state.db.lock();
         for w in &found {

@@ -92,7 +92,7 @@ rand = "0.8"
 url = "2.5"
 http = "1.2"
 percent-encoding = "2.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "form", "rustls", "gzip"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
 wgpu = "23.0"
@@ -146,8 +146,8 @@ core-foundation = "0.10"
 
 [profile.release]
 codegen-units = 1
-lto = true
-opt-level = "s"
+lto = "thin"
+opt-level = 3
 panic = "abort"
 strip = true
 

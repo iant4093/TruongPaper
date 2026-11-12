@@ -25,7 +25,20 @@ use tauri::Manager;
 /// SQLite file inside `app_data_dir`.
 pub const DB_FILE_NAME: &str = "truongpaper.db";
 
+/// Logs the time since setup started at the end of each startup stage (`RUST_LOG=info`).
+struct StartupClock(std::time::Instant);
+
+impl StartupClock {
+    fn mark(&self, stage: &str) {
+        tracing::info!(
+            "startup: {stage} at +{:.1} ms",
+            self.0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let clock = StartupClock(std::time::Instant::now());
     // Closing Studio hides it. The tray keeps running and uses it for Pause and Next.
     if let Some(window) = app.get_webview_window("main") {
         let studio = window.clone();
@@ -39,10 +52,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
     let conn = truongpaper_core::open_and_initialize_db(&app_data_dir.join(DB_FILE_NAME))?;
+    clock.mark("database ready");
     let http = reqwest::Client::builder()
         .user_agent(concat!("TruongPaper/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
+    clock.mark("http client ready");
 
     let state = AppState::new(conn, app_data_dir.clone(), http.clone());
     // Pause and display volumes survive restarts; restore them before any renderer starts.
@@ -56,20 +71,30 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let (settings, host) = (state.settings.clone(), state.host.clone());
     app.manage(state);
     app.manage(photo);
+    controls::listen_selected_monitor(app.handle());
+    clock.mark("state restored");
 
+    // Critical path to the first frame: the live runtimes. Web / Video webview windows + their
+    // bridge, then the desktop render thread (photos and scenes). Both stop on
+    // `AppState::shutdown_now`.
+    wallpaper_webview::start(app.handle().clone(), host.clone());
+    desktop_host::start(app.handle().clone(), host.clone(), settings.clone());
+    clock.mark("render threads started");
+
+    // Everything below is not needed for the first frame, so it runs while the render thread
+    // is already setting up wgpu and decoding the first photo. Library scans, Steam sync,
+    // catalog fetches and cache eviction are not started here at all: they only run when the
+    // UI asks for them.
     tray::setup_system_tray(app.handle())?;
     if let Err(err) = controls::apply_hotkeys(app.handle(), &hotkeys.0, &hotkeys.1) {
         tracing::warn!("global hotkeys not registered: {err}");
     }
     power::start(app.handle());
-    smart_pause::spawn(app.handle().clone(), settings.clone(), host.clone());
-    // Live runtimes: Web / Video webview windows + their bridge, then the desktop render thread
-    // (photos and scenes). Both stop on `AppState::shutdown_now`.
-    wallpaper_webview::start(app.handle().clone(), host.clone());
-    desktop_host::start(app.handle().clone(), host, settings);
+    smart_pause::spawn(app.handle().clone(), settings, host);
     #[cfg(target_os = "windows")]
     commands::lock_screen::start_sync(app.handle());
     scheduler::spawn(app.handle().clone());
+    clock.mark("setup finished");
     Ok(())
 }
 
@@ -149,6 +174,7 @@ pub fn run() {
             commands::photo::photo_fetch_public_catalog,
             commands::photo::photo_rotate_next,
             commands::photo::photo_trigger_refill,
+            commands::photo::photo_retry_now,
             commands::photo::photo_add_album,
             commands::photo::photo_toggle_album,
             commands::photo::photo_remove_album,
@@ -256,7 +282,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 48, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 49, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 
@@ -367,6 +393,7 @@ mod tests {
         let needed: BTreeSet<String> = [
             "photo_get_status",
             "photo_rotate_next",
+            "photo_retry_now",
             "photo_set_favorite",
             "photo_blacklist_and_skip",
             "steam_account",

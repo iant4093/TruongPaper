@@ -10,6 +10,7 @@ const APP_COMMANDS: &[&str] = &[
     "photo_fetch_public_catalog",
     "photo_rotate_next",
     "photo_trigger_refill",
+    "photo_retry_now",
     "photo_add_album",
     "photo_toggle_album",
     "photo_remove_album",

@@ -255,14 +255,28 @@ impl Resolver<'_> {
         }
     }
 
+    /// The editor writes a `unique` effect FBO bound in a pass override as
+    /// `<fbo>_<layer kind>_<id>` (`_rt_FullCompoBuffer1_fullscreen_90` for motionblur's
+    /// persistent accumulation buffer); map it back to the effect's own FBO.
+    fn unique_fbo_name<'n>(&self, name: &'n str) -> Option<&'n str> {
+        let (rest, id) = name.rsplit_once('_')?;
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let (fbo, _kind) = rest.rsplit_once('_')?;
+        self.fbos.iter().any(|f| f.name == fbo).then_some(fbo)
+    }
+
     fn texture(&self, name: &str, current: &RenderTargetId) -> TextureBinding {
+        // Another layer's composite: WE ping-pongs `_a`/`_b`; both mean its finished image.
         if let Some(id) = name
             .strip_prefix("_rt_imageLayerComposite_")
-            .and_then(|name| name.strip_suffix("_a"))
+            .and_then(|name| name.strip_suffix("_a").or_else(|| name.strip_suffix("_b")))
             .and_then(|id| id.parse().ok())
         {
             return TextureBinding::Target(RenderTargetId::LayerOutput(id));
         }
+        let name = self.unique_fbo_name(name).unwrap_or(name);
         match self.target(name, current) {
             Some(t) => TextureBinding::Target(t),
             None if name.starts_with("_rt_") => {

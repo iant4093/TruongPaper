@@ -263,6 +263,14 @@ pub enum SceneLayerKind {
     Solid {
         color: Vec3,
     },
+    /// Transform-only node whose properties carry SceneScripts (e.g. a physics script on a
+    /// group's `visible`, or a script rotating a group). Drawn as nothing; it exists so its
+    /// scripts run and its script-driven transform reaches its children.
+    Group,
+    /// Static 3D mesh (`model` object pointing at an `.mdl`), drawn with depth testing.
+    Model {
+        mdl_path: String,
+    },
     Particle {
         path: String,
         spec: ParticleFile,
@@ -287,6 +295,8 @@ impl SceneLayerKind {
             SceneLayerKind::Image { .. } => "image",
             SceneLayerKind::Composition { .. } => "composition",
             SceneLayerKind::Solid { .. } => "solid",
+            SceneLayerKind::Model { .. } => "model",
+            SceneLayerKind::Group => "group",
             SceneLayerKind::Particle { .. } => "particle",
             SceneLayerKind::Sound { .. } => "sound",
             SceneLayerKind::Text { .. } => "text",
@@ -987,6 +997,18 @@ impl SceneGraph {
                 }
             };
         }
+        if let Some(mdl) = obj
+            .model
+            .as_deref()
+            .filter(|m| m.to_ascii_lowercase().ends_with(".mdl"))
+        {
+            return Some((
+                SceneLayerKind::Model {
+                    mdl_path: mdl.to_string(),
+                },
+                Vec2::ZERO,
+            ));
+        }
         if let Some(path) = obj.particle.as_deref() {
             let spec = vfs
                 .read_string(path)
@@ -1031,6 +1053,14 @@ impl SceneGraph {
                 },
                 Vec2::ZERO,
             ));
+        }
+        let scripted = obj.origin.script().is_some()
+            || obj.scale.script().is_some()
+            || obj.angles.script().is_some()
+            || obj.visible.script().is_some()
+            || obj.alpha.script().is_some();
+        if scripted {
+            return Some((SceneLayerKind::Group, Vec2::ZERO));
         }
         tracing::debug!("object '{label}' has no drawable payload; kept as a transform node");
         None
@@ -1565,9 +1595,13 @@ impl SceneGraph {
         let mut transform_changed = false;
         match prop {
             ScriptProperty::Origin | ScriptProperty::Scale | ScriptProperty::Angles => {
-                let comps = parse_script_components(value);
+                let mut comps = parse_script_components(value);
                 if comps.is_empty() {
                     return (false, false);
+                }
+                // A script returning a bare number for `scale` scales uniformly.
+                if prop == ScriptProperty::Scale && comps.len() == 1 {
+                    comps = vec![comps[0]; 3];
                 }
                 let slot = match prop {
                     ScriptProperty::Origin => &mut layer.transform.origin,

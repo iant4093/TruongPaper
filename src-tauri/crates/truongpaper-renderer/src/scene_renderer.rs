@@ -47,6 +47,7 @@ use crate::effect_chain::{
     RenderTargetId, TextureBinding, BLOOM_VERTEX_ENTRY_POINT, RT_FULL_FRAME_BUFFER, RT_SCENE,
 };
 use crate::json::Value;
+use crate::model3d::{GpuModel, ModelFrame, ModelMaterial, ModelResources, DEFAULT_LIGHT_DIR};
 use crate::particles::SpriteParticleVertex;
 use crate::puppet::{
     layered_bone_matrices, parse_mdl_skeleton, PuppetDeformer, PuppetLayer, PuppetSkeleton,
@@ -856,6 +857,7 @@ struct GpuText {
 }
 
 enum GpuLayer {
+    Model(Box<GpuModel>),
     Text(Box<GpuText>),
     Effects(Box<GpuEffectLayer>),
     Solid(SimpleDraw),
@@ -901,6 +903,7 @@ pub struct SceneRenderer {
     layer_outputs: HashMap<i32, GpuTarget>,
     bloom: Option<GpuBloom>,
     blit: SimpleDraw,
+    model3d: Option<ModelResources>,
     last_pointer: Vec2,
     diagnostics: DiagnosticsLog,
 }
@@ -1332,6 +1335,7 @@ impl SceneRenderer {
             group_owner: Vec::new(),
             layer_outputs: HashMap::new(),
             bloom: None,
+            model3d: None,
             last_pointer: Vec2::splat(0.5),
             diagnostics: DiagnosticsLog::default(),
         };
@@ -1838,6 +1842,7 @@ impl SceneRenderer {
         self.layers.clear();
         self.layer_outputs.clear();
         self.bloom = None;
+        self.model3d = None;
         self.diagnostics = DiagnosticsLog::default();
 
         let mut plans: Vec<_> = graph
@@ -1997,7 +2002,10 @@ impl SceneRenderer {
                         blending,
                     })))
                 }
-                SceneLayerKind::Sound { .. } => None,
+                SceneLayerKind::Model { mdl_path } => self
+                    .load_model3d(device, queue, vfs, mdl_path, &mut warnings)
+                    .map(|m| GpuLayer::Model(Box::new(m))),
+                SceneLayerKind::Sound { .. } | SceneLayerKind::Group => None,
             };
             self.layers.push(gpu);
         }
@@ -2009,6 +2017,94 @@ impl SceneRenderer {
             self.bloom = Some(self.build_bloom(device, bloom));
         }
         warnings
+    }
+
+    /// Loads a 3D `model` object: the `.mdl` mesh, its material json and the diffuse/mask textures.
+    fn load_model3d(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &WeVirtualFileSystem,
+        mdl_path: &str,
+        warnings: &mut Vec<String>,
+    ) -> Option<GpuModel> {
+        let mut fail = |this: &mut Self, msg: String| {
+            tracing::warn!("{msg}");
+            warnings.push(msg);
+            this.diagnostics.push(format!(
+                "3D model '{mdl_path}' skipped: asset missing or invalid"
+            ));
+        };
+        let mesh = match vfs
+            .read_bytes(mdl_path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| truongpaper_we_formats::parse_static_mdl(&b).map_err(|e| e.to_string()))
+        {
+            Ok(m) => m,
+            Err(e) => {
+                fail(self, format!("cannot load model {mdl_path}: {e}"));
+                return None;
+            }
+        };
+        let material_file = vfs
+            .read_string(&mesh.material)
+            .map_err(|e| e.to_string())
+            .and_then(|t| MaterialFile::from_json_str(&t).map_err(|e| e.to_string()));
+        let pass = match material_file {
+            Ok(m) if !m.passes.is_empty() => m.passes[0].clone(),
+            Ok(_) => {
+                fail(
+                    self,
+                    format!("model material {} has no passes", mesh.material),
+                );
+                return None;
+            }
+            Err(e) => {
+                fail(
+                    self,
+                    format!("cannot load model material {}: {e}", mesh.material),
+                );
+                return None;
+            }
+        };
+        let mut slot_paths = [None, None];
+        for (i, slot) in [0usize, 2].into_iter().enumerate() {
+            if let Some(name) = pass
+                .textures
+                .get(slot)
+                .and_then(|t| t.as_deref())
+                .filter(|s| !s.is_empty())
+            {
+                let path = material_texture_path(name);
+                // `fail` borrows `warnings` mutably; texture warnings go to a scratch list.
+                let mut tex_warnings = Vec::new();
+                if self.ensure_texture(device, queue, vfs, &path, &mut tex_warnings) {
+                    slot_paths[i] = Some(path);
+                }
+                for w in tex_warnings {
+                    tracing::warn!("{w}");
+                }
+            }
+        }
+        let diffuse = slot_paths[0]
+            .as_ref()
+            .and_then(|p| self.textures.get(p))
+            .map_or(&self.white.view, |t| &t.view);
+        let mask = slot_paths[1]
+            .as_ref()
+            .and_then(|p| self.textures.get(p))
+            .map_or(&self.transparent.view, |t| &t.view);
+        let (w, h) = (self.scene.width, self.scene.height);
+        let res = self
+            .model3d
+            .get_or_insert_with(|| ModelResources::new(device, HDR_FORMAT, w, h));
+        Some(res.create_model(
+            device,
+            &mesh,
+            ModelMaterial::from_pass(&pass),
+            diffuse,
+            mask,
+        ))
     }
 
     /// Assigns every layer to the nearest ancestor composition layer that is drawn, and gives
@@ -2667,6 +2763,9 @@ impl SceneRenderer {
             |_| {},
         );
 
+        if let Some(m) = &self.model3d {
+            m.begin_frame();
+        }
         let layer_count = graph.layers.len().min(self.layers.len());
         for li in 0..layer_count {
             let layer = &graph.layers[li];
@@ -2889,6 +2988,26 @@ impl SceneRenderer {
                     rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
                     rp.draw_indexed(0..6, 0, 0..1);
                 });
+            }
+            GpuLayer::Model(model) => {
+                let Some(res) = &self.model3d else { return };
+                if !graph.effective_visible(li) || layer.alpha <= 0.0 {
+                    return;
+                }
+                res.draw(
+                    queue,
+                    encoder,
+                    &dest.view,
+                    model,
+                    &ModelFrame {
+                        mvp: matrices.model_view_projection,
+                        model: matrices.model,
+                        tint: (layer.color * layer.brightness).extend(layer.alpha),
+                        ambient: base_values.ambient_color + base_values.skylight_color,
+                        light_dir: DEFAULT_LIGHT_DIR,
+                        light_color: Vec3::splat(0.6),
+                    },
+                );
             }
             GpuLayer::Solid(draw) => {
                 queue.write_buffer(

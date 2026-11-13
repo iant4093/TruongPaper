@@ -325,6 +325,9 @@ pub struct UniformValues {
     pub daytime: f32,
     pub pointer: Vec2,
     pub pointer_last: Vec2,
+    /// `g_ParallaxPosition`: `(0.5, 0.5)` at rest, shifted by the pointer when the scene's camera
+    /// parallax is on (what the stock `depthparallax` effect reads).
+    pub parallax_position: Vec2,
     /// `(1/scene_width, 1/scene_height)`.
     pub texel_size: Vec2,
     /// `g_TextureNResolution = (texture_w, texture_h, image_w, image_h)`.
@@ -354,6 +357,7 @@ impl Default for UniformValues {
             daytime: 0.5,
             pointer: Vec2::splat(0.5),
             pointer_last: Vec2::splat(0.5),
+            parallax_position: Vec2::splat(0.5),
             texel_size: Vec2::new(1.0 / 1920.0, 1.0 / 1080.0),
             texture_resolutions: [Vec4::ONE; 8],
             alpha: 1.0,
@@ -401,6 +405,11 @@ pub fn builtin_uniform_floats(name: &str, v: &UniformValues) -> Option<Vec<f32>>
         "g_Daytime" => vec![v.daytime],
         "g_PointerPosition" => v.pointer.to_array().to_vec(),
         "g_PointerPositionLast" => v.pointer_last.to_array().to_vec(),
+        "g_ParallaxPosition" => v.parallax_position.to_array().to_vec(),
+        // Effect passes draw in texture space with no extra rotation.
+        "g_EffectTextureProjectionMatrix" | "g_EffectTextureProjectionMatrixInverse" => {
+            cols(Mat4::IDENTITY)
+        }
         "g_TexelSize" => v.texel_size.to_array().to_vec(),
         "g_TexelSizeHalf" => (v.texel_size * 0.5).to_array().to_vec(),
         "g_Alpha" | "g_UserAlpha" => vec![v.alpha],
@@ -2612,6 +2621,15 @@ impl SceneRenderer {
             daytime,
             pointer: frame.pointer,
             pointer_last,
+            parallax_position: {
+                let cam = &graph.camera;
+                if cam.parallax_enabled {
+                    Vec2::splat(0.5)
+                        + (frame.pointer - Vec2::splat(0.5)) * cam.parallax_mouse_influence
+                } else {
+                    Vec2::splat(0.5)
+                }
+            },
             texel_size: Vec2::new(
                 1.0 / self.scene.width as f32,
                 1.0 / self.scene.height as f32,

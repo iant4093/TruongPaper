@@ -1156,6 +1156,21 @@ pub const WE_BUILTIN_UNIFORMS: &[BuiltinUniform] = &[
         "Normalized desktop cursor position [0,1] on that monitor",
     ),
     bu(
+        "g_ParallaxPosition",
+        "vec2",
+        "Camera parallax position [0,1]; (0.5, 0.5) when parallax is off",
+    ),
+    bu(
+        "g_EffectTextureProjectionMatrix",
+        "mat4",
+        "Effect texture-space projection (identity)",
+    ),
+    bu(
+        "g_EffectTextureProjectionMatrixInverse",
+        "mat4",
+        "Inverse of g_EffectTextureProjectionMatrix (identity)",
+    ),
+    bu(
         "g_PointerPositionLast",
         "vec2",
         "Previous frame cursor position",

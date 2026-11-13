@@ -445,3 +445,25 @@ fn composition_capture_maps_the_layer_rect_onto_its_fbo() {
         Mat4::IDENTITY
     );
 }
+
+#[test]
+fn depth_parallax_builtins_are_finite_and_centred() {
+    use truongpaper_renderer::scene_renderer::{builtin_uniform_floats, UniformValues};
+    let v = UniformValues::default();
+    // At rest the parallax position is the centre; an all-zero value made the stock
+    // depthparallax vertex shader normalise a zero vector and blank the layer (scene 3118949804).
+    assert_eq!(
+        builtin_uniform_floats("g_ParallaxPosition", &v),
+        Some(vec![0.5, 0.5])
+    );
+    for name in [
+        "g_EffectTextureProjectionMatrix",
+        "g_EffectTextureProjectionMatrixInverse",
+    ] {
+        assert_eq!(
+            builtin_uniform_floats(name, &v),
+            Some(Mat4::IDENTITY.to_cols_array().to_vec()),
+            "{name}"
+        );
+    }
+}

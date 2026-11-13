@@ -59,6 +59,7 @@ use crate::shader_preprocessor::{
     compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
     ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
+use crate::sprite::SpriteSheet;
 use crate::text::{
     bitmap_size, grow_text_box, load_font, rasterize, FontMetrics, TextCache, TextKey, TextStyle,
 };
@@ -333,6 +334,9 @@ pub struct UniformValues {
     pub texel_size: Vec2,
     /// `g_TextureNResolution = (texture_w, texture_h, image_w, image_h)`.
     pub texture_resolutions: [Vec4; 8],
+    /// Spritesheet frame mapping for slot 0 (`g_Texture0Rotation`, `g_Texture0Translation`).
+    pub texture0_rotation: Vec4,
+    pub texture0_translation: Vec2,
     pub alpha: f32,
     pub color: Vec3,
     pub brightness: f32,
@@ -361,6 +365,8 @@ impl Default for UniformValues {
             parallax_position: Vec2::splat(0.5),
             texel_size: Vec2::new(1.0 / 1920.0, 1.0 / 1080.0),
             texture_resolutions: [Vec4::ONE; 8],
+            texture0_rotation: Vec4::new(1.0, 0.0, 0.0, 1.0),
+            texture0_translation: Vec2::ZERO,
             alpha: 1.0,
             color: Vec3::ONE,
             brightness: 1.0,
@@ -423,8 +429,8 @@ pub fn builtin_uniform_floats(name: &str, v: &UniformValues) -> Option<Vec<f32>>
         "g_OrientationRight" | "g_ViewRight" => vec![1.0, 0.0, 0.0],
         "g_OrientationForward" => vec![0.0, 0.0, 1.0],
         "g_EyePosition" => vec![0.0, 0.0, 1000.0],
-        "g_Texture0Rotation" => vec![1.0, 0.0, 0.0, 1.0],
-        "g_Texture0Translation" => vec![0.0, 0.0],
+        "g_Texture0Rotation" => v.texture0_rotation.to_array().to_vec(),
+        "g_Texture0Translation" => v.texture0_translation.to_array().to_vec(),
         "g_AudioSpectrum16Left" => downsample_spectrum(&v.audio_left, 16),
         "g_AudioSpectrum16Right" => downsample_spectrum(&v.audio_right, 16),
         "g_AudioSpectrum32Left" => downsample_spectrum(&v.audio_left, 32),
@@ -793,6 +799,7 @@ struct GpuTexture {
     resolution: Vec4,
     uv_scale: [f32; 2],
     tex_format: Option<TexFormat>,
+    sprite: Option<std::sync::Arc<SpriteSheet>>,
 }
 
 struct SimpleDraw {
@@ -813,6 +820,7 @@ struct GpuPass {
     metadata: Vec<UniformCommentMetadata>,
     raw_constants: HashMap<String, Value>,
     resolutions: [Vec4; 8],
+    sprite: Option<std::sync::Arc<SpriteSheet>>,
     target: RenderTargetId,
     effect_index: usize,
     pass_index: usize,
@@ -1069,6 +1077,7 @@ struct DecodedTex {
     resolution: Vec4,
     uv_scale: [f32; 2],
     format: TexFormat,
+    sprite: Option<std::sync::Arc<SpriteSheet>>,
 }
 
 /// Result of decoding a `.tex` asset.
@@ -1122,6 +1131,11 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
         return Err("decoded texture is smaller than its dimensions".into());
     }
     let h_ = &tex.header;
+    let sprite = tex
+        .sprite_frames
+        .as_ref()
+        .and_then(|(_, _, frames)| SpriteSheet::new(frames, w, h))
+        .map(std::sync::Arc::new);
     // The header describes the original storage allocation. A decoded mip may already
     // be trimmed to the image dimensions, so UVs must follow the uploaded texture.
     let visible_width = u32::try_from(h_.image_width)
@@ -1147,6 +1161,7 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
         resolution,
         uv_scale: [resolution.z / resolution.x, resolution.w / resolution.y],
         format: h_.format,
+        sprite,
     }))
 }
 
@@ -1278,6 +1293,7 @@ impl SceneRenderer {
             view: white_view,
             resolution: Vec4::ONE,
             uv_scale: [1.0, 1.0],
+            sprite: None,
             tex_format: None,
         };
         let (clear_tex, clear_view) =
@@ -1287,6 +1303,7 @@ impl SceneRenderer {
             view: clear_view,
             resolution: Vec4::ONE,
             uv_scale: [1.0, 1.0],
+            sprite: None,
             tex_format: None,
         };
         const SPRITE_SIZE: u32 = 32;
@@ -1584,6 +1601,7 @@ impl SceneRenderer {
                         resolution: d.resolution,
                         uv_scale: d.uv_scale,
                         tex_format: Some(d.format),
+                        sprite: d.sprite,
                     },
                 );
                 true
@@ -1612,6 +1630,7 @@ impl SceneRenderer {
                         resolution,
                         uv_scale: [1.0, 1.0],
                         tex_format: None,
+                        sprite: None,
                     },
                 );
                 self.video_textures
@@ -1852,6 +1871,7 @@ impl SceneRenderer {
             metadata,
             raw_constants,
             resolutions,
+            sprite: None,
             target,
             effect_index: 0,
             pass_index: 0,
@@ -2333,7 +2353,10 @@ impl SceneRenderer {
                 .cloned()
                 .flatten()
                 .and_then(|p| self.textures.get(&p));
-            base_uv = tex0.map(|t| t.uv_scale).unwrap_or([1.0, 1.0]);
+            base_uv = tex0
+                .filter(|t| t.sprite.is_none())
+                .map(|t| t.uv_scale)
+                .unwrap_or([1.0, 1.0]);
             let tex0_format = tex0.and_then(|t| t.tex_format);
             // No base texture slot -> white (solid-style image); a named but missing one -> clear.
             let named = texture_paths
@@ -2358,7 +2381,10 @@ impl SceneRenderer {
                     FBO_FORMAT,
                     BlendMode::Normal,
                 ) {
-                    Ok(p) => base = Some(p),
+                    Ok(mut p) => {
+                        p.sprite = tex0.and_then(|t| t.sprite.clone());
+                        base = Some(p);
+                    }
                     Err(e) => {
                         let msg = format!(
                             "layer '{}' base shader: {e}; using a plain copy",
@@ -2766,6 +2792,11 @@ impl SceneRenderer {
     ) {
         let mut values = base.clone();
         values.texture_resolutions = pass.resolutions;
+        if let Some(sheet) = &pass.sprite {
+            let (rot, tr) = sheet.uniforms(base.time);
+            values.texture0_rotation = rot;
+            values.texture0_translation = tr;
+        }
         values.constants = match live {
             // Script-driven `constantshadervalues` replace the baked value every frame.
             Some(live) if !live.is_empty() => {

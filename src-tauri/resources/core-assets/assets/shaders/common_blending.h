@@ -1,5 +1,22 @@
 #ifndef TRUONGPAPER_BLEND_GLSL
 #define TRUONGPAPER_BLEND_GLSL
+// Non-separable HSL helpers (hue / saturation / color / luminosity modes 26-29).
+float TpBlendLum(vec3 c) { return dot(c, vec3(0.3, 0.59, 0.11)); }
+vec3 TpBlendClipColor(vec3 c) {
+    float l = TpBlendLum(c);
+    float n = min(min(c.r, c.g), c.b);
+    float x = max(max(c.r, c.g), c.b);
+    if (n < 0.0) c = l + (c - l) * l / max(l - n, 1e-6);
+    if (x > 1.0) c = l + (c - l) * (1.0 - l) / max(x - l, 1e-6);
+    return c;
+}
+vec3 TpBlendSetLum(vec3 c, float l) { return TpBlendClipColor(c + (l - TpBlendLum(c))); }
+float TpBlendSat(vec3 c) { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+vec3 TpBlendSetSat(vec3 c, float s) {
+    float n = min(min(c.r, c.g), c.b);
+    float x = max(max(c.r, c.g), c.b);
+    return x > n ? (c - n) * s / (x - n) : vec3(0.0);
+}
 vec3 ApplyBlending(int mode, vec3 base, vec3 layer, float amount) {
     vec3 result = layer;
     if (mode == 1 || mode == 5) result = min(base, layer);
@@ -12,6 +29,12 @@ vec3 ApplyBlending(int mode, vec3 base, vec3 layer, float amount) {
     else if (mode == 12) result = mix(base - (1.0 - 2.0 * layer) * base * (1.0 - base), base + (2.0 * layer - 1.0) * (sqrt(max(base, vec3(0.0))) - base), step(vec3(0.5), layer));
     else if (mode == 18) result = abs(base - layer);
     else if (mode == 19) result = base + layer - 2.0 * base * layer;
+    else if (mode == 24) result = (base + layer) * 0.5;
+    else if (mode == 25) result = 1.0 - abs(1.0 - base - layer);
+    else if (mode == 26) result = TpBlendSetLum(TpBlendSetSat(layer, TpBlendSat(base)), TpBlendLum(base));
+    else if (mode == 27) result = TpBlendSetLum(TpBlendSetSat(base, TpBlendSat(layer)), TpBlendLum(base));
+    else if (mode == 28) result = TpBlendSetLum(layer, TpBlendLum(base));
+    else if (mode == 29) result = TpBlendSetLum(base, TpBlendLum(layer));
     // 30 is the effect default of `tint`: the colour multiplies the image (white = no change).
     else if (mode == 30) result = base * layer;
     if (mode == 5 || mode == 10) return result;

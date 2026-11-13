@@ -697,6 +697,9 @@ fn fs_layer_color(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Refracting sprite particle shader (`REFRACT` combo of `genericparticle`).
+pub const SCENE_PARTICLE_REFRACT_WGSL: &str = include_str!("particle_refract.wgsl");
+
 /// Sprite particle shader for the 68-byte [`SpriteParticleVertex`] layout.
 pub const SCENE_PARTICLE_WGSL: &str = r#"
 struct SimpleUniforms {
@@ -901,6 +904,22 @@ struct GpuParticles {
     index_buffer: wgpu::Buffer,
     capacity: usize,
     blending: BlendMode,
+    /// Set for `REFRACT` materials: the sprite shows the scene behind it.
+    refract: Option<GpuRefract>,
+}
+
+/// Normal map and strength of a refracting particle material.
+struct GpuRefract {
+    normal_path: Option<String>,
+    params: wgpu::Buffer,
+}
+
+/// `ui_editor_properties_refract_amount` of a material pass (the stock default is 0.05).
+fn refract_amount(constants: &HashMap<String, Value>) -> f32 {
+    constants
+        .get("ui_editor_properties_refract_amount")
+        .and_then(Value::as_f64)
+        .map_or(0.05, |v| v as f32)
 }
 
 /// A rasterized text layer: the bitmap is rebuilt only when the string or style changes.
@@ -948,6 +967,8 @@ pub struct SceneRenderer {
     bloom_module: wgpu::ShaderModule,
     composite_pipelines: HashMap<(wgpu::TextureFormat, BlendMode), wgpu::RenderPipeline>,
     particle_pipelines: HashMap<BlendMode, wgpu::RenderPipeline>,
+    /// Refracting-particle bind layout (normal map, scene copy, strength) and pipeline.
+    particle_refract: Option<(wgpu::BindGroupLayout, wgpu::RenderPipeline)>,
     clamp_sampler: wgpu::Sampler,
     repeat_sampler: wgpu::Sampler,
     white: GpuTexture,
@@ -1394,6 +1415,7 @@ impl SceneRenderer {
             bloom_module,
             composite_pipelines: HashMap::new(),
             particle_pipelines: HashMap::new(),
+            particle_refract: None,
             clamp_sampler,
             repeat_sampler,
             white,
@@ -1544,6 +1566,91 @@ impl SceneRenderer {
                 resource: wgpu::BindingResource::TextureView(view),
             }],
         })
+    }
+
+    /// Builds the pipeline of `REFRACT` particles (translucent blend, scene copy as input).
+    fn ensure_refract_pipeline(&mut self, device: &wgpu::Device) {
+        if self.particle_refract.is_some() {
+            return;
+        }
+        let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let group1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene_particle_refract_bgl"),
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_particle_refract"),
+            source: wgpu::ShaderSource::Wgsl(SCENE_PARTICLE_REFRACT_WGSL.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene_particle_refract_layout"),
+            bind_group_layouts: &[&self.simple_layout, &group1],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_particles_refract"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<SpriteParticleVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &PARTICLE_ATTRS,
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    // The refracted colour already carries the scene's alpha: keep the destination alpha.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        self.particle_refract = Some((group1, pipeline));
     }
 
     fn ensure_particle_pipeline(&mut self, device: &wgpu::Device, blend: BlendMode) {
@@ -2057,23 +2164,21 @@ impl SceneRenderer {
                         .ok()
                         .and_then(|s| MaterialFile::from_json_str(&s).ok())
                         .and_then(|m| m.passes.into_iter().next());
-                    // `REFRACT` particles show the scene behind them bent by a normal map; their
-                    // colour texture is a plain white mask, so drawing it as a sprite paints
-                    // opaque squares. Without refraction support they are left out.
-                    if first_pass
+                    // `REFRACT` particles show the scene behind them bent by a normal map; the
+                    // colour texture is only a mask.
+                    let refract_info = first_pass
                         .as_ref()
-                        .is_some_and(|p| p.combos.get("REFRACT").copied().unwrap_or(0) != 0)
-                    {
-                        let msg = format!(
-                            "layer '{}' particle material {}: refraction is not supported; \
-                             layer skipped",
-                            layer.key(),
-                            spec.material
-                        );
-                        tracing::warn!("{msg}");
-                        warnings.push(msg);
-                        break 'particle None;
-                    }
+                        .filter(|p| p.combos.get("REFRACT").copied().unwrap_or(0) != 0)
+                        .map(|p| {
+                            (
+                                p.textures
+                                    .get(1)
+                                    .cloned()
+                                    .flatten()
+                                    .map(|t| material_texture_path(&t)),
+                                refract_amount(&p.constantshadervalues),
+                            )
+                        });
                     let tex_path = first_pass.map(|p| {
                         (
                             p.textures
@@ -2088,7 +2193,7 @@ impl SceneRenderer {
                         Some((t, b)) => (t, b),
                         None => (None, BlendMode::Translucent),
                     };
-                    let blending = if blending == BlendMode::Normal {
+                    let blending = if blending == BlendMode::Normal || refract_info.is_some() {
                         BlendMode::Translucent
                     } else {
                         blending
@@ -2096,6 +2201,20 @@ impl SceneRenderer {
                     if let Some(p) = &tex_path {
                         self.ensure_texture(device, queue, vfs, p, &mut warnings);
                     }
+                    let refract = refract_info.map(|(normal_path, amount)| {
+                        if let Some(p) = &normal_path {
+                            self.ensure_texture(device, queue, vfs, p, &mut warnings);
+                        }
+                        self.ensure_refract_pipeline(device);
+                        GpuRefract {
+                            normal_path,
+                            params: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("scene_particle_refract_params"),
+                                contents: bytemuck::cast_slice(&[amount, 0.0f32, 0.0, 0.0]),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            }),
+                        }
+                    });
                     self.ensure_particle_pipeline(device, blending);
                     // Missing sprite texture -> nothing drawn; no texture named -> soft dot.
                     let view = match tex_path.as_deref() {
@@ -2132,6 +2251,7 @@ impl SceneRenderer {
                         index_buffer,
                         capacity,
                         blending,
+                        refract,
                     })))
                 }
                 SceneLayerKind::Model { mdl_path } => self
@@ -3238,6 +3358,60 @@ impl SceneRenderer {
                         (layer.color * layer.brightness).extend(layer.alpha),
                     )),
                 );
+                if let Some(refract) = &ps.refract {
+                    // The scene copy only matches the scene target; group targets skip it.
+                    if !std::ptr::eq(dest, &self.scene) {
+                        return;
+                    }
+                    let Some((layout, pipeline)) = &self.particle_refract else {
+                        return;
+                    };
+                    encoder.copy_texture_to_texture(
+                        self.scene.texture.as_image_copy(),
+                        self.full_frame.texture.as_image_copy(),
+                        wgpu::Extent3d {
+                            width: self.scene.width,
+                            height: self.scene.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    // No normal map means no bend, so there is nothing to draw.
+                    let Some(normal_view) = refract
+                        .normal_path
+                        .as_ref()
+                        .and_then(|p| self.textures.get(p))
+                        .map(|t| &t.view)
+                    else {
+                        return;
+                    };
+                    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("scene_particle_refract_bg"),
+                        layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(normal_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&self.full_frame.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: refract.params.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    run_pass(encoder, "scene_particles_refract", &dest.view, None, |rp| {
+                        rp.set_pipeline(pipeline);
+                        rp.set_bind_group(0, &ps.draw.bind_group, &[]);
+                        rp.set_bind_group(1, &group, &[]);
+                        rp.set_vertex_buffer(0, ps.vertex_buffer.slice(..));
+                        rp.set_index_buffer(ps.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        rp.draw_indexed(0..(count * 6) as u32, 0, 0..1);
+                    });
+                    return;
+                }
                 let pipeline = &self.particle_pipelines[&ps.blending];
                 run_pass(encoder, "scene_particles", &dest.view, None, |rp| {
                     rp.set_pipeline(pipeline);
@@ -3592,5 +3766,32 @@ impl SceneRenderer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod refract_tests {
+    use super::*;
+
+    #[test]
+    fn refract_shader_is_valid_wgsl() {
+        let module = naga::front::wgsl::parse_str(SCENE_PARTICLE_REFRACT_WGSL).expect("parse");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("validate");
+    }
+
+    #[test]
+    fn refract_amount_reads_constant_or_defaults() {
+        let mut c: HashMap<String, Value> = HashMap::new();
+        assert!((refract_amount(&c) - 0.05).abs() < 1e-6);
+        c.insert(
+            "ui_editor_properties_refract_amount".into(),
+            Value::parse("0.5").unwrap(),
+        );
+        assert!((refract_amount(&c) - 0.5).abs() < 1e-6);
     }
 }

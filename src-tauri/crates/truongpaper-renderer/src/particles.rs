@@ -85,14 +85,15 @@ pub struct ParticleChildSpec {
 
 impl ParticleChildSpec {
     pub fn from_json(v: &Value) -> Self {
-        let kind = match json_string(v, "type", "eventfollow")
+        let kind = match json_string(v, "type", "static")
             .to_ascii_lowercase()
             .as_str()
         {
-            "static" => ParticleChildKind::Static,
+            "eventfollow" => ParticleChildKind::EventFollow,
             "eventspawn" => ParticleChildKind::EventSpawn,
             "eventdeath" => ParticleChildKind::EventDeath,
-            _ => ParticleChildKind::EventFollow,
+            // WE omits the key for its default kind, a single fixed instance.
+            _ => ParticleChildKind::Static,
         };
         Self {
             name: json_string(v, "name", ""),

@@ -245,8 +245,19 @@ impl ParsedTex {
         self.header.uv_scale()
     }
 
+    /// Embedded MP4 video: `FIF_MP4`, or (older `TEXB0003` exports, e.g. 3122339805) the
+    /// `IS_VIDEO_TEXTURE` header flag / an ISO-BMFF `ftyp` box at the start of the payload.
     pub fn is_mp4(&self) -> bool {
-        self.free_image_format == FIF_MP4
+        if self.free_image_format == FIF_MP4 {
+            return true;
+        }
+        let flagged = self.header.flags & tex_flags::IS_VIDEO_TEXTURE != 0;
+        let ftyp = self
+            .images
+            .first()
+            .and_then(|mips| mips.first())
+            .is_some_and(|m| m.raw_bytes.get(4..8) == Some(b"ftyp".as_slice()));
+        flagged && ftyp
     }
 }
 
@@ -869,6 +880,24 @@ mod tests {
         let t = parse_tex(&b).unwrap();
         assert_eq!(t.container_version, 3);
         assert_eq!(t.free_image_format, 13);
+    }
+
+    /// Regression (3122339805): TEXB0003 RGBA8888 textures with the video flag carry an MP4
+    /// payload (`ftyp` box), not pixels.
+    #[test]
+    fn tex_texb0003_flagged_video_with_ftyp_is_mp4() {
+        let mp4 = b"\0\0\0\x20ftypisom\0\0\x02\0isomiso2";
+        let build = |flags: i32, data: &[u8]| {
+            let mut b = tex_header(0, flags);
+            b.extend(nstr("TEXB0003"));
+            b.extend(i32le(1));
+            b.extend(i32le(FIF_UNKNOWN));
+            b.extend(i32le(1));
+            b.extend(mip_v2(300, 200, false, 0, data));
+            parse_tex(&b).unwrap()
+        };
+        assert!(build(tex_flags::IS_VIDEO_TEXTURE | 3, mp4).is_mp4());
+        assert!(!build(tex_flags::IS_VIDEO_TEXTURE, &[0u8; 16]).is_mp4());
     }
 
     #[test]

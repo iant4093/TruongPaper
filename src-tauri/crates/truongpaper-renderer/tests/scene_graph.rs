@@ -641,3 +641,124 @@ fn load_errors() {
     assert!(SceneGraph::load(&vfs, "scene.json", Some(""), MONITOR).is_ok());
     assert!(SceneGraph::load(&vfs, "../escape.json", None, MONITOR).is_err());
 }
+
+/// Regression (2887099508): keyframe animations on `general.zoom` and on layer properties drive
+/// the live value; `startpaused` holds frame 0 instead of the editor `value`.
+#[test]
+fn keyframe_animations_drive_zoom_and_layer_properties() {
+    let t = TempDir::new("sg-timeline");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 64, "height": 64 }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 },
+        "zoom": { "value": 3.0, "animation": {
+            "c0": [ { "frame": 0, "value": 3 }, { "frame": 300, "value": 3 },
+                    { "frame": 450, "value": 1 } ],
+            "options": { "fps": 30, "length": 450, "mode": "single" } } } },
+        "objects": [
+          { "name": "Black", "image": "models/solid.json", "origin": "960 540 0",
+            "alpha": { "value": 1.0, "animation": {
+                "c0": [ { "frame": 0, "value": 0 }, { "frame": 30, "value": 1 } ],
+                "options": { "fps": 30, "length": 150, "mode": "single", "startpaused": true } } } },
+          { "name": "Mover", "image": "models/solid.json",
+            "origin": { "value": "0 0 0", "animation": {
+                "c0": [ { "frame": 0, "value": 0 }, { "frame": 10, "value": 100 } ],
+                "c1": [ { "frame": 0, "value": 50 }, { "frame": 10, "value": 50 } ],
+                "options": { "fps": 10, "length": 10, "mode": "loop" } } } } ] }"#;
+    let mut g = load(&t, scene, None);
+    assert!(g.has_animations());
+    assert_eq!(g.camera.zoom, 3.0);
+    let black = g.find_layer("Black").unwrap();
+    let mover = g.find_layer("Mover").unwrap();
+    assert_eq!(g.layers[black].alpha, 0.0, "startpaused holds frame 0");
+    g.step_animations(20.0);
+    assert_eq!(g.camera.zoom, 1.0, "single-mode zoom ends at the last key");
+    assert_eq!(g.layers[black].alpha, 0.0);
+    g.step_animations(0.5);
+    let o = g.layers[mover].transform.origin;
+    assert!(
+        (o.x - 50.0).abs() < 1e-3 && (o.y - 50.0).abs() < 1e-3,
+        "{o:?}"
+    );
+    assert!((g.layers[mover].world_matrix.w_axis.x - 50.0).abs() < 1e-3);
+}
+
+/// Regression (3122339805): a child's origin is relative to its parent's origin point, not to
+/// the parent's aligned quad; text boxes hang from their origin per text alignment; a solid
+/// layer with effects becomes an image layer so the effects run.
+#[test]
+fn parent_alignment_text_anchor_and_solid_effects() {
+    let t = TempDir::new("sg-pixels");
+    t.write("core/models/util/solidlayer.json", r#"{ }"#);
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+        "objects": [
+          { "id": 1, "name": "Window", "image": "models/util/solidlayer.json",
+            "origin": "100 800 0", "size": "600 30", "alignment": "topleft" },
+          { "id": 2, "name": "Child", "image": "models/util/solidlayer.json", "parent": 1,
+            "origin": "300 -400 0", "size": "10 10" },
+          { "id": 3, "name": "Header", "text": "NIGHTLIFE", "parent": 1, "origin": "7 -15 0",
+            "size": "116 23", "horizontalalign": "left", "verticalalign": "center",
+            "anchor": "none" },
+          { "id": 4, "name": "Bars", "image": "models/util/solidlayer.json",
+            "origin": "500 500 0", "size": "500 100",
+            "effects": [ { "file": "effects/tint/effect.json", "id": 5 } ] } ] }"#;
+    let g = load(&t, scene, None);
+    let child = &g.layers[g.find_layer("Child").unwrap()];
+    let c = child.world_matrix.w_axis;
+    assert!(
+        (c.x - 400.0).abs() < 1e-3 && (c.y - 400.0).abs() < 1e-3,
+        "{c:?}"
+    );
+    let header = &g.layers[g.find_layer("Header").unwrap()];
+    assert_eq!(header.transform.alignment, "left");
+    let h = header.world_matrix.w_axis;
+    // Left edge at the origin: center = 100 + 7 + 116 / 2.
+    assert!(
+        (h.x - 165.0).abs() < 1e-3 && (h.y - 785.0).abs() < 1e-3,
+        "{h:?}"
+    );
+    let bars = &g.layers[g.find_layer("Bars").unwrap()];
+    assert!(
+        matches!(&bars.kind, SceneLayerKind::Image { texture_paths, .. }
+            if texture_paths[0].as_deref() == Some("materials/util/white.tex")),
+        "{:?}",
+        bars.kind.name()
+    );
+}
+
+/// Regression (843532366): GIF-scene packages ship `gifscene.json` and no `scene.json`.
+#[test]
+fn gif_scene_packages_load_gifscene_json() {
+    let t = TempDir::new("sg-gifscene");
+    t.write(
+        "gifscene.json",
+        r#"{ "general": { "orthogonalprojection": { "auto": true } },
+            "objects": [ { "name": "bg", "image": "models/util/solidlayer.json",
+                           "origin": "240 150 0", "size": "480 300" } ] }"#,
+    );
+    t.write("core/models/util/solidlayer.json", r#"{ }"#);
+    let g = SceneGraph::load(&mount(&t), "scene.json", None, MONITOR).expect("gifscene loads");
+    assert_eq!(g.scene_size, Vec2::new(480.0, 300.0));
+}
+
+/// Regression (3299228616): a hidden parent (layer or transform-only node) hides its children.
+#[test]
+fn hidden_parents_hide_their_children() {
+    let t = TempDir::new("sg-hidden-parent");
+    t.write("core/models/util/solidlayer.json", r#"{ }"#);
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } },
+        "objects": [
+          { "id": 1, "name": "Hidden", "image": "models/util/solidlayer.json",
+            "visible": { "user": "lang", "value": false } },
+          { "id": 2, "name": "Child", "image": "models/util/solidlayer.json", "parent": 1 },
+          { "id": 3, "name": "Group", "visible": false },
+          { "id": 4, "name": "Grandchild", "image": "models/util/solidlayer.json", "parent": 3 },
+          { "id": 5, "name": "Shown", "image": "models/util/solidlayer.json", "parent": 2 } ] }"#;
+    let g = load(&t, scene, None);
+    let vis = |n: &str| g.effective_visible(g.find_layer(n).unwrap());
+    assert!(!vis("Child") && !vis("Grandchild") && !vis("Shown"));
+    let g = load(&t, scene, Some(r#"{ "lang": true }"#));
+    let vis = |n: &str| g.effective_visible(g.find_layer(n).unwrap());
+    assert!(vis("Child") && vis("Shown") && !vis("Grandchild"));
+}

@@ -108,9 +108,89 @@ async fn render() -> anyhow::Result<()> {
         defaults.as_deref(),
         [mon_w as f32, mon_h as f32],
     )?;
+    // PROBE_LIST=1 prints layers; PROBE_SHOW="i,j,.." renders only those layer indices.
+    if std::env::var("PROBE_LIST").is_ok() {
+        for (i, l) in runtime.graph().layers.iter().enumerate() {
+            let k = format!("{:?}", l.kind);
+            eprintln!(
+                "L{i} {} vis={} a={} {}",
+                l.key(),
+                l.visible,
+                l.alpha,
+                &k[..k.len().min(24)]
+            );
+            eprintln!("    {:?}", l.transform);
+        }
+    }
+    if let Ok(show) = std::env::var("PROBE_SHOW") {
+        let keep: Vec<usize> = show.split(',').filter_map(|v| v.parse().ok()).collect();
+        for (i, l) in runtime.graph_mut().layers.iter_mut().enumerate() {
+            l.visible &= keep.contains(&i);
+        }
+    }
+    if let Some(z) = std::env::var("PROBE_ZOOM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        runtime.graph_mut().camera.zoom = z;
+    }
+    if std::env::var("PROBE_NOFX").is_ok() {
+        for l in runtime.graph_mut().layers.iter_mut() {
+            l.effects.clear();
+        }
+    }
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = SceneRenderer::new(&device, &queue, fmt, runtime.graph().scene_size);
     let warnings = renderer.load(&device, &queue, &vfs, runtime.graph());
+    // Embedded MP4 textures stay white until the host pushes frames; the probe pushes the first
+    // frame decoded with `ffmpeg` (when installed) so renders look like the running wallpaper.
+    for path in renderer.embedded_video_paths() {
+        let Ok(bytes) = vfs.read_bytes(&path) else {
+            continue;
+        };
+        let Ok(tex) = truongpaper_we_formats::parse_tex(&bytes) else {
+            continue;
+        };
+        let Some(mip) = tex.images.first().and_then(|m| m.first()) else {
+            continue;
+        };
+        let tmp = std::env::temp_dir().join(format!("probe-{}.mp4", std::process::id()));
+        if std::fs::write(&tmp, &mip.raw_bytes).is_err() {
+            continue;
+        }
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-i"])
+            .arg(&tmp)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .output();
+        let probe = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+            .args(["stream=width,height", "-of", "csv=p=0"])
+            .arg(&tmp)
+            .output();
+        let _ = std::fs::remove_file(&tmp);
+        let (Ok(out), Ok(probe)) = (out, probe) else {
+            continue;
+        };
+        let dims = String::from_utf8_lossy(&probe.stdout);
+        let mut it = dims
+            .trim()
+            .split(',')
+            .filter_map(|v| v.trim().parse::<u32>().ok());
+        let (Some(w), Some(h)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if out.stdout.len() == (w * h * 4) as usize {
+            let frame = truongpaper_renderer::video_runtime::VideoFrame {
+                width: w,
+                height: h,
+                stride: (w * 4) as usize,
+                format: truongpaper_renderer::video_runtime::VideoPixelFormat::Rgba8,
+                data: out.stdout,
+            };
+            renderer.upload_video_frame(&queue, &path, &frame);
+        }
+    }
     eprintln!(
         "{} layers, {} renderer warnings",
         runtime.graph().layers.len(),

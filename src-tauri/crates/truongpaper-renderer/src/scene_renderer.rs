@@ -58,7 +58,9 @@ use crate::shader_preprocessor::{
     compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
     ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
-use crate::text::{bitmap_size, load_font, rasterize, TextCache, TextKey, TextStyle};
+use crate::text::{
+    bitmap_size, grow_text_box, load_font, rasterize, FontMetrics, TextCache, TextKey, TextStyle,
+};
 use crate::video_runtime::{tightly_packed_rows, VideoFrame, VideoPixelFormat};
 
 // ------------------------------------------------------------------------------------------
@@ -170,6 +172,39 @@ pub fn layer_quad_vertices(size: Vec2, uv_scale: [f32; 2]) -> [LayerVertex; 4] {
 pub fn layer_local_projection(size: Vec2) -> Mat4 {
     let (hw, hh) = (size.x.max(1.0) * 0.5, size.y.max(1.0) * 0.5);
     Mat4::orthographic_rh(-hw, hw, -hh, hh, -1.0, 1.0)
+}
+
+/// `colorBlendMode` values composited with the backdrop-reading blend shader (Wallpaper
+/// Engine's blend list: 1 darken, 2 multiply, 3 colour burn, 4 linear burn, 5 darker colour,
+/// 6 lighten, 7 screen, 8 colour dodge, 9 linear dodge / add, 10 lighter colour, 11 overlay,
+/// 12 soft light, 13 hard light, 18 difference, 19 exclusion, 20 subtract). 0 is normal.
+pub fn is_color_blend_mode(mode: i32) -> bool {
+    matches!(mode, 1..=13 | 18..=20)
+}
+
+/// Matrix for drawing the clip-space full-frame quad into a composition layer's own FBO.
+///
+/// A composition layer (`copybackground`) captures the part of the screen *behind its own
+/// bounds*: the layer is a window onto the scene, and an effect-free one composites back exactly
+/// over what it covers. So a screen clip position `p` lands in the FBO at
+/// `local * inverse(layer_mvp) * p` (screen -> layer-local units -> FBO clip). Fullscreen layers
+/// cover the screen, so the capture is the identity. Output depth is flattened to 0.
+pub fn composition_capture_matrix(fullscreen: bool, local: Mat4, layer_mvp: Mat4) -> Mat4 {
+    if fullscreen {
+        return Mat4::IDENTITY;
+    }
+    // Layers are flat (input z = 0) and may have a zero z scale, so invert the xy/w part only.
+    let mut flat = layer_mvp;
+    flat.z_axis = glam::Vec4::Z;
+    let mut rows = flat.transpose();
+    rows.z_axis = glam::Vec4::Z;
+    let flat = rows.transpose();
+    if flat.determinant().abs() <= f32::EPSILON * f32::EPSILON {
+        return Mat4::IDENTITY;
+    }
+    let mut rows = (local * flat.inverse()).transpose();
+    rows.z_axis = glam::Vec4::ZERO;
+    rows.transpose()
 }
 
 /// Set-1 layout entries for WE textures: `texture_2d` at binding `N` and its filtering sampler
@@ -572,12 +607,31 @@ fn fs_layer_color(in: VsOut) -> @location(0) vec4<f32> {
     let src = textureSample(src_tex, src_sampler, in.uv);
     let dst = textureLoad(scene_backdrop, vec2<i32>(in.position.xy), 0);
     let alpha = clamp(src.a, 0.0, 1.0);
-    let screen = src.rgb + dst.rgb - src.rgb * dst.rgb;
-    let low = dst.rgb - (1.0 - 2.0 * src.rgb) * dst.rgb * (1.0 - dst.rgb);
-    let high = dst.rgb + (2.0 * src.rgb - 1.0) * (sqrt(max(dst.rgb, vec3(0.0))) - dst.rgb);
-    let soft_light = mix(low, high, step(vec3(0.5), src.rgb));
-    let rgb = select(screen, soft_light, u.color.x == 12.0);
-    return vec4(mix(dst.rgb, rgb, alpha), alpha + dst.a * (1.0 - alpha));
+    let b = dst.rgb;
+    let l = src.rgb;
+    let mode = i32(u.color.x + 0.5);
+    var rgb = l;
+    switch mode {
+        case 1, 5: { rgb = min(b, l); }
+        case 2: { rgb = b * l; }
+        case 3: { rgb = 1.0 - min(vec3(1.0), (1.0 - b) / max(l, vec3(1e-4))); }
+        case 4, 20: { rgb = max(b + l - 1.0, vec3(0.0)); }
+        case 6, 10: { rgb = max(b, l); }
+        case 7: { rgb = b + l - b * l; }
+        case 8: { rgb = min(vec3(1.0), b / max(1.0 - l, vec3(1e-4))); }
+        case 9: { rgb = b + l; }
+        case 11: { rgb = mix(2.0 * b * l, 1.0 - 2.0 * (1.0 - b) * (1.0 - l), step(vec3(0.5), b)); }
+        case 12: {
+            let low = b - (1.0 - 2.0 * l) * b * (1.0 - b);
+            let high = b + (2.0 * l - 1.0) * (sqrt(max(b, vec3(0.0))) - b);
+            rgb = mix(low, high, step(vec3(0.5), l));
+        }
+        case 13: { rgb = mix(2.0 * b * l, 1.0 - 2.0 * (1.0 - b) * (1.0 - l), step(vec3(0.5), l)); }
+        case 18: { rgb = abs(b - l); }
+        case 19: { rgb = b + l - 2.0 * b * l; }
+        default: {}
+    }
+    return vec4(mix(b, rgb, alpha), dst.a);
 }
 "#;
 
@@ -751,6 +805,21 @@ struct GpuEffectLayer {
     is_composition: bool,
     samples_scene: bool,
     fullscreen: bool,
+    /// Composition layers with child layers: the children render into this group target
+    /// (layer-local space) instead of the scene, and it is the layer's base image.
+    group: Option<GpuGroup>,
+}
+
+/// Render group of a composition layer (Wallpaper Engine composition layers render their
+/// children into themselves, so the layer's effects apply to the whole group).
+struct GpuGroup {
+    target: GpuTarget,
+    /// Draws the group target as the layer's base image.
+    base: SimpleDraw,
+    /// `copybackground`: draws the scene behind the layer into the group before the children.
+    backdrop: Option<SimpleDraw>,
+    /// Layer indices of the group's direct members, in draw order.
+    members: Vec<usize>,
 }
 
 struct GpuParticles {
@@ -769,6 +838,8 @@ struct GpuText {
     quad: wgpu::Buffer,
     /// Size of the quad in layer units (the layer size, or the bitmap size for auto-sized text).
     quad_size: Vec2,
+    /// Offset of the quad center from the layer center (a box grown for long text).
+    quad_offset: Vec2,
     /// Inputs of the last `update_text`; an identical call is a no-op (no allocation).
     last_input: Option<(String, TextStyle, Vec2)>,
     /// Keeps the bitmap texture alive for `draw`.
@@ -806,6 +877,9 @@ pub struct SceneRenderer {
     clamp_sampler: wgpu::Sampler,
     repeat_sampler: wgpu::Sampler,
     white: GpuTexture,
+    /// Fallback for textures that are named but missing or unreadable (Wallpaper Engine draws
+    /// nothing for them; white made big solid boxes, e.g. 2983846453).
+    transparent: GpuTexture,
     soft_particle: wgpu::TextureView,
     fullscreen_quad: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
@@ -813,6 +887,8 @@ pub struct SceneRenderer {
     /// Embedded MP4 `.tex` paths -> placeholder texture size.
     video_textures: HashMap<String, (u32, u32)>,
     layers: Vec<Option<GpuLayer>>,
+    /// Composition layer whose group each layer draws into (`None` = the scene).
+    group_owner: Vec<Option<usize>>,
     layer_outputs: HashMap<i32, GpuTarget>,
     bloom: Option<GpuBloom>,
     blit: SimpleDraw,
@@ -1150,6 +1226,15 @@ impl SceneRenderer {
             uv_scale: [1.0, 1.0],
             tex_format: None,
         };
+        let (clear_tex, clear_view) =
+            upload_rgba(device, queue, "scene_transparent", 1, 1, &[0; 4]);
+        let transparent = GpuTexture {
+            texture: clear_tex,
+            view: clear_view,
+            resolution: Vec4::ONE,
+            uv_scale: [1.0, 1.0],
+            tex_format: None,
+        };
         const SPRITE_SIZE: u32 = 32;
         let mut sprite = Vec::with_capacity((SPRITE_SIZE * SPRITE_SIZE * 4) as usize);
         for y in 0..SPRITE_SIZE {
@@ -1228,12 +1313,14 @@ impl SceneRenderer {
             clamp_sampler,
             repeat_sampler,
             white,
+            transparent,
             soft_particle,
             fullscreen_quad,
             quad_indices,
             textures: HashMap::new(),
             video_textures: HashMap::new(),
             layers: Vec::new(),
+            group_owner: Vec::new(),
             layer_outputs: HashMap::new(),
             bloom: None,
             last_pointer: Vec2::splat(0.5),
@@ -1546,7 +1633,11 @@ impl SceneRenderer {
                 resolution: t.resolution,
                 repeat: true,
             },
-            None => self.white_binding(),
+            None => SlotBinding {
+                view: &self.transparent.view,
+                resolution: Vec4::ONE,
+                repeat: false,
+            },
         }
     }
 
@@ -1779,6 +1870,16 @@ impl SceneRenderer {
         }
         let mut fonts: HashMap<Option<String>, Option<Arc<FontVec>>> = HashMap::new();
         for (layer, plan) in graph.layers.iter().zip(plans.drain(..)) {
+            // A composition (passthrough) layer with no visible effect just redraws what is
+            // behind it; Wallpaper Engine draws nothing for it (linux-wallpaperengine skips it
+            // too). Skipping avoids resampling the scene through a small FBO.
+            if matches!(layer.kind, SceneLayerKind::Composition { .. })
+                && plan.as_ref().is_some_and(|p| p.passes().next().is_none())
+                && layer.id.is_none_or(|id| !referenced.contains(&id))
+            {
+                self.layers.push(None);
+                continue;
+            }
             let gpu = match &layer.kind {
                 SceneLayerKind::Text { style, .. } => {
                     let font = fonts
@@ -1850,11 +1951,15 @@ impl SceneRenderer {
                         self.ensure_texture(device, queue, vfs, p, &mut warnings);
                     }
                     self.ensure_particle_pipeline(device, blending);
-                    let view = tex_path
-                        .as_deref()
-                        .and_then(|p| self.textures.get(p))
-                        .map(|t| &t.view)
-                        .unwrap_or(&self.soft_particle);
+                    // Missing sprite texture -> nothing drawn; no texture named -> soft dot.
+                    let view = match tex_path.as_deref() {
+                        Some(p) => self
+                            .textures
+                            .get(p)
+                            .map(|t| &t.view)
+                            .unwrap_or(&self.transparent.view),
+                        None => &self.soft_particle,
+                    };
                     let draw = Self::make_simple_draw_raw(
                         device,
                         &self.simple_layout,
@@ -1887,6 +1992,7 @@ impl SceneRenderer {
             };
             self.layers.push(gpu);
         }
+        self.build_groups(device, graph);
 
         let bloom =
             BloomPlan::from_general(&graph.scene.general, &graph.user_props, graph.scene_size);
@@ -1894,6 +2000,69 @@ impl SceneRenderer {
             self.bloom = Some(self.build_bloom(device, bloom));
         }
         warnings
+    }
+
+    /// Assigns every layer to the nearest ancestor composition layer that is drawn, and gives
+    /// those compositions a group target.
+    fn build_groups(&mut self, device: &wgpu::Device, graph: &SceneGraph) {
+        let n = graph.layers.len().min(self.layers.len());
+        let by_object: HashMap<usize, usize> = graph.layers[..n]
+            .iter()
+            .enumerate()
+            .map(|(li, l)| (l.object_index, li))
+            .collect();
+        let is_group = |li: usize| {
+            matches!(graph.layers[li].kind, SceneLayerKind::Composition { .. })
+                && matches!(self.layers[li], Some(GpuLayer::Effects(_)))
+        };
+        let mut owner = vec![None; n];
+        for (li, slot) in owner.iter_mut().enumerate() {
+            let mut cur = graph.layers[li].parent_object;
+            let mut hops = 0;
+            while let (Some(obj), true) = (cur, hops <= n) {
+                hops += 1;
+                match by_object.get(&obj) {
+                    Some(&pi) if is_group(pi) => {
+                        *slot = Some(pi);
+                        break;
+                    }
+                    Some(&pi) => cur = graph.layers[pi].parent_object,
+                    // Transform-only parent node: keep walking through the scene objects.
+                    None => cur = graph.object_parent(obj),
+                }
+            }
+        }
+        for gi in 0..n {
+            let members: Vec<usize> = (0..n).filter(|&li| owner[li] == Some(gi)).collect();
+            if members.is_empty() {
+                continue;
+            }
+            let copy_bg = graph.scene.objects[graph.layers[gi].object_index]
+                .copybackground
+                .unwrap_or(true);
+            let Some(GpuLayer::Effects(fx)) = self.layers[gi].as_ref() else {
+                continue;
+            };
+            let target = create_target(
+                device,
+                "scene_group",
+                fx.plan.width,
+                fx.plan.height,
+                HDR_FORMAT,
+            );
+            let base = self.make_simple_draw(device, &target.view);
+            let backdrop = copy_bg.then(|| self.make_simple_draw(device, &self.full_frame.view));
+            if let Some(GpuLayer::Effects(fx)) = self.layers[gi].as_mut() {
+                fx.samples_scene = false;
+                fx.group = Some(GpuGroup {
+                    target,
+                    base,
+                    backdrop,
+                    members,
+                });
+            }
+        }
+        self.group_owner = owner;
     }
 
     fn load_effect_layer(
@@ -1990,7 +2159,16 @@ impl SceneRenderer {
                 .and_then(|p| self.textures.get(&p));
             base_uv = tex0.map(|t| t.uv_scale).unwrap_or([1.0, 1.0]);
             let tex0_format = tex0.and_then(|t| t.tex_format);
-            let tex0_view = tex0.map(|t| &t.view).unwrap_or(&self.white.view);
+            // No base texture slot -> white (solid-style image); a named but missing one -> clear.
+            let named = texture_paths
+                .first()
+                .is_some_and(|p| p.as_deref().is_some_and(|p| !p.starts_with("_rt_")));
+            let fallback = if named {
+                &self.transparent.view
+            } else {
+                &self.white.view
+            };
+            let tex0_view = tex0.map(|t| &t.view).unwrap_or(fallback);
             if let Some(mpass) = material.as_ref().and_then(|m| m.passes.first()) {
                 match self.build_we_pass(
                     device,
@@ -2180,6 +2358,7 @@ impl SceneRenderer {
             is_composition,
             samples_scene,
             fullscreen,
+            group: None,
         })
     }
 
@@ -2201,6 +2380,7 @@ impl SceneRenderer {
                 mapped_at_creation: false,
             }),
             quad_size: Vec2::ONE,
+            quad_offset: Vec2::ZERO,
             last_input: None,
             _texture: texture,
         }
@@ -2256,10 +2436,16 @@ impl SceneRenderer {
             }
         }
         let valid = |v: f32| v.is_finite() && v >= 1.0;
-        t.quad_size = if valid(layer_size.x) && valid(layer_size.y) {
-            layer_size
+        (t.quad_size, t.quad_offset) = if valid(layer_size.x) && valid(layer_size.y) {
+            let ((gw, gh), (dx, dy)) = grow_text_box(
+                &FontMetrics::new(&t.font, style.pointsize),
+                text,
+                style,
+                (layer_size.x, layer_size.y),
+            );
+            (Vec2::new(gw, gh), Vec2::new(dx, dy))
         } else {
-            Vec2::new(w as f32, h as f32)
+            (Vec2::new(w as f32, h as f32), Vec2::ZERO)
         };
     }
 
@@ -2466,14 +2652,13 @@ impl SceneRenderer {
         let layer_count = graph.layers.len().min(self.layers.len());
         for li in 0..layer_count {
             let layer = &graph.layers[li];
-            if !layer.visible
+            if !graph.effective_visible(li)
                 && layer
                     .id
                     .is_none_or(|id| !self.layer_outputs.contains_key(&id))
             {
                 continue;
             }
-            let matrices = graph.layer_pass_matrices(li, camera);
             if let (SceneLayerKind::Text { text, style }, Some(GpuLayer::Text(t))) =
                 (&layer.kind, self.layers[li].as_mut())
             {
@@ -2562,90 +2747,21 @@ impl SceneRenderer {
                 }
                 _ => {}
             }
-            let Some(gpu) = self.layers[li].as_ref() else {
-                continue;
-            };
-            match gpu {
-                GpuLayer::Effects(fx) => {
-                    self.render_effect_layer(queue, encoder, fx, layer, &matrices, &base_values);
-                }
-                GpuLayer::Text(t) => {
-                    if !layer.visible {
-                        continue;
-                    }
-                    queue.write_buffer(
-                        &t.draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
-                    queue.write_buffer(
-                        &t.quad,
-                        0,
-                        bytemuck::cast_slice(&layer_quad_vertices(t.quad_size, [1.0, 1.0])),
-                    );
-                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
-                    run_pass(encoder, "scene_text", &self.scene.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &t.draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, t.quad.slice(..));
-                        rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..6, 0, 0..1);
-                    });
-                }
-                GpuLayer::Solid(draw) => {
-                    queue.write_buffer(
-                        &draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
-                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
-                    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("scene_solid_quad"),
-                        contents: bytemuck::cast_slice(&layer_quad_vertices(
-                            layer.transform.size,
-                            [1.0, 1.0],
-                        )),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                    run_pass(encoder, "scene_solid", &self.scene.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, vb.slice(..));
-                        rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..6, 0, 0..1);
-                    });
-                }
-                GpuLayer::Particles(ps) => {
-                    let count = graph
-                        .particle_system(li)
-                        .map(|s| s.particles.len().min(ps.capacity))
-                        .unwrap_or(0);
-                    if count == 0 {
-                        continue;
-                    }
-                    queue.write_buffer(
-                        &ps.draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
-                    let pipeline = &self.particle_pipelines[&ps.blending];
-                    run_pass(encoder, "scene_particles", &self.scene.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &ps.draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, ps.vertex_buffer.slice(..));
-                        rp.set_index_buffer(ps.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..(count * 6) as u32, 0, 0..1);
-                    });
-                }
+        }
+
+        for li in 0..layer_count {
+            if self.group_owner.get(li).copied().flatten().is_none() {
+                self.draw_layer(
+                    device,
+                    queue,
+                    encoder,
+                    graph,
+                    camera,
+                    &base_values,
+                    li,
+                    &self.scene,
+                    Mat4::IDENTITY,
+                );
             }
         }
 
@@ -2682,17 +2798,157 @@ impl SceneRenderer {
         );
     }
 
-    fn render_effect_layer(
+    /// Draws layer `li` into `dest` (the scene, or a composition group target). `pre` maps the
+    /// scene's clip space into `dest` (identity for the scene).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_layer(
         &self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        fx: &GpuEffectLayer,
-        layer: &SceneLayer,
-        matrices: &PassMatrices,
+        graph: &SceneGraph,
+        camera: &CameraState,
         base_values: &UniformValues,
+        li: usize,
+        dest: &GpuTarget,
+        pre: Mat4,
     ) {
-        let color_blend = matches!(layer.color_blend_mode, 7 | 12) && layer.visible;
-        if fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend {
+        let layer = &graph.layers[li];
+        if !graph.effective_visible(li)
+            && layer
+                .id
+                .is_none_or(|id| !self.layer_outputs.contains_key(&id))
+        {
+            return;
+        }
+        let mut matrices = graph.layer_pass_matrices(li, camera);
+        if pre != Mat4::IDENTITY {
+            matrices.model_view_projection = pre * matrices.model_view_projection;
+            matrices.model_view_projection_inverse = matrices.model_view_projection.inverse();
+            matrices.view_projection = pre * matrices.view_projection;
+        }
+        let Some(gpu) = self.layers[li].as_ref() else {
+            return;
+        };
+        match gpu {
+            GpuLayer::Effects(fx) => {
+                self.render_effect_layer(
+                    device,
+                    queue,
+                    encoder,
+                    graph,
+                    camera,
+                    base_values,
+                    li,
+                    fx,
+                    &matrices,
+                    dest,
+                );
+            }
+            GpuLayer::Text(t) => {
+                if !graph.effective_visible(li) {
+                    return;
+                }
+                queue.write_buffer(
+                    &t.draw.uniform,
+                    0,
+                    bytemuck::bytes_of(&SimpleUniforms::new(
+                        matrices.model_view_projection
+                            * Mat4::from_translation(t.quad_offset.extend(0.0)),
+                        (layer.color * layer.brightness).extend(layer.alpha),
+                    )),
+                );
+                queue.write_buffer(
+                    &t.quad,
+                    0,
+                    bytemuck::cast_slice(&layer_quad_vertices(t.quad_size, [1.0, 1.0])),
+                );
+                let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
+                run_pass(encoder, "scene_text", &dest.view, None, |rp| {
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &t.draw.bind_group, &[]);
+                    rp.set_vertex_buffer(0, t.quad.slice(..));
+                    rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                    rp.draw_indexed(0..6, 0, 0..1);
+                });
+            }
+            GpuLayer::Solid(draw) => {
+                queue.write_buffer(
+                    &draw.uniform,
+                    0,
+                    bytemuck::bytes_of(&SimpleUniforms::new(
+                        matrices.model_view_projection,
+                        (layer.color * layer.brightness).extend(layer.alpha),
+                    )),
+                );
+                let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
+                let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_solid_quad"),
+                    contents: bytemuck::cast_slice(&layer_quad_vertices(
+                        layer.transform.size,
+                        [1.0, 1.0],
+                    )),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                run_pass(encoder, "scene_solid", &dest.view, None, |rp| {
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &draw.bind_group, &[]);
+                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                    rp.draw_indexed(0..6, 0, 0..1);
+                });
+            }
+            GpuLayer::Particles(ps) => {
+                let count = graph
+                    .particle_system(li)
+                    .map(|s| s.particles.len().min(ps.capacity))
+                    .unwrap_or(0);
+                if count == 0 {
+                    return;
+                }
+                queue.write_buffer(
+                    &ps.draw.uniform,
+                    0,
+                    bytemuck::bytes_of(&SimpleUniforms::new(
+                        matrices.model_view_projection,
+                        (layer.color * layer.brightness).extend(layer.alpha),
+                    )),
+                );
+                let pipeline = &self.particle_pipelines[&ps.blending];
+                run_pass(encoder, "scene_particles", &dest.view, None, |rp| {
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &ps.draw.bind_group, &[]);
+                    rp.set_vertex_buffer(0, ps.vertex_buffer.slice(..));
+                    rp.set_index_buffer(ps.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    rp.draw_indexed(0..(count * 6) as u32, 0, 0..1);
+                });
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_effect_layer(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &SceneGraph,
+        camera: &CameraState,
+        base_values: &UniformValues,
+        li: usize,
+        fx: &GpuEffectLayer,
+        matrices: &PassMatrices,
+        dest: &GpuTarget,
+    ) {
+        let layer = &graph.layers[li];
+        let into_scene = std::ptr::eq(dest, &self.scene);
+        let color_blend = is_color_blend_mode(layer.color_blend_mode)
+            && graph.effective_visible(li)
+            && into_scene;
+        let backdrop = fx.group.as_ref().is_some_and(|g| g.backdrop.is_some());
+        if into_scene
+            && (fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend || backdrop)
+        {
             encoder.copy_texture_to_texture(
                 self.scene.texture.as_image_copy(),
                 self.full_frame.texture.as_image_copy(),
@@ -2705,6 +2961,59 @@ impl SceneRenderer {
         }
         let layer_size = Vec2::new(fx.plan.width as f32, fx.plan.height as f32);
         let local = layer_local_projection(layer_size);
+        if let Some(group) = &fx.group {
+            if graph.effective_visible(li) {
+                let capture = composition_capture_matrix(
+                    fx.fullscreen,
+                    local,
+                    matrices.model_view_projection,
+                );
+                run_pass(
+                    encoder,
+                    "scene_group_clear",
+                    &group.target.view,
+                    Some(wgpu::Color::TRANSPARENT),
+                    |_| {},
+                );
+                if let (Some(draw), true) = (&group.backdrop, into_scene) {
+                    queue.write_buffer(
+                        &draw.uniform,
+                        0,
+                        bytemuck::bytes_of(&SimpleUniforms::new(capture, Vec4::ONE)),
+                    );
+                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Normal)];
+                    run_pass(
+                        encoder,
+                        "scene_group_backdrop",
+                        &group.target.view,
+                        None,
+                        |rp| {
+                            rp.set_pipeline(pipeline);
+                            rp.set_bind_group(0, &draw.bind_group, &[]);
+                            rp.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
+                            rp.set_index_buffer(
+                                self.quad_indices.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            rp.draw_indexed(0..6, 0, 0..1);
+                        },
+                    );
+                }
+                for &child in &group.members {
+                    self.draw_layer(
+                        device,
+                        queue,
+                        encoder,
+                        graph,
+                        camera,
+                        base_values,
+                        child,
+                        &group.target,
+                        capture,
+                    );
+                }
+            }
+        }
         let local_values = UniformValues {
             matrices: PassMatrices {
                 model_view_projection: local,
@@ -2734,7 +3043,7 @@ impl SceneRenderer {
         };
         let target_view = |id: &RenderTargetId| -> Option<&wgpu::TextureView> {
             match id {
-                RenderTargetId::Scene => Some(&self.scene.view),
+                RenderTargetId::Scene => Some(&dest.view),
                 RenderTargetId::FullFrame => None,
                 other => fx.targets.get(other).map(|t| &t.view),
             }
@@ -2768,9 +3077,35 @@ impl SceneRenderer {
                             );
                             rp.draw_indexed(0..6, 0, 0..1);
                         });
+                    } else if let Some(group) = &fx.group {
+                        let draw = &group.base;
+                        queue.write_buffer(
+                            &draw.uniform,
+                            0,
+                            bytemuck::bytes_of(&SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE)),
+                        );
+                        let pipeline = &self.composite_pipelines[&(FBO_FORMAT, BlendMode::Normal)];
+                        run_pass(encoder, "scene_layer_group_base", view, transparent, |rp| {
+                            rp.set_pipeline(pipeline);
+                            rp.set_bind_group(0, &draw.bind_group, &[]);
+                            rp.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
+                            rp.set_index_buffer(
+                                self.quad_indices.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            rp.draw_indexed(0..6, 0, 0..1);
+                        });
                     } else if let Some(draw) = &fx.base_copy {
                         let (mvp, vb, color) = if fx.is_composition {
-                            (Mat4::IDENTITY, &self.fullscreen_quad, Vec4::ONE)
+                            (
+                                composition_capture_matrix(
+                                    fx.fullscreen,
+                                    local,
+                                    matrices.model_view_projection,
+                                ),
+                                &self.fullscreen_quad,
+                                Vec4::ONE,
+                            )
                         } else {
                             (
                                 local,
@@ -2856,7 +3191,7 @@ impl SceneRenderer {
                             );
                         }
                     }
-                    if !layer.visible {
+                    if !graph.effective_visible(li) {
                         continue;
                     }
                     queue.write_buffer(
@@ -2885,33 +3220,25 @@ impl SceneRenderer {
                     } else {
                         &self.composite_pipelines[&(HDR_FORMAT, blend)]
                     };
-                    run_pass(
-                        encoder,
-                        "scene_layer_composite",
-                        &self.scene.view,
-                        None,
-                        |rp| {
-                            rp.set_pipeline(pipeline);
-                            rp.set_bind_group(0, &draw.bind_group, &[]);
-                            if color_blend {
-                                rp.set_bind_group(1, &self.color_blend_backdrop, &[]);
+                    run_pass(encoder, "scene_layer_composite", &dest.view, None, |rp| {
+                        rp.set_pipeline(pipeline);
+                        rp.set_bind_group(0, &draw.bind_group, &[]);
+                        if color_blend {
+                            rp.set_bind_group(1, &self.color_blend_backdrop, &[]);
+                        }
+                        // Effects operate on the source image. Warp the finished image
+                        // when drawing into the scene, where bones can move past the quad.
+                        let (vb, ib, count) = match &fx.puppet {
+                            Some(p) if p.index_count > 0 => {
+                                (&p.vertex_buffer, &p.index_buffer, p.index_count)
                             }
-                            // Effects operate on the source image. Warp the finished image
-                            // when drawing into the scene, where bones can move past the quad.
-                            let (vb, ib, count) = match &fx.puppet {
-                                Some(p) if p.index_count > 0 => {
-                                    (&p.vertex_buffer, &p.index_buffer, p.index_count)
-                                }
-                                _ if fx.fullscreen => {
-                                    (&self.fullscreen_quad, &self.quad_indices, 6)
-                                }
-                                _ => (&fx.effect_quad, &self.quad_indices, 6),
-                            };
-                            rp.set_vertex_buffer(0, vb.slice(..));
-                            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
-                            rp.draw_indexed(0..count, 0, 0..1);
-                        },
-                    );
+                            _ if fx.fullscreen => (&self.fullscreen_quad, &self.quad_indices, 6),
+                            _ => (&fx.effect_quad, &self.quad_indices, 6),
+                        };
+                        rp.set_vertex_buffer(0, vb.slice(..));
+                        rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+                        rp.draw_indexed(0..count, 0, 0..1);
+                    });
                 }
             }
         }

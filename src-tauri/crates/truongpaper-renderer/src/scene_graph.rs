@@ -36,10 +36,11 @@ use crate::json::Value;
 use crate::particles::{ParticleFile, ParticleOverrides, ParticleSystemInstance};
 use crate::scene_assets::{material_texture_path, MaterialFile, ModelJsonFile};
 use crate::scene_math::{
-    build_pass_matrices, layer_model_matrix, parallax_eye_offset, scene_orthographic_projection,
-    LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
+    build_pass_matrices, layer_model_matrix, layer_pivot_matrix, parallax_eye_offset,
+    scene_orthographic_projection, LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
 };
 use crate::text::{HAlign, TextStyle, VAlign, DEFAULT_POINT_SIZE};
+use crate::timeline::Timeline;
 
 pub const DEFAULT_PERSPECTIVE_FOV_DEGREES: f32 = 50.0;
 pub const DEFAULT_PERSPECTIVE_NEARZ: f32 = 0.01;
@@ -432,6 +433,10 @@ pub struct SceneGraph {
     /// visibility / shader constants, bloom).
     render_bound_keys: HashSet<String>,
     render_epoch: u64,
+    /// Keyframe animations on layer properties (`"animation"` next to a `"value"`).
+    animations: Vec<(usize, ScriptProperty, Timeline)>,
+    /// Keyframe animation on `general.zoom`.
+    zoom_timeline: Option<Timeline>,
 }
 
 impl std::fmt::Debug for SceneGraph {
@@ -615,12 +620,60 @@ fn resolve_transform(
             .as_ref()
             .map(|s| parse_vec2_or(&resolve_bound_value(s, props), fallback_size))
             .unwrap_or(fallback_size),
-        alignment: obj.alignment.clone().unwrap_or_else(|| "center".into()),
+        alignment: obj
+            .alignment
+            .clone()
+            .or_else(|| obj.text.as_ref().map(|_| text_box_alignment(obj)))
+            .unwrap_or_else(|| "center".into()),
+    }
+}
+
+/// Where a text layer's box hangs from its `origin`. With `anchor` `none` (or absent) the box
+/// follows the text alignment, so left-aligned text starts at the origin and top-aligned text
+/// hangs below it (3122339805's window headers sit just right of their `origin`); any other
+/// `anchor` value names the anchor directly.
+fn text_box_alignment(obj: &SceneObject) -> String {
+    let norm = |s: &Option<String>| s.as_deref().map(|v| v.trim().to_ascii_lowercase());
+    if let Some(anchor) = norm(&obj.anchor).filter(|a| !a.is_empty() && a != "none") {
+        return anchor;
+    }
+    let v = match norm(&obj.verticalalign).as_deref() {
+        Some("top") => "top",
+        Some("bottom") => "bottom",
+        _ => "",
+    };
+    let h = match norm(&obj.horizontalalign).as_deref() {
+        Some("left") => "left",
+        Some("right") => "right",
+        _ => "",
+    };
+    match (v, h) {
+        ("", "") => "center".into(),
+        (v, h) => format!("{v}{h}"),
     }
 }
 
 /// Output of [`load_layer_kind`]: the kind plus the size fallback for objects without `size`.
 type LoadedKind = (SceneLayerKind, Vec2);
+
+/// Stock white texture solid layers are drawn from when they carry effects.
+pub const SOLID_EFFECT_TEXTURE: &str = "materials/util/white.tex";
+
+/// An image layer equivalent to a solid layer: `genericimage2` over the stock white texture.
+fn solid_as_image(model_path: &str) -> SceneLayerKind {
+    let material = MaterialFile::from_json_str(
+        r#"{ "passes": [ { "shader": "genericimage2", "blending": "translucent",
+             "textures": [ "util/white" ] } ] }"#,
+    )
+    .ok();
+    SceneLayerKind::Image {
+        model_path: model_path.to_string(),
+        model: ModelJsonFile::default(),
+        material,
+        texture_paths: vec![Some(SOLID_EFFECT_TEXTURE.to_string())],
+        puppet_path: None,
+    }
+}
 
 impl SceneGraph {
     /// Loads `scene_path` (normally `"scene.json"`) through `vfs`.
@@ -635,8 +688,17 @@ impl SceneGraph {
         user_props_json: Option<&str>,
         monitor_size: Vec2,
     ) -> Result<SceneGraph, SceneLoadError> {
+        // GIF-scene packages (`gifscene.pkg`, e.g. 843532366) ship `gifscene.json` instead.
+        let mut gif_scene = scene_path.eq_ignore_ascii_case("gifscene.json");
         let text = vfs
             .read_string(scene_path)
+            .or_else(|e| match scene_path {
+                "scene.json" if e.kind() == std::io::ErrorKind::NotFound => {
+                    gif_scene = true;
+                    vfs.read_string("gifscene.json").map_err(|_| e)
+                }
+                _ => Err(e),
+            })
             .map_err(|source| SceneLoadError::Io {
                 path: scene_path.to_string(),
                 source,
@@ -684,6 +746,8 @@ impl SceneGraph {
             particles: Vec::new(),
             render_bound_keys: HashSet::new(),
             render_epoch: 0,
+            animations: Vec::new(),
+            zoom_timeline: None,
         };
         let perspective = raw.is_some()
             && graph
@@ -692,9 +756,34 @@ impl SceneGraph {
                 .is_none_or(Value::is_null);
         graph.resolve_general(perspective);
         graph.build_nodes(vfs);
+        if gif_scene && !perspective && graph.scene.general.orthogonalprojection.auto {
+            graph.fit_gif_scene();
+        }
         graph.render_bound_keys = collect_render_bound_keys(&graph.scene);
         graph.resolve_particle_overrides();
+        if let Some(raw) = &raw {
+            graph.collect_animations(raw);
+        }
+        graph.step_animations(0.0);
         Ok(graph)
+    }
+
+    /// GIF scenes (`gifscene.json`) are one image laid out in its own pixel space with an
+    /// `auto` projection; the scene is the image's extent, scaled to the screen like any scene
+    /// (843532366 is a 480x300 image centered at 240,150).
+    fn fit_gif_scene(&mut self) {
+        let extent = self.layers.iter().fold(Vec2::ZERO, |acc, l| {
+            let half = (l.transform.size * l.transform.scale.truncate()).abs() * 0.5;
+            acc.max(l.transform.origin.truncate() + half)
+        });
+        if extent.x >= 1.0 && extent.y >= 1.0 {
+            let p = &mut self.scene.general.orthogonalprojection;
+            p.auto = false;
+            p.width = extent.x;
+            p.height = extent.y;
+            self.resolve_general(false);
+            self.recompute_world();
+        }
     }
 
     fn resolve_general(&mut self, perspective: bool) {
@@ -882,6 +971,11 @@ impl SceneGraph {
         };
         if let Some(model_path) = obj.image.as_deref() {
             return match self.load_model_kind(vfs, model_path) {
+                // A solid layer with effects runs them on a white image (tinted by `color`,
+                // like any image layer): 3122339805's audio bars are an effect on a solid.
+                Ok((SceneLayerKind::Solid { .. }, size)) if !obj.effects.is_empty() => {
+                    Some((solid_as_image(model_path), size))
+                }
                 Ok(k) => Some(k),
                 Err(e) => {
                     self.warn(format!("layer '{label}' skipped: {e}"));
@@ -1072,6 +1166,68 @@ impl SceneGraph {
         }
     }
 
+    /// Collects every keyframe animation on a layer property and on `general.zoom`.
+    fn collect_animations(&mut self, raw: &Value) {
+        self.zoom_timeline = raw
+            .get("general")
+            .and_then(|g| g.get("zoom"))
+            .and_then(|z| z.get("animation"))
+            .and_then(Timeline::parse);
+        let Some(objects) = raw.get("objects").and_then(Value::as_array) else {
+            return;
+        };
+        for (li, layer) in self.layers.iter().enumerate() {
+            let Some(obj) = objects.get(layer.object_index) else {
+                continue;
+            };
+            for prop in ScriptProperty::ALL {
+                if matches!(prop, ScriptProperty::Text | ScriptProperty::Visible) {
+                    continue;
+                }
+                if let Some(tl) = obj
+                    .get(prop.as_str())
+                    .and_then(|v| v.get("animation"))
+                    .and_then(Timeline::parse)
+                {
+                    self.animations.push((li, prop, tl));
+                }
+            }
+        }
+    }
+
+    /// Whether any property is keyframe-animated.
+    pub fn has_animations(&self) -> bool {
+        !self.animations.is_empty() || self.zoom_timeline.is_some()
+    }
+
+    /// Applies every keyframe animation at `seconds` after the scene started.
+    pub fn step_animations(&mut self, seconds: f32) {
+        if let Some(tl) = &self.zoom_timeline {
+            if let Some(z) = tl.sample(seconds).first().copied().filter(|z| *z > 0.0) {
+                self.camera.zoom = z;
+            }
+        }
+        if self.animations.is_empty() {
+            return;
+        }
+        let mut transform_changed = false;
+        let anims = std::mem::take(&mut self.animations);
+        for (li, prop, tl) in &anims {
+            let comps = tl.sample(seconds);
+            let value = comps
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let (ok, moved) = self.apply_property_value(*li, *prop, &value);
+            transform_changed |= ok && moved;
+        }
+        self.animations = anims;
+        if transform_changed {
+            self.recompute_world();
+        }
+    }
+
     /// Copies layer transforms into the nodes and recomputes every world matrix.
     fn recompute_world(&mut self) {
         for node_index in 0..self.nodes.len() {
@@ -1084,6 +1240,11 @@ impl SceneGraph {
             .iter()
             .map(|n| layer_model_matrix(&n.transform))
             .collect();
+        let pivots: Vec<Mat4> = self
+            .nodes
+            .iter()
+            .map(|n| layer_pivot_matrix(&n.transform))
+            .collect();
         for i in 0..self.nodes.len() {
             let mut chain = vec![i];
             let mut cur = self.nodes[i].parent;
@@ -1094,10 +1255,10 @@ impl SceneGraph {
                 chain.push(p);
                 cur = self.nodes[p].parent;
             }
-            let world = chain
-                .iter()
-                .rev()
-                .fold(Mat4::IDENTITY, |acc, &n| acc * locals[n]);
+            // Ancestors contribute their pivot (no alignment anchor); the node itself is anchored.
+            let world = chain.iter().rev().fold(Mat4::IDENTITY, |acc, &n| {
+                acc * if n == i { locals[n] } else { pivots[n] }
+            });
             self.nodes[i].world = world;
         }
         for node in &self.nodes {
@@ -1110,6 +1271,48 @@ impl SceneGraph {
     /// World matrix of any `scene.objects` entry (including transform-only parent nodes).
     pub fn object_world_matrix(&self, object_index: usize) -> Option<Mat4> {
         self.nodes.get(object_index).map(|n| n.world)
+    }
+
+    /// Whether layer `li` is drawn: its own `visible` and that of every ancestor object (a
+    /// hidden parent hides its children, as in Wallpaper Engine; 3299228616 hides per-language
+    /// copies of the whole scene through their parent). Transform-only ancestors use their
+    /// resolved `visible` binding.
+    pub fn effective_visible(&self, li: usize) -> bool {
+        let Some(layer) = self.layers.get(li) else {
+            return false;
+        };
+        if !layer.visible {
+            return false;
+        }
+        let mut cur = layer.parent_object;
+        let mut hops = 0;
+        while let Some(obj) = cur {
+            hops += 1;
+            if hops > self.nodes.len() {
+                break;
+            }
+            let Some(node) = self.nodes.get(obj) else {
+                break;
+            };
+            let visible = match node.layer {
+                Some(pl) => self.layers[pl].visible,
+                None => self
+                    .scene
+                    .objects
+                    .get(obj)
+                    .is_none_or(|o| resolve_bound_bool(&o.visible, &self.user_props)),
+            };
+            if !visible {
+                return false;
+            }
+            cur = node.parent;
+        }
+        true
+    }
+
+    /// Resolved parent (`scene.objects` index) of any `scene.objects` entry.
+    pub fn object_parent(&self, object_index: usize) -> Option<usize> {
+        self.nodes.get(object_index).and_then(|n| n.parent)
     }
 
     /// Index of the first layer whose name (or id string) equals `key`.
@@ -1307,15 +1510,30 @@ impl SceneGraph {
         else {
             return false;
         };
+        let (ok, transform_changed) = self.apply_property_value(li, prop, value);
+        if transform_changed {
+            self.recompute_world();
+        }
+        ok
+    }
+
+    /// Applies a stringified value to property `prop` of layer `li`. Returns
+    /// `(applied, transform_changed)`; the caller recomputes world matrices.
+    fn apply_property_value(
+        &mut self,
+        li: usize,
+        prop: ScriptProperty,
+        value: &str,
+    ) -> (bool, bool) {
         let raw = value.trim().trim_matches('"');
         let layer = &mut self.layers[li];
         if prop == ScriptProperty::Text {
             return match &mut layer.kind {
                 SceneLayerKind::Text { text, .. } => {
                     *text = value.to_string();
-                    true
+                    (true, false)
                 }
-                _ => false,
+                _ => (false, false),
             };
         }
         let mut transform_changed = false;
@@ -1323,7 +1541,7 @@ impl SceneGraph {
             ScriptProperty::Origin | ScriptProperty::Scale | ScriptProperty::Angles => {
                 let comps = parse_script_components(value);
                 if comps.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 let slot = match prop {
                     ScriptProperty::Origin => &mut layer.transform.origin,
@@ -1336,7 +1554,7 @@ impl SceneGraph {
             ScriptProperty::Size => {
                 let comps = parse_script_components(value);
                 if comps.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 layer.transform.size = apply_components2(layer.transform.size, &comps);
                 transform_changed = true;
@@ -1344,7 +1562,7 @@ impl SceneGraph {
             ScriptProperty::Color => {
                 let comps = parse_script_components(value);
                 if comps.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 layer.color = apply_components3(layer.color, &comps);
                 if let SceneLayerKind::Solid { color } = &mut layer.kind {
@@ -1353,10 +1571,10 @@ impl SceneGraph {
             }
             ScriptProperty::Alpha | ScriptProperty::Brightness => {
                 let Ok(n) = raw.parse::<f32>() else {
-                    return false;
+                    return (false, false);
                 };
                 if !n.is_finite() {
-                    return false;
+                    return (false, false);
                 }
                 if prop == ScriptProperty::Alpha {
                     layer.alpha = n;
@@ -1364,22 +1582,19 @@ impl SceneGraph {
                     layer.brightness = n;
                 }
             }
-            ScriptProperty::Text => return false,
+            ScriptProperty::Text => return (false, false),
             ScriptProperty::Visible => {
                 layer.visible = match raw {
                     "true" => true,
                     "false" => false,
                     other => match other.parse::<f32>() {
                         Ok(n) => n != 0.0,
-                        Err(_) => return false,
+                        Err(_) => return (false, false),
                     },
                 };
             }
         }
-        if transform_changed {
-            self.recompute_world();
-        }
-        true
+        (true, transform_changed)
     }
 
     /// `thisLayer` write-back from SceneScript. Returns `false` when no layer matches `name`.

@@ -283,6 +283,26 @@ pub fn parse_user_properties(json: &str) -> serde_json::Result<UserPropertyMap> 
 }
 
 /// Treats an explicit JSON `null` like a missing field.
+/// Plain optional field that Wallpaper Engine may also write as a user-property binding
+/// (`{ "user": "...", "value": ... }`, e.g. `parallaxDepth` in 3233141951): takes the binding's
+/// `value` (the editor default); `null` -> `None`.
+fn unbound<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let mut v = serde_json::Value::deserialize(deserializer)?;
+    if let Some(inner) = v.as_object_mut().and_then(|o| o.remove("value")) {
+        v = inner;
+    }
+    if v.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(v)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -359,7 +379,7 @@ pub struct SceneGeneral {
     pub orthogonalprojection: OrthogonalProjection,
     #[serde(default = "default_clear_color")]
     pub clearcolor: UserBoundValue<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub clearenabled: Option<bool>,
     #[serde(default)]
     pub cameraparallax: Option<UserBoundValue<bool>>,
@@ -375,9 +395,9 @@ pub struct SceneGeneral {
     pub bloomstrength: Option<UserBoundValue<f32>>,
     #[serde(default)]
     pub bloomthreshold: Option<UserBoundValue<f32>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub ambientcolor: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub skylightcolor: Option<String>,
 }
 fn default_clear_color() -> UserBoundValue<String> {
@@ -386,9 +406,9 @@ fn default_clear_color() -> UserBoundValue<String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneObject {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub id: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub parent: Option<i32>,
     #[serde(default)]
     pub name: String,
@@ -402,33 +422,37 @@ pub struct SceneObject {
     pub angles: UserBoundValue<String>,
     #[serde(default)]
     pub size: Option<UserBoundValue<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub alignment: Option<String>,
+    /// Composition layers: start from the scene behind the layer (`true`, the default) or
+    /// from transparent (only the child layers are captured).
+    #[serde(default, deserialize_with = "unbound")]
+    pub copybackground: Option<bool>,
     #[serde(default = "default_alpha")]
     pub alpha: UserBoundValue<f32>,
     #[serde(default = "default_brightness")]
     pub brightness: UserBoundValue<f32>,
     #[serde(default = "default_color")]
     pub color: UserBoundValue<String>,
-    #[serde(default, rename = "colorBlendMode")]
+    #[serde(default, rename = "colorBlendMode", deserialize_with = "unbound")]
     pub color_blend_mode: Option<i32>,
-    #[serde(default, rename = "parallaxDepth")]
+    #[serde(default, rename = "parallaxDepth", deserialize_with = "unbound")]
     pub parallax_depth: Option<String>,
 
     // Layer kind payloads
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub image: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub particle: Option<String>,
     #[serde(default)]
     pub sound: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub playbackmode: Option<String>,
     #[serde(default)]
     pub volume: Option<UserBoundValue<f32>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub mintime: Option<f32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub maxtime: Option<f32>,
     #[serde(default)]
     pub text: Option<UserBoundValue<String>>,
@@ -436,14 +460,17 @@ pub struct SceneObject {
     #[serde(default)]
     pub pointsize: Option<UserBoundValue<f32>>,
     /// Text layers: `systemfont_*` name or a VFS path to a `.ttf`/`.otf`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub font: Option<String>,
     /// Text layers: `left` / `center` / `right`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub horizontalalign: Option<String>,
     /// Text layers: `top` / `center` / `bottom`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub verticalalign: Option<String>,
+    /// Text layers: where the text box hangs from `origin` (`none` = follow the text alignment).
+    #[serde(default, deserialize_with = "unbound")]
+    pub anchor: Option<String>,
     /// Text layers: inner margin in scene units, usually `"x y"` (like `origin`/`scale`), but
     /// some scenes store a single scalar number applied to every component.
     #[serde(default)]
@@ -777,6 +804,20 @@ mod tests {
             parse_scene_json(r#"{ "general": { "orthogonalprojection": { "auto": true } } }"#)
                 .unwrap();
         assert!(auto_proj.general.orthogonalprojection.auto);
+
+        // Regression (3233141951 & co.): plain fields written as user-property bindings.
+        let bound = parse_scene_json(
+            r#"{ "general": {}, "objects": [ { "name": "x",
+                "parallaxDepth": { "user": "depth", "value": "0.5 0.5" },
+                "alignment": { "user": "a", "value": "topleft" },
+                "colorBlendMode": { "value": 2 }, "font": null } ] }"#,
+        )
+        .unwrap();
+        let o = &bound.objects[0];
+        assert_eq!(o.parallax_depth.as_deref(), Some("0.5 0.5"));
+        assert_eq!(o.alignment.as_deref(), Some("topleft"));
+        assert_eq!(o.color_blend_mode, Some(2));
+        assert_eq!(o.font, None);
         assert_eq!(auto_proj.general.orthogonalprojection.height, 1080.0);
     }
 

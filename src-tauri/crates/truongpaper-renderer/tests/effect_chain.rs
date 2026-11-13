@@ -433,3 +433,35 @@ fn unknown_blend_modes_are_reported() {
         .iter()
         .any(|d| d == "Effect wobble/effect.json: unknown blend mode 'wobble' treated as normal"));
 }
+
+/// Regression (1444077782, 2269193950): pass overrides naming a unique effect FBO as
+/// `<fbo>_<kind>_<id>` and another layer's `_b` composite resolve instead of skipping the effect.
+#[test]
+fn unique_fbo_override_names_and_layer_composite_b_resolve() {
+    let t = TempDir::new("fx-unique");
+    setup(&t);
+    t.write(
+        "effects/acc/effect.json",
+        r#"{ "fbos": [ { "name": "_rt_Acc", "scale": 1, "unique": true } ],
+             "passes": [ { "material": "materials/fx/combo.json" } ] }"#,
+    );
+    let p = plan(
+        &t,
+        r#"[ { "file": "effects/acc/effect.json", "passes": [
+              { "textures": [ null, "_rt_Acc_fullscreen_90", "_rt_imageLayerComposite_13_b" ] } ] } ]"#,
+        None,
+    );
+    assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    let pass = p.passes().next().unwrap();
+    assert_eq!(
+        pass.textures[&1],
+        TextureBinding::Target(RenderTargetId::Named {
+            effect: 0,
+            name: "_rt_Acc".into()
+        })
+    );
+    assert_eq!(
+        pass.textures[&2],
+        TextureBinding::Target(RenderTargetId::LayerOutput(13))
+    );
+}

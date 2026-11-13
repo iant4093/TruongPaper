@@ -69,9 +69,15 @@ impl Default for LayerTransform {
 /// `T(origin) * R(angles) * S(scale) * T(alignment_offset)`.
 pub fn layer_model_matrix(t: &LayerTransform) -> Mat4 {
     let anchor = alignment_offset(&t.alignment, t.size);
+    layer_pivot_matrix(t) * Mat4::from_translation(anchor.extend(0.0))
+}
+
+/// `T(origin) * R(angles) * S(scale)` without the alignment anchor: the space children live in.
+/// A child's `origin` is relative to its parent's origin point whatever the parent's
+/// `alignment` (alignment only moves the parent's own quad), as in Wallpaper Engine.
+pub fn layer_pivot_matrix(t: &LayerTransform) -> Mat4 {
     let rot = Quat::from_euler(EulerRot::ZYX, t.angles.z, t.angles.y, t.angles.x);
     Mat4::from_scale_rotation_translation(t.scale, rot, t.origin)
-        * Mat4::from_translation(anchor.extend(0.0))
 }
 
 /// Camera parallax eye offset: `(pointer - 0.5) * amount * mouse_influence` (pointer in `[0,1]`).

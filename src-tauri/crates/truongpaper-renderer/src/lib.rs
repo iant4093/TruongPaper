@@ -15,6 +15,7 @@ pub mod scene_math;
 pub mod scene_renderer;
 pub mod shader_preprocessor;
 pub mod text;
+pub mod timeline;
 pub mod video_runtime;
 pub mod web_runtime;
 
@@ -49,12 +50,14 @@ pub use scene_graph::{
     SceneLayerKind, SceneLoadError, SceneProjection, ScriptProperty,
 };
 pub use scene_math::{
-    alignment_offset, build_pass_matrices, layer_model_matrix, parallax_eye_offset,
-    scene_orthographic_projection, scene_view_matrix, LayerTransform, PassMatrices,
+    alignment_offset, build_pass_matrices, layer_model_matrix, layer_pivot_matrix,
+    parallax_eye_offset, scene_orthographic_projection, scene_view_matrix, LayerTransform,
+    PassMatrices,
 };
 pub use scene_renderer::{
-    layer_quad_vertices, pack_uniform_block, texture_bind_group_layout_entries, FrameUniformInputs,
-    LayerVertex, SceneRenderer, UniformValues,
+    composition_capture_matrix, layer_local_projection, layer_quad_vertices, pack_uniform_block,
+    texture_bind_group_layout_entries, FrameUniformInputs, LayerVertex, SceneRenderer,
+    UniformValues,
 };
 pub use shader_preprocessor::{
     apply_fragment_texcoord_compatibility, apply_linked_varying_compatibility, builtin_uniform,

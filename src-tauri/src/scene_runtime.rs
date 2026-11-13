@@ -302,6 +302,12 @@ impl SceneRuntime {
         &self.graph
     }
 
+    /// Mutable graph access for diagnostic tools (layer isolation in `scene_probe`).
+    #[doc(hidden)]
+    pub fn graph_mut(&mut self) -> &mut SceneGraph {
+        &mut self.graph
+    }
+
     pub fn camera(&self) -> &CameraState {
         &self.camera
     }
@@ -376,6 +382,7 @@ impl SceneRuntime {
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         self.elapsed += dt;
         let world = cursor_world_position(cursor_norm, self.scene_size());
+        self.graph.step_animations(self.elapsed);
         if !self.registered_slots.is_empty() {
             if let Err(err) =
                 self.step_scripts(dt, cursor_norm, world, left_down, left_64, right_64)

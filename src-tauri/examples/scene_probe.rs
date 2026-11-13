@@ -7,6 +7,16 @@ use truongpaper_lib::scene_runtime::SceneRuntime;
 use truongpaper_renderer::{scene_renderer::FrameUniformInputs, SceneRenderer};
 use truongpaper_we_formats::WeVirtualFileSystem;
 
+/// Synthetic spectrum for `PROBE_AUDIO=sine`: bass-heavy bands with a per-frame wobble.
+fn probe_spectrum(frame: u32) -> [f32; 64] {
+    let t = frame as f32 / 30.0;
+    std::array::from_fn(|b| {
+        let x = b as f32 / 63.0;
+        let wobble = 0.5 + 0.5 * (t * 6.0 + b as f32 * 0.7).sin();
+        ((1.0 - 0.7 * x) * (0.3 + 0.7 * wobble)).clamp(0.0, 1.0)
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("warn")
@@ -222,9 +232,17 @@ async fn render() -> anyhow::Result<()> {
     let mut pending_props = (!at_load && !probe_props.is_empty())
         .then(|| serde_json::Value::Object(probe_props.clone()).to_string());
     let frame_count: u32 = args.get(4).map(|v| v.parse().unwrap()).unwrap_or(2);
+    // PROBE_AUDIO=sine: synthetic 64-band spectrum that moves per frame, to check that
+    // audio-reactive layers and scripts respond (silence otherwise).
+    let synth_audio = std::env::var("PROBE_AUDIO").is_ok_and(|v| v == "sine");
     for i in 0..frame_count {
         let mut encoder = device.create_command_encoder(&Default::default());
-        runtime.step(1.0 / 30.0, [0.5, 0.5], false, &[0.0; 64], &[0.0; 64]);
+        let audio = if synth_audio {
+            probe_spectrum(i)
+        } else {
+            [0.0; 64]
+        };
+        runtime.step(1.0 / 30.0, [0.5, 0.5], false, &audio, &audio);
         if i == 1 {
             if let Some(json) = pending_props.take() {
                 runtime.apply_user_properties(&json)?;
@@ -248,6 +266,7 @@ async fn render() -> anyhow::Result<()> {
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or_default()
                     + i as f32 / 30.0,
+                audio_64: [audio, audio],
                 ..Default::default()
             },
         );

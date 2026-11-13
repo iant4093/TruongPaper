@@ -57,6 +57,9 @@ pub struct TextStyle {
     pub halign: HAlign,
     pub valign: VAlign,
     pub padding: f32,
+    /// Whether `padding` may inset the text inside its box (see [`layout_text`]). Off for a
+    /// box hung from its origin by the text alignment, whose text edge stays on the origin.
+    pub inset_padding: bool,
 }
 
 impl Default for TextStyle {
@@ -67,6 +70,7 @@ impl Default for TextStyle {
             halign: HAlign::Center,
             valign: VAlign::Center,
             padding: 0.0,
+            inset_padding: true,
         }
     }
 }
@@ -132,21 +136,27 @@ pub fn measure_text(metrics: &impl TextMetrics, text: &str, padding: f32) -> (f3
 
 /// Places every line of `text` inside a `size` box according to the style's alignment.
 ///
-/// `padding` does not inset the box: Wallpaper Engine sizes a text layer's box to the text
-/// itself (a one-line box is one line high even with the default `padding` of 32; see
-/// 3122339805's 23-unit window headers), so insetting would push left/top/right/bottom aligned
-/// text out of its box.
+/// The saved `size` of a text layer is the editor's measured box. Newer scenes save it as text
+/// + `2 * padding` (2134765860: a 302 x 226 clock with padding 82 next to its 202 x 126 shadow
+/// with padding 32, both right-aligned to the same edge), older ones as the bare text (3122339805:
+/// 23-unit headers with padding 32). So the inset is the padding only as far as the box has
+/// room for it around the text block: `clamp((size.h - block_h) / 2, 0, padding)`, and per line
+/// never more than the horizontal slack, so text never leaves its box.
 pub fn layout_text(
     metrics: &impl TextMetrics,
     text: &str,
     size: (f32, f32),
     style: &TextStyle,
 ) -> Vec<LaidOutLine> {
-    let pad = 0.0f32;
-    let _ = style.padding;
     let lines = lines_of(text);
     let line_h = metrics.line_height();
     let block_h = lines.len() as f32 * line_h;
+    let max_pad = if style.inset_padding {
+        style.padding.max(0.0)
+    } else {
+        0.0
+    };
+    let pad = ((size.1 - block_h) / 2.0).clamp(0.0, max_pad);
     let avail_w = (size.0 - 2.0 * pad).max(0.0);
     let avail_h = (size.1 - 2.0 * pad).max(0.0);
     let top = match style.valign {
@@ -159,10 +169,11 @@ pub fn layout_text(
         .enumerate()
         .map(|(i, line)| {
             let width = metrics.line_width(line);
+            let pad_x = pad.min(((size.0 - width) / 2.0).max(0.0));
             let x = match style.halign {
-                HAlign::Left => pad,
+                HAlign::Left => pad_x,
                 HAlign::Center => pad + (avail_w - width) / 2.0,
-                HAlign::Right => size.0 - pad - width,
+                HAlign::Right => size.0 - pad_x - width,
             };
             LaidOutLine {
                 text: (*line).to_string(),
@@ -540,10 +551,10 @@ mod tests {
     }
 
     /// Regression (3122339805): the default padding of 32 must not push left-aligned header
-    /// text out of a one-line box.
+    /// text out of a one-line box saved without padding.
     #[test]
-    fn padding_does_not_inset_the_box() {
-        let size = (100.0, 40.0);
+    fn padding_does_not_inset_a_box_saved_without_it() {
+        let size = (100.0, 10.0);
         let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 32.0));
         assert_eq!((l[0].x, l[0].baseline), (0.0, 8.0));
         let l = layout_text(
@@ -552,7 +563,56 @@ mod tests {
             size,
             &style(HAlign::Right, VAlign::Bottom, 32.0),
         );
-        assert_eq!((l[0].x, l[0].baseline), (70.0, 30.0 + 8.0));
+        assert_eq!((l[0].x, l[0].baseline), (70.0, 8.0));
+        // Text wider than the horizontal slack is not pushed out either.
+        let l = layout_text(
+            &Fixed,
+            "abcdefghi",
+            (100.0, 74.0),
+            &style(HAlign::Left, VAlign::Top, 32.0),
+        );
+        assert_eq!(l[0].x, 5.0);
+    }
+
+    /// Regression (2134765860): a box saved as text + 2 x padding insets by the padding, so a
+    /// clock (padding 82) and its shadow (padding 32) right-align to the same edge.
+    #[test]
+    fn padding_insets_a_box_saved_with_it() {
+        let right_edge = |size: (f32, f32), pad: f32| {
+            let l = layout_text(
+                &Fixed,
+                "12:08:40",
+                size,
+                &style(HAlign::Right, VAlign::Center, pad),
+            );
+            -size.0 / 2.0 + l[0].x + l[0].width
+        };
+        let clock = right_edge((80.0 + 164.0, 10.0 + 164.0), 82.0);
+        let shadow = right_edge((80.0 + 64.0, 10.0 + 64.0), 32.0);
+        assert_eq!(clock, shadow);
+        assert_eq!(clock, 40.0);
+        // A box hung from its origin by alignment keeps the text on its edge.
+        let hung = TextStyle {
+            inset_padding: false,
+            ..style(HAlign::Right, VAlign::Bottom, 32.0)
+        };
+        let l = layout_text(&Fixed, "abc", (94.0, 74.0), &hung);
+        assert_eq!((l[0].x, l[0].baseline), (64.0, 72.0));
+    }
+
+    #[test]
+    fn padding_is_capped_by_the_box() {
+        let size = (100.0, 40.0);
+        let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 32.0));
+        // Only 15 units of room around one 10-unit line.
+        assert_eq!((l[0].x, l[0].baseline), (15.0, 23.0));
+        let l = layout_text(
+            &Fixed,
+            "abc",
+            size,
+            &style(HAlign::Right, VAlign::Bottom, 32.0),
+        );
+        assert_eq!((l[0].x, l[0].baseline), (55.0, 23.0));
     }
 
     #[test]

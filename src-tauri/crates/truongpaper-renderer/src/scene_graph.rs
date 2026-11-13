@@ -548,7 +548,20 @@ fn text_style(obj: &SceneObject, props: &UserPropertyMap) -> TextStyle {
         halign: HAlign::parse(obj.horizontalalign.as_deref()),
         valign: VAlign::parse(obj.verticalalign.as_deref()),
         padding: opt_vec2_x(&obj.padding, props, 0.0).max(0.0),
+        // A box hung from its origin by the text alignment (`anchor` none) keeps the text edge
+        // on the origin (2134765860's bottom-right date sits just under its clock); only a box
+        // anchored explicitly (`anchor: center`, its clock) insets its text by the padding.
+        inset_padding: !text_anchored_by_alignment(obj),
     }
+}
+
+fn text_anchored_by_alignment(obj: &SceneObject) -> bool {
+    obj.alignment.is_none()
+        && obj
+            .anchor
+            .as_deref()
+            .map(|a| a.trim().to_ascii_lowercase())
+            .is_none_or(|a| a.is_empty() || a == "none")
 }
 
 fn normalize_path(p: &str) -> String {

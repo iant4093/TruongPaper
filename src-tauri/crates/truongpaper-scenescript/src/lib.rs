@@ -496,7 +496,7 @@ fn load_script_module<'js>(
     source: &str,
 ) -> anyhow::Result<rquickjs::Object<'js>> {
     let full = format!(
-        "const thisObject = globalThis.__cur.thisLayer, thisLayer = thisObject, createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
+        "let thisObject = globalThis.__cur.thisLayer, thisLayer = thisObject;\nconst createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
     );
     let module = Module::declare(ctx.clone(), format!("__slot{unique}"), full)
         .map_err(|e| js_err(ctx, e))?;
@@ -918,6 +918,33 @@ impl SceneScriptEngine {
         })
     }
 
+    /// Tells every script that no media is playing, as Wallpaper Engine does at load when
+    /// nothing is playing: `mediaStatusChanged`, `mediaPlaybackChanged`,
+    /// `mediaPropertiesChanged`, `mediaThumbnailChanged` (`hasThumbnail: false`, black colors)
+    /// and `mediaTimelineChanged`. Scripts use these to hide album-art layers.
+    pub fn dispatch_media_idle(&self) -> anyhow::Result<()> {
+        self.guarded(INIT_BUDGET, |ctx| {
+            eval_js::<()>(
+                ctx,
+                "(function() {
+                    const black = () => new Vec3(0, 0, 0);
+                    __callAll('mediaStatusChanged', { enabled: false });
+                    __callAll('mediaPlaybackChanged', { state: 0 });
+                    __callAll('mediaPropertiesChanged', {
+                        title: '', artist: '', subTitle: '', albumTitle: '',
+                        albumArtist: '', genres: '', contentType: 0,
+                    });
+                    __callAll('mediaThumbnailChanged', {
+                        hasThumbnail: false, primaryColor: black(), secondaryColor: black(),
+                        tertiaryColor: black(), textColor: black(), highContrastColor: black(),
+                    });
+                    __callAll('mediaTimelineChanged', { position: 0, duration: 0 });
+                })()"
+                    .to_string(),
+            )
+        })
+    }
+
     /// Calls `applyUserProperties(changedProps)` on every script and merges the values into
     /// `engine.userProperties`. `changed_props_json` is a JSON object of changed properties.
     pub fn apply_user_properties(&self, changed_props_json: &str) -> anyhow::Result<()> {
@@ -1126,6 +1153,24 @@ mod tests {
         r[4] = 0.25;
         let out = e.step_frame(0.016, 0.0, [0.0; 3], &l, &r).unwrap();
         assert_eq!(out["a"], "0.5,0.25,0.375,0.5,16");
+    }
+
+    #[test]
+    fn this_layer_can_be_reassigned_like_a_sloppy_global() {
+        let e = engine();
+        e.register_layer("hero", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_layer("bg", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_property_script(
+            "s",
+            "hero",
+            "thisLayer = thisScene.getLayer('bg');\nexport function update(v) { thisLayer.visible = false; return thisLayer.name; }",
+            "0",
+        )
+        .unwrap();
+        assert_eq!(step(&e)["s"], "bg");
+        assert!(!e.layer_state("bg").unwrap().unwrap().visible);
     }
 
     #[test]

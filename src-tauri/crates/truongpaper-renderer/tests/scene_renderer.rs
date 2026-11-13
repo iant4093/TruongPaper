@@ -467,3 +467,18 @@ fn depth_parallax_builtins_are_finite_and_centred() {
         );
     }
 }
+
+#[test]
+fn layer_composite_texture_names_parse_to_layer_ids() {
+    use truongpaper_renderer::scene_renderer::parse_layer_composite;
+    assert_eq!(
+        parse_layer_composite("_rt_imageLayerComposite_589_a"),
+        Some(589)
+    );
+    assert_eq!(
+        parse_layer_composite("_rt_imageLayerComposite_12_b"),
+        Some(12)
+    );
+    assert_eq!(parse_layer_composite("_rt_imageLayerComposite_x_a"), None);
+    assert_eq!(parse_layer_composite("_rt_FullFrameBuffer"), None);
+}

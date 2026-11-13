@@ -287,6 +287,93 @@ async fn render() -> anyhow::Result<()> {
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
     }
+    // PROBE_TRACE=a,b: prints local/world state of layers whose name contains a filter.
+    if let Ok(filter) = std::env::var("PROBE_TRACE") {
+        let g = runtime.graph();
+        for (i, l) in g.layers.iter().enumerate() {
+            if filter
+                .split(',')
+                .any(|f| !f.is_empty() && l.name.contains(f))
+            {
+                eprintln!(
+                    "T L{i} {} vis={} eff={} o={:?} s={:?} wpos={:?} wscale=({:.3},{:.3},{:.3})",
+                    l.key(),
+                    l.visible,
+                    g.effective_visible(i),
+                    l.transform.origin,
+                    l.transform.scale,
+                    l.world_matrix.w_axis.truncate(),
+                    l.world_matrix.x_axis.truncate().length(),
+                    l.world_matrix.y_axis.truncate().length(),
+                    l.world_matrix.z_axis.truncate().length()
+                );
+            }
+        }
+        for l in g.layers.iter() {
+            if let truongpaper_renderer::scene_graph::SceneLayerKind::Model { mdl_path } = &l.kind {
+                if filter
+                    .split(',')
+                    .any(|f| !f.is_empty() && l.name.contains(f))
+                {
+                    if let Ok(m) = vfs
+                        .read_bytes(mdl_path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| {
+                            truongpaper_we_formats::parse_static_mdl(&b).map_err(|e| e.to_string())
+                        })
+                    {
+                        let mut vol = 0.0f64;
+                        for t in m.indices.chunks_exact(3) {
+                            let p = |i: u32| m.vertices[i as usize].position.map(f64::from);
+                            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                            vol += a[0] * (b[1] * c[2] - b[2] * c[1])
+                                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                                + a[2] * (b[0] * c[1] - b[1] * c[0]);
+                        }
+                        // Triangles by winding (+ = CCW outward) and mean radius.
+                        let (mut np, mut nn, mut rp, mut rn) = (0, 0, 0.0f64, 0.0f64);
+                        for t in m.indices.chunks_exact(3) {
+                            let p = |i: u32| m.vertices[i as usize].position.map(f64::from);
+                            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                            let n = [
+                                e1[1] * e2[2] - e1[2] * e2[1],
+                                e1[2] * e2[0] - e1[0] * e2[2],
+                                e1[0] * e2[1] - e1[1] * e2[0],
+                            ];
+                            let cen = [
+                                (a[0] + b[0] + c[0]) / 3.0,
+                                (a[1] + b[1] + c[1]) / 3.0,
+                                (a[2] + b[2] + c[2]) / 3.0,
+                            ];
+                            let r = (cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2]).sqrt();
+                            if n[0] * cen[0] + n[1] * cen[1] + n[2] * cen[2] >= 0.0 {
+                                np += 1;
+                                rp += r;
+                            } else {
+                                nn += 1;
+                                rn += r;
+                            }
+                        }
+                        eprintln!(
+                            "T tris outward={np} (mean r {:.3}) inward={nn} (mean r {:.3})",
+                            rp / np.max(1) as f64,
+                            rn / nn.max(1) as f64
+                        );
+                        eprintln!(
+                            "T mdl {} bbox {:?}..{:?} signed_volume {:.3}",
+                            l.name,
+                            m.bbox_min,
+                            m.bbox_max,
+                            vol / 6.0
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!("T camera {:?}", runtime.camera());
+    }
     output
         .slice(..)
         .map_async(wgpu::MapMode::Read, |result| result.unwrap());

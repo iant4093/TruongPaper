@@ -2027,7 +2027,9 @@ impl SceneRenderer {
                 SceneLayerKind::Particle { spec, path } => 'particle: {
                     // A system without renderers only drives its child systems (Wallpaper
                     // Engine's `children`, e.g. a glow, trail and body following one emitter);
-                    // it draws nothing itself. Child systems are not supported yet.
+                    // it draws nothing itself. Child systems are not supported yet. A system with
+                    // no renderer and no children (e.g. the stock `snowflat` and `light_shafts`
+                    // presets) keeps drawing as sprites, which is how it rendered before.
                     if spec.renderer.is_empty() {
                         let children = vfs
                             .read_string(path)
@@ -2039,14 +2041,16 @@ impl SceneRenderer {
                                     .map(<[Value]>::len)
                             })
                             .unwrap_or(0);
-                        let msg = format!(
-                            "layer '{}' particle {path}: no renderer and {children} child \
-                             system(s), which are not supported; layer draws nothing",
-                            layer.key()
-                        );
-                        tracing::warn!("{msg}");
-                        warnings.push(msg);
-                        break 'particle None;
+                        if children > 0 {
+                            let msg = format!(
+                                "layer '{}' particle {path}: no renderer and {children} child \
+                                 system(s), which are not supported; layer draws nothing",
+                                layer.key()
+                            );
+                            tracing::warn!("{msg}");
+                            warnings.push(msg);
+                            break 'particle None;
+                        }
                     }
                     let first_pass = vfs
                         .read_string(&spec.material)

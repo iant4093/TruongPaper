@@ -172,6 +172,31 @@ pub fn layer_local_projection(size: Vec2) -> Mat4 {
     Mat4::orthographic_rh(-hw, hw, -hh, hh, -1.0, 1.0)
 }
 
+/// Matrix for drawing the clip-space full-frame quad into a composition layer's own FBO.
+///
+/// A composition layer (`copybackground`) captures the part of the screen *behind its own
+/// bounds*: the layer is a window onto the scene, and an effect-free one composites back exactly
+/// over what it covers. So a screen clip position `p` lands in the FBO at
+/// `local * inverse(layer_mvp) * p` (screen -> layer-local units -> FBO clip). Fullscreen layers
+/// cover the screen, so the capture is the identity. Output depth is flattened to 0.
+pub fn composition_capture_matrix(fullscreen: bool, local: Mat4, layer_mvp: Mat4) -> Mat4 {
+    if fullscreen {
+        return Mat4::IDENTITY;
+    }
+    // Layers are flat (input z = 0) and may have a zero z scale, so invert the xy/w part only.
+    let mut flat = layer_mvp;
+    flat.z_axis = glam::Vec4::Z;
+    let mut rows = flat.transpose();
+    rows.z_axis = glam::Vec4::Z;
+    let flat = rows.transpose();
+    if flat.determinant().abs() <= f32::EPSILON * f32::EPSILON {
+        return Mat4::IDENTITY;
+    }
+    let mut rows = (local * flat.inverse()).transpose();
+    rows.z_axis = glam::Vec4::ZERO;
+    rows.transpose()
+}
+
 /// Set-1 layout entries for WE textures: `texture_2d` at binding `N` and its filtering sampler
 /// at `N + 8` (matches `translate_we_shader_pair`).
 pub fn texture_bind_group_layout_entries(texture_slots: &[u32]) -> Vec<wgpu::BindGroupLayoutEntry> {
@@ -1779,6 +1804,16 @@ impl SceneRenderer {
         }
         let mut fonts: HashMap<Option<String>, Option<Arc<FontVec>>> = HashMap::new();
         for (layer, plan) in graph.layers.iter().zip(plans.drain(..)) {
+            // A composition (passthrough) layer with no visible effect just redraws what is
+            // behind it; Wallpaper Engine draws nothing for it (linux-wallpaperengine skips it
+            // too). Skipping avoids resampling the scene through a small FBO.
+            if matches!(layer.kind, SceneLayerKind::Composition { .. })
+                && plan.as_ref().is_some_and(|p| p.passes().next().is_none())
+                && layer.id.is_none_or(|id| !referenced.contains(&id))
+            {
+                self.layers.push(None);
+                continue;
+            }
             let gpu = match &layer.kind {
                 SceneLayerKind::Text { style, .. } => {
                     let font = fonts
@@ -2770,7 +2805,15 @@ impl SceneRenderer {
                         });
                     } else if let Some(draw) = &fx.base_copy {
                         let (mvp, vb, color) = if fx.is_composition {
-                            (Mat4::IDENTITY, &self.fullscreen_quad, Vec4::ONE)
+                            (
+                                composition_capture_matrix(
+                                    fx.fullscreen,
+                                    local,
+                                    matrices.model_view_projection,
+                                ),
+                                &self.fullscreen_quad,
+                                Vec4::ONE,
+                            )
                         } else {
                             (
                                 local,

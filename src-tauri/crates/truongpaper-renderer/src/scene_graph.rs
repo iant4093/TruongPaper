@@ -40,6 +40,7 @@ use crate::scene_math::{
     LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
 };
 use crate::text::{HAlign, TextStyle, VAlign, DEFAULT_POINT_SIZE};
+use crate::timeline::Timeline;
 
 pub const DEFAULT_PERSPECTIVE_FOV_DEGREES: f32 = 50.0;
 pub const DEFAULT_PERSPECTIVE_NEARZ: f32 = 0.01;
@@ -432,6 +433,10 @@ pub struct SceneGraph {
     /// visibility / shader constants, bloom).
     render_bound_keys: HashSet<String>,
     render_epoch: u64,
+    /// Keyframe animations on layer properties (`"animation"` next to a `"value"`).
+    animations: Vec<(usize, ScriptProperty, Timeline)>,
+    /// Keyframe animation on `general.zoom`.
+    zoom_timeline: Option<Timeline>,
 }
 
 impl std::fmt::Debug for SceneGraph {
@@ -684,6 +689,8 @@ impl SceneGraph {
             particles: Vec::new(),
             render_bound_keys: HashSet::new(),
             render_epoch: 0,
+            animations: Vec::new(),
+            zoom_timeline: None,
         };
         let perspective = raw.is_some()
             && graph
@@ -694,6 +701,10 @@ impl SceneGraph {
         graph.build_nodes(vfs);
         graph.render_bound_keys = collect_render_bound_keys(&graph.scene);
         graph.resolve_particle_overrides();
+        if let Some(raw) = &raw {
+            graph.collect_animations(raw);
+        }
+        graph.step_animations(0.0);
         Ok(graph)
     }
 
@@ -1072,6 +1083,68 @@ impl SceneGraph {
         }
     }
 
+    /// Collects every keyframe animation on a layer property and on `general.zoom`.
+    fn collect_animations(&mut self, raw: &Value) {
+        self.zoom_timeline = raw
+            .get("general")
+            .and_then(|g| g.get("zoom"))
+            .and_then(|z| z.get("animation"))
+            .and_then(Timeline::parse);
+        let Some(objects) = raw.get("objects").and_then(Value::as_array) else {
+            return;
+        };
+        for (li, layer) in self.layers.iter().enumerate() {
+            let Some(obj) = objects.get(layer.object_index) else {
+                continue;
+            };
+            for prop in ScriptProperty::ALL {
+                if matches!(prop, ScriptProperty::Text | ScriptProperty::Visible) {
+                    continue;
+                }
+                if let Some(tl) = obj
+                    .get(prop.as_str())
+                    .and_then(|v| v.get("animation"))
+                    .and_then(Timeline::parse)
+                {
+                    self.animations.push((li, prop, tl));
+                }
+            }
+        }
+    }
+
+    /// Whether any property is keyframe-animated.
+    pub fn has_animations(&self) -> bool {
+        !self.animations.is_empty() || self.zoom_timeline.is_some()
+    }
+
+    /// Applies every keyframe animation at `seconds` after the scene started.
+    pub fn step_animations(&mut self, seconds: f32) {
+        if let Some(tl) = &self.zoom_timeline {
+            if let Some(z) = tl.sample(seconds).first().copied().filter(|z| *z > 0.0) {
+                self.camera.zoom = z;
+            }
+        }
+        if self.animations.is_empty() {
+            return;
+        }
+        let mut transform_changed = false;
+        let anims = std::mem::take(&mut self.animations);
+        for (li, prop, tl) in &anims {
+            let comps = tl.sample(seconds);
+            let value = comps
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let (ok, moved) = self.apply_property_value(*li, *prop, &value);
+            transform_changed |= ok && moved;
+        }
+        self.animations = anims;
+        if transform_changed {
+            self.recompute_world();
+        }
+    }
+
     /// Copies layer transforms into the nodes and recomputes every world matrix.
     fn recompute_world(&mut self) {
         for node_index in 0..self.nodes.len() {
@@ -1307,15 +1380,30 @@ impl SceneGraph {
         else {
             return false;
         };
+        let (ok, transform_changed) = self.apply_property_value(li, prop, value);
+        if transform_changed {
+            self.recompute_world();
+        }
+        ok
+    }
+
+    /// Applies a stringified value to property `prop` of layer `li`. Returns
+    /// `(applied, transform_changed)`; the caller recomputes world matrices.
+    fn apply_property_value(
+        &mut self,
+        li: usize,
+        prop: ScriptProperty,
+        value: &str,
+    ) -> (bool, bool) {
         let raw = value.trim().trim_matches('"');
         let layer = &mut self.layers[li];
         if prop == ScriptProperty::Text {
             return match &mut layer.kind {
                 SceneLayerKind::Text { text, .. } => {
                     *text = value.to_string();
-                    true
+                    (true, false)
                 }
-                _ => false,
+                _ => (false, false),
             };
         }
         let mut transform_changed = false;
@@ -1323,7 +1411,7 @@ impl SceneGraph {
             ScriptProperty::Origin | ScriptProperty::Scale | ScriptProperty::Angles => {
                 let comps = parse_script_components(value);
                 if comps.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 let slot = match prop {
                     ScriptProperty::Origin => &mut layer.transform.origin,
@@ -1336,7 +1424,7 @@ impl SceneGraph {
             ScriptProperty::Size => {
                 let comps = parse_script_components(value);
                 if comps.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 layer.transform.size = apply_components2(layer.transform.size, &comps);
                 transform_changed = true;
@@ -1344,7 +1432,7 @@ impl SceneGraph {
             ScriptProperty::Color => {
                 let comps = parse_script_components(value);
                 if comps.is_empty() {
-                    return false;
+                    return (false, false);
                 }
                 layer.color = apply_components3(layer.color, &comps);
                 if let SceneLayerKind::Solid { color } = &mut layer.kind {
@@ -1353,10 +1441,10 @@ impl SceneGraph {
             }
             ScriptProperty::Alpha | ScriptProperty::Brightness => {
                 let Ok(n) = raw.parse::<f32>() else {
-                    return false;
+                    return (false, false);
                 };
                 if !n.is_finite() {
-                    return false;
+                    return (false, false);
                 }
                 if prop == ScriptProperty::Alpha {
                     layer.alpha = n;
@@ -1364,22 +1452,19 @@ impl SceneGraph {
                     layer.brightness = n;
                 }
             }
-            ScriptProperty::Text => return false,
+            ScriptProperty::Text => return (false, false),
             ScriptProperty::Visible => {
                 layer.visible = match raw {
                     "true" => true,
                     "false" => false,
                     other => match other.parse::<f32>() {
                         Ok(n) => n != 0.0,
-                        Err(_) => return false,
+                        Err(_) => return (false, false),
                     },
                 };
             }
         }
-        if transform_changed {
-            self.recompute_world();
-        }
-        true
+        (true, transform_changed)
     }
 
     /// `thisLayer` write-back from SceneScript. Returns `false` when no layer matches `name`.

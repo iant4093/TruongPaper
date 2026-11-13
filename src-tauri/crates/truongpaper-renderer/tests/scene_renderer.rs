@@ -412,3 +412,36 @@ fn scalar_constant_fills_every_component_of_a_vector_uniform() {
     let mapped = map_material_constants(&meta, &constants);
     assert_eq!(mapped["g_Scale"], vec![1.5, 1.5]);
 }
+
+/// Regression (2887099508): a composition layer captures the screen region behind its own
+/// (scaled) bounds, so its layer rect corners map to the FBO corners.
+#[test]
+fn composition_capture_maps_the_layer_rect_onto_its_fbo() {
+    use truongpaper_renderer::scene_renderer::layer_local_projection;
+    use truongpaper_renderer::{build_pass_matrices, composition_capture_matrix, LayerTransform};
+    let scene = Vec2::new(200.0, 100.0);
+    let transform = LayerTransform {
+        origin: Vec3::new(150.0, 50.0, 0.0),
+        scale: Vec3::new(2.0, 1.0, 0.0),
+        size: Vec2::new(25.0, 100.0),
+        ..LayerTransform::default()
+    };
+    let m = build_pass_matrices(scene, &transform, Vec2::ZERO);
+    let local = layer_local_projection(transform.size);
+    let cap = composition_capture_matrix(false, local, m.model_view_projection);
+    // Layer spans x 125..175 of 200 -> clip x 0.25..0.75, full height.
+    for (screen, fbo) in [
+        (Vec4::new(0.25, -1.0, 0.0, 1.0), Vec2::new(-1.0, -1.0)),
+        (Vec4::new(0.75, 1.0, 0.0, 1.0), Vec2::new(1.0, 1.0)),
+        (Vec4::new(0.5, 0.0, 0.0, 1.0), Vec2::ZERO),
+    ] {
+        let p = cap * screen;
+        let got = Vec2::new(p.x / p.w, p.y / p.w);
+        assert!((got - fbo).length() < 1e-4, "{screen:?} -> {got:?}");
+        assert_eq!(p.z, 0.0);
+    }
+    assert_eq!(
+        composition_capture_matrix(true, local, m.model_view_projection),
+        Mat4::IDENTITY
+    );
+}

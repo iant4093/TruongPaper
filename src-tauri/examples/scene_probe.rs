@@ -108,6 +108,37 @@ async fn render() -> anyhow::Result<()> {
         defaults.as_deref(),
         [mon_w as f32, mon_h as f32],
     )?;
+    // PROBE_LIST=1 prints layers; PROBE_SHOW="i,j,.." renders only those layer indices.
+    if std::env::var("PROBE_LIST").is_ok() {
+        for (i, l) in runtime.graph().layers.iter().enumerate() {
+            let k = format!("{:?}", l.kind);
+            eprintln!(
+                "L{i} {} vis={} a={} {}",
+                l.key(),
+                l.visible,
+                l.alpha,
+                &k[..k.len().min(24)]
+            );
+            eprintln!("    {:?}", l.transform);
+        }
+    }
+    if let Ok(show) = std::env::var("PROBE_SHOW") {
+        let keep: Vec<usize> = show.split(',').filter_map(|v| v.parse().ok()).collect();
+        for (i, l) in runtime.graph_mut().layers.iter_mut().enumerate() {
+            l.visible &= keep.contains(&i);
+        }
+    }
+    if let Some(z) = std::env::var("PROBE_ZOOM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        runtime.graph_mut().camera.zoom = z;
+    }
+    if std::env::var("PROBE_NOFX").is_ok() {
+        for l in runtime.graph_mut().layers.iter_mut() {
+            l.effects.clear();
+        }
+    }
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = SceneRenderer::new(&device, &queue, fmt, runtime.graph().scene_size);
     let warnings = renderer.load(&device, &queue, &vfs, runtime.graph());

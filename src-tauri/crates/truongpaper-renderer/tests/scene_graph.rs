@@ -641,3 +641,45 @@ fn load_errors() {
     assert!(SceneGraph::load(&vfs, "scene.json", Some(""), MONITOR).is_ok());
     assert!(SceneGraph::load(&vfs, "../escape.json", None, MONITOR).is_err());
 }
+
+/// Regression (2887099508): keyframe animations on `general.zoom` and on layer properties drive
+/// the live value; `startpaused` holds frame 0 instead of the editor `value`.
+#[test]
+fn keyframe_animations_drive_zoom_and_layer_properties() {
+    let t = TempDir::new("sg-timeline");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 64, "height": 64 }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 },
+        "zoom": { "value": 3.0, "animation": {
+            "c0": [ { "frame": 0, "value": 3 }, { "frame": 300, "value": 3 },
+                    { "frame": 450, "value": 1 } ],
+            "options": { "fps": 30, "length": 450, "mode": "single" } } } },
+        "objects": [
+          { "name": "Black", "image": "models/solid.json", "origin": "960 540 0",
+            "alpha": { "value": 1.0, "animation": {
+                "c0": [ { "frame": 0, "value": 0 }, { "frame": 30, "value": 1 } ],
+                "options": { "fps": 30, "length": 150, "mode": "single", "startpaused": true } } } },
+          { "name": "Mover", "image": "models/solid.json",
+            "origin": { "value": "0 0 0", "animation": {
+                "c0": [ { "frame": 0, "value": 0 }, { "frame": 10, "value": 100 } ],
+                "c1": [ { "frame": 0, "value": 50 }, { "frame": 10, "value": 50 } ],
+                "options": { "fps": 10, "length": 10, "mode": "loop" } } } } ] }"#;
+    let mut g = load(&t, scene, None);
+    assert!(g.has_animations());
+    assert_eq!(g.camera.zoom, 3.0);
+    let black = g.find_layer("Black").unwrap();
+    let mover = g.find_layer("Mover").unwrap();
+    assert_eq!(g.layers[black].alpha, 0.0, "startpaused holds frame 0");
+    g.step_animations(20.0);
+    assert_eq!(g.camera.zoom, 1.0, "single-mode zoom ends at the last key");
+    assert_eq!(g.layers[black].alpha, 0.0);
+    g.step_animations(0.5);
+    let o = g.layers[mover].transform.origin;
+    assert!(
+        (o.x - 50.0).abs() < 1e-3 && (o.y - 50.0).abs() < 1e-3,
+        "{o:?}"
+    );
+    assert!((g.layers[mover].world_matrix.w_axis.x - 50.0).abs() < 1e-3);
+}

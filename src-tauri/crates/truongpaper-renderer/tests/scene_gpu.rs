@@ -135,3 +135,39 @@ fn text_layer_draws_glyph_pixels_when_a_font_exists() {
     let lit = px.chunks_exact(4).filter(|p| p[0] > 0.5).count();
     assert!(lit > 40, "text should light some pixels, got {lit}");
 }
+
+/// Regression (2887099508): a composition layer that has no visible effect must not change the
+/// image behind it (it used to redraw the whole frame squeezed into its own bounds).
+#[test]
+fn effectless_composition_layer_leaves_the_scene_unchanged() {
+    let t = TempDir::new("gpu-compose-noop");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 32, "height": 64 }"#,
+    );
+    t.write(
+        "core/models/util/composelayer.json",
+        r#"{ "passthrough": true, "autosize": true }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 },
+                       "clearcolor": "0 0 0" },
+        "objects": [
+          { "name": "Red", "image": "models/solid.json", "origin": "16 32 0", "size": "32 64",
+            "color": "1 0 0" },
+          { "name": "Blue", "image": "models/solid.json", "origin": "48 32 0", "size": "32 64",
+            "color": "0 0 1" },
+          { "name": "Glass", "image": "models/util/composelayer.json", "origin": "48 32 0",
+            "size": "32 64", "copybackground": true } ] }"#;
+    let Some((px, _)) = render_hdr(&t, scene, 64) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    for x in [34u32, 40, 60] {
+        let i = ((32 * 64 + x) * 4) as usize;
+        assert!(
+            px[i] < 0.1 && px[i + 2] > 0.9,
+            "x={x}: expected blue, got {:?}",
+            &px[i..i + 4]
+        );
+    }
+}

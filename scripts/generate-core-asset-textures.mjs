@@ -502,6 +502,16 @@ for (let n = 1; n <= 3; n++) {
     return across * smooth(0, 0.2, t) * (1 - smooth(0.9, 1, t) * 0.6) * (0.6 + 0.4 * t);
   });
 }
+// Stock scenes reference the flame sprites as particle/fire/fireN: same shapes under that path.
+for (let n = 1; n <= 3; n++) particleFiles[`fire/fire${n}.tex`] = particleFiles[`fire${n}.tex`];
+// Sickle: a crescent slash (outer disc minus an offset disc) with a bright inner edge.
+particleFiles['sickle.tex'] = sprite(128, 128, (u, v) => {
+  const outer = 1 - smooth(0.82, 0.9, Math.hypot(u, v));
+  const d = Math.hypot(u - 0.38, v + 0.12);
+  const cut = smooth(0.74, 0.8, d);
+  const edge = 0.7 + 0.3 * Math.exp(-(((d - 0.8) / 0.1) ** 2));
+  return outer * cut * edge;
+});
 // Embers: small hot cores with a falloff glow.
 for (let n = 1; n <= 3; n++) {
   particleFiles[`ember${n}.tex`] = sprite(32, 32, (u, v) =>
@@ -512,7 +522,21 @@ for (let n = 1; n <= 3; n++) {
   particleFiles[`glow${n}.tex`] = sprite(128, 128, (u, v) => glowDot(Math.hypot(u, v), 1 + n * 0.8));
 }
 
+// Vertical black-to-white ramp used as a mask by blur / blend effects (materials/gradient/...).
+const gradientFiles = {};
+{
+  const w = 16;
+  const h = 256;
+  const px = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const g = Math.round((y / (h - 1)) * 255);
+    for (let x = 0; x < w; x++) px.set([g, g, g, 255], (y * w + x) * 4);
+  }
+  gradientFiles['blend_gradient.tex'] = texFile(w, h, px, CLAMP_UVS);
+}
+
 for (const [dir, entries] of [
+  [join(outDir, '../gradient'), gradientFiles],
   [outDir, files],
   [join(outDir, '../effects'), effectFiles],
   [join(outDir, '../particle'), particleFiles],

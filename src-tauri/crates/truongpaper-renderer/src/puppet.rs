@@ -354,18 +354,21 @@ fn parse_mdla(
             }
             bone_frames.push(frames);
         }
-        if extended_layout {
-            // Extended mesh exports pad the next clip's ID with byte-sized fields.
-            let padding = if version >= 6 { 3 } else { 2 };
-            r.skip(padding, "extended MDLA trailer")?;
-        } else if version == 3 {
-            r.skip(1, "MDLA3 trailer")?;
-        } else {
-            let n = r.u32("animation event count")? as usize;
-            r.check_count(n, 5, "animation event")?;
-            for _ in 0..n {
-                let _t = r.f32("animation event time")?;
-                let _s = r.cstr("animation event name")?;
+        let tracks_end = r.pos;
+        if a + 1 < anim_num {
+            let standard = skip_mdla_trailer(&mut r, version, extended_layout);
+            if standard.is_err() || !plausible_header(bytes, r.pos) {
+                // Newer exports append extra per-clip blocks (e.g. float tracks); resync on the
+                // next valid clip header instead of trusting a fixed trailer size.
+                match find_next_header(bytes, tracks_end) {
+                    Some(pos) => r.pos = pos,
+                    None => {
+                        return Err(PuppetError::Truncated {
+                            offset: tracks_end,
+                            what: "next animation header",
+                        })
+                    }
+                }
             }
         }
         out.push(PuppetAnimation {
@@ -378,6 +381,69 @@ fn parse_mdla(
         });
     }
     Ok(out)
+}
+
+fn skip_mdla_trailer(
+    r: &mut Reader<'_>,
+    version: u32,
+    extended_layout: bool,
+) -> Result<(), PuppetError> {
+    if extended_layout {
+        // Extended mesh exports pad the next clip's ID with byte-sized fields.
+        r.skip(if version >= 6 { 3 } else { 2 }, "extended MDLA trailer")
+    } else if version == 3 {
+        r.skip(1, "MDLA3 trailer")
+    } else {
+        let n = r.u32("animation event count")? as usize;
+        r.check_count(n, 5, "animation event")?;
+        for _ in 0..n {
+            let _t = r.f32("animation event time")?;
+            let _s = r.cstr("animation event name")?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether a well-formed animation clip header starts at `pos` (after optional zero padding).
+fn plausible_header(bytes: &[u8], pos: usize) -> bool {
+    let mut r = Reader { bytes, pos };
+    let check = |r: &mut Reader<'_>| -> Result<bool, PuppetError> {
+        let id = r.i32("id")?;
+        if !(1..=100_000).contains(&id) {
+            return Ok(false);
+        }
+        let _ = r.i32("unk")?;
+        let mut name = r.cstr("name")?;
+        if name.is_empty() {
+            name = r.cstr("name")?;
+        }
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            return Ok(false);
+        }
+        if !matches!(r.cstr("mode")?.as_str(), "loop" | "single" | "mirror") {
+            return Ok(false);
+        }
+        let fps = r.f32("fps")?;
+        let length = r.i32("length")?;
+        let _ = r.i32("unk2")?;
+        let bones = r.u32("bones")? as usize;
+        Ok(fps.is_finite()
+            && (1.0..=240.0).contains(&fps)
+            && (1..=100_000).contains(&length)
+            && bones <= 4096
+            && bones * 8 <= r.remaining())
+    };
+    check(&mut r).unwrap_or(false)
+}
+
+/// First byte offset at or after `from` where a clip header starts.
+fn find_next_header(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut p = (from..bytes.len().saturating_sub(24)).find(|&p| plausible_header(bytes, p))?;
+    // Zero padding before the id can also parse as a shifted header; take the last of the run.
+    while plausible_header(bytes, p + 1) {
+        p += 1;
+    }
+    Some(p)
 }
 
 /// `combined[i] = combined[parent] * transform`; returns `inverse(combined[i])`.
@@ -689,4 +755,32 @@ pub fn puppet_combos(bone_count: usize) -> HashMap<String, i32> {
             i32::try_from(bone_count).unwrap_or(i32::MAX),
         ),
     ])
+}
+
+#[cfg(test)]
+mod resync_tests {
+    use super::*;
+
+    fn header(id: i32, bones: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend(id.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        b.extend(b"wave\0loop\0");
+        b.extend(30.0f32.to_le_bytes());
+        b.extend(10i32.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        b.extend(bones.to_le_bytes());
+        b.extend(vec![0u8; bones as usize * 8]);
+        b
+    }
+
+    #[test]
+    fn finds_clip_header_after_unknown_extra_block() {
+        let mut bytes = vec![0u8, 0, 0, 0, 1, 0xc4, 3, 0, 0, 0, 0];
+        bytes.extend(vec![0u8; 29]);
+        let at = bytes.len();
+        bytes.extend(header(241, 2));
+        assert_eq!(find_next_header(&bytes, 0), Some(at));
+        assert!(!plausible_header(&bytes, 0));
+    }
 }

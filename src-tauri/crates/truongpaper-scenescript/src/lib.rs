@@ -601,7 +601,7 @@ impl SceneScriptEngine {
         group_keys: &[String],
         ids: &[(String, i32)],
     ) -> anyhow::Result<()> {
-        let ids_json = serde_json::to_string(&ids.iter().cloned().collect::<Vec<_>>())?;
+        let ids_json = serde_json::to_string(ids)?;
         let map: std::collections::BTreeMap<&str, &str> = parents
             .iter()
             .map(|(c, p)| (c.as_str(), p.as_str()))

@@ -224,3 +224,22 @@ fn fragment_may_write_and_narrow_its_varyings() {
     )
     .unwrap();
 }
+
+#[test]
+fn varying_arrays_take_one_location_per_element() {
+    // Workshop bloom (2822917890) `light_map.vert`: `v_TexCoord[4]` used to share locations
+    // with the next varying (naga `BindingCollision`).
+    let vert = "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord[4];\nvarying float v_Damp;\nuniform vec4 g_Texture0Resolution;\nvoid main() {\n\tv_Damp = 1.0;\n\tgl_Position = vec4(a_Position, 1.0);\n\tvec2 offsets = 1.0 / g_Texture0Resolution.xy;\n\tv_TexCoord[0] = a_TexCoord - offsets;\n\tv_TexCoord[1] = a_TexCoord;\n\tv_TexCoord[2] = a_TexCoord;\n\tv_TexCoord[3] = a_TexCoord + offsets;\n}\n";
+    let frag = "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord[4];\nvarying float v_Damp;\nvoid main() {\n\tgl_FragColor = (texSample2D(g_Texture0, v_TexCoord[0]) + texSample2D(g_Texture0, v_TexCoord[3])) * v_Damp;\n}\n";
+    translate_with(vert, frag).unwrap();
+}
+
+#[test]
+fn float_loop_bounds_and_float_ternary_conditions() {
+    // Workshop blur_gaussian (2822917890), test_shader (2342779250), frame_builder
+    // (3573886911) and sharpen_filter (2798696916).
+    translate(&format!(
+        "{FRAG_HEAD}uniform float u_iterations;\nuniform float u_Min;\nuniform float u_Max;\nuniform float g_AudioSpectrum16Left[16];\n#define INVERT 0\nvoid main() {{\n\tvec4 albedo = CAST4(0.0);\n\tfloat iterations = int(u_iterations);\n\tfor (int i = -iterations; i <= iterations; i++) {{\n\t\talbedo += texSample2D(g_Texture0, v_TexCoord.xy + float(i) * 0.01);\n\t}}\n\tfloat s = 0.0;\n\tfor (int i = u_Min; i < u_Max; i++) {{\n\t\ts += g_AudioSpectrum16Left[i];\n\t}}\n\tfloat mask = texSample2D(g_Texture0, v_TexCoord.xy);\n\tmask = INVERT ? 1 - mask : mask;\n\tfloat outside = mask;\n\tvec4 f = outside ? albedo : CAST4(s);\n\tgl_FragColor = f;\n}}\n"
+    ))
+    .unwrap();
+}

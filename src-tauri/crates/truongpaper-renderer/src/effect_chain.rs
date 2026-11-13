@@ -231,6 +231,9 @@ fn to_local_value(json_text: &str) -> Value {
 }
 
 struct Resolver<'a> {
+    /// Id of the layer being planned; its own `_rt_imageLayerComposite_<id>_*` is the chain's
+    /// current source, not an earlier layer's finished image.
+    own_layer: Option<i32>,
     effect_index: usize,
     fbos: &'a [EffectFboSpec],
     /// Unknown `_rt_*` names met while resolving textures (guessing them would corrupt the chain).
@@ -274,6 +277,9 @@ impl Resolver<'_> {
             .and_then(|name| name.strip_suffix("_a").or_else(|| name.strip_suffix("_b")))
             .and_then(|id| id.parse().ok())
         {
+            if self.own_layer == Some(id) {
+                return TextureBinding::Target(current.clone());
+            }
             return TextureBinding::Target(RenderTargetId::LayerOutput(id));
         }
         let name = self.unique_fbo_name(name).unwrap_or(name);
@@ -359,6 +365,7 @@ impl EffectChainPlan {
                 });
             }
             let resolver = Resolver {
+                own_layer: layer.id,
                 effect_index,
                 fbos: &effect.fbos,
                 unknown_targets: Default::default(),

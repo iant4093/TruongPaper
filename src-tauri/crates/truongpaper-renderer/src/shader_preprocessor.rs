@@ -815,6 +815,18 @@ pub fn compile_we_shader_pair(
             }
         })?;
 
+    // Debug aid: `TRUONGPAPER_DUMP_WGSL=<dir>` keeps the translated WGSL of every shader.
+    if let Ok(dir) = std::env::var("TRUONGPAPER_DUMP_WGSL") {
+        let stem: String = label
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let _ = std::fs::create_dir_all(&dir);
+        let base = std::path::Path::new(&dir).join(stem);
+        let _ = std::fs::write(base.with_extension("vert.wgsl"), &translated.vertex_wgsl);
+        let _ = std::fs::write(base.with_extension("frag.wgsl"), &translated.fragment_wgsl);
+    }
+
     let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}_vert")),
         source: wgpu::ShaderSource::Wgsl(translated.vertex_wgsl.into()),
@@ -977,9 +989,15 @@ fn upgrade_to_naga_glsl450(
             if let Some(rest) = t.strip_prefix("varying ") {
                 let decl = rest.split(';').next().unwrap_or(rest);
                 let var_name = decl.split_whitespace().last().unwrap_or("").to_string();
+                // `varying vec2 v_TexCoord[4];` occupies one location per element.
+                let slots = var_name
+                    .split_once('[')
+                    .and_then(|(_, n)| n.trim_end_matches(']').trim().parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .max(1);
                 let loc = *varying_locs.entry(var_name).or_insert_with(|| {
                     let l = *next_loc;
-                    *next_loc += 1;
+                    *next_loc += slots;
                     l
                 });
                 let qualifier = if is_vert { "out" } else { "in" };

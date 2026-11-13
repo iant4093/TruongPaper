@@ -840,6 +840,33 @@ impl SceneScriptEngine {
         })
     }
 
+    /// Local wall-clock time of day in `[0, 1)` as the script runtime's `Date` sees it
+    /// (`engine.timeOfDay` is local time in Wallpaper Engine, not UTC).
+    pub fn local_time_of_day(&self) -> anyhow::Result<f32> {
+        self.guarded(INIT_BUDGET, |ctx| {
+            let t: f64 = eval_js(
+                ctx,
+                "(function() { const d = new Date(); return (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) / 86400; })()"
+                    .to_string(),
+            )?;
+            Ok(t as f32)
+        })
+    }
+
+    /// Overwrites a registered slot's current value with a boolean. Used when `init` wrote the
+    /// bound property through `thisLayer` (Wallpaper Engine then hands that value to `update`).
+    pub fn set_slot_bool(&self, slot_key: &str, value: bool) -> anyhow::Result<()> {
+        self.guarded(INIT_BUDGET, |ctx| {
+            eval_js::<()>(
+                ctx,
+                format!(
+                    "(function() {{ const s = globalThis.__scripts[{slot}]; if (s) s.currentValue = {value}; }})()",
+                    slot = js_str(slot_key),
+                ),
+            )
+        })
+    }
+
     /// Merges new instance-level `scriptproperties` (`{ name: value }`) into the live
     /// `scriptProperties` object of one registered slot. Unknown slots are ignored.
     pub fn update_script_properties(
@@ -1049,6 +1076,12 @@ mod tests {
             let val: i32 = ctx.eval("2 + 2").expect("eval");
             assert_eq!(val, 4);
         });
+    }
+
+    #[test]
+    fn local_time_of_day_is_in_range() {
+        let t = engine().local_time_of_day().unwrap();
+        assert!((0.0..1.0).contains(&t), "{t}");
     }
 
     #[test]

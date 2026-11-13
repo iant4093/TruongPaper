@@ -10,6 +10,8 @@
 //! - arithmetic on comparison results (`(depth < limit) * 6.0`), which HLSL converts to float;
 //! - mixed-width arguments to `mix` / `step` / `clamp` / ... (HLSL truncates to the shortest
 //!   vector), through an overload set that is only added when the plain translation fails.
+// The `re!` macro caches each pattern in a `OnceLock`, so compiling inside loops is a one-off.
+#![allow(clippy::regex_creation_in_loops)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -35,6 +37,10 @@ pub fn fixup_hlsl_source(body: &str) -> String {
         .map(|c| c[1].to_string())
         .collect();
     let widths = vector_widths(body);
+    let bools: HashSet<String> = re!(r"\bbool\s+(\w+)")
+        .captures_iter(body)
+        .map(|c| c[1].to_string())
+        .collect();
     let main_variable = re!(r"\b(?:vec[234]|float[234]?|int)\s+main\b").is_match(body);
 
     let mut out_lines: Vec<String> = Vec::new();
@@ -65,8 +71,7 @@ pub fn fixup_hlsl_source(body: &str) -> String {
             }
         }
         let mut l = line.to_string();
-        if let Some(c) =
-            re!(r"^(\s*)float\s+(\w+)\s*\[\s*\]\s*=\s*(\w+)\s*;").captures(&l.clone())
+        if let Some(c) = re!(r"^(\s*)float\s+(\w+)\s*\[\s*\]\s*=\s*(\w+)\s*;").captures(&l.clone())
         {
             l = format!("{}#define {} {}", &c[1], &c[2], &c[3]);
         } else if let Some(c) =
@@ -93,6 +98,33 @@ pub fn fixup_hlsl_source(body: &str) -> String {
             }
         }
         l = comparison_arithmetic(&l);
+        if !bools.is_empty() {
+            l = re!(r"(\w+\s*(?:\*=|\+=|-=)\s*)(\w+)(\s*;)")
+                .replace_all(&l, |c: &regex::Captures| {
+                    if bools.contains(&c[2]) {
+                        format!("{}float({}){}", &c[1], &c[2], &c[3])
+                    } else {
+                        c[0].to_string()
+                    }
+                })
+                .into_owned();
+        }
+        if let Some(c) =
+            re!(r"^(\s*)(\w+)\s*(\*=|\+=|-=)\s*([^;?]*(?:<|>|==|!=|&&|\|\|)[^;?]*);(.*)$")
+                .captures(&l.clone())
+        {
+            // `bar *= a > 0.0 && b < 1.0;` multiplies by a bool in HLSL.
+            if !c[4].trim_start().starts_with("float(") {
+                l = format!(
+                    "{}{} {} float({});{}",
+                    &c[1],
+                    &c[2],
+                    &c[3],
+                    c[4].trim(),
+                    &c[5]
+                );
+            }
+        }
         if !l.trim_start().starts_with('#') {
             l = negate_non_bool(&l);
             l = convert_vector_statement(&l, &widths);
@@ -219,18 +251,36 @@ fn negate_non_bool(line: &str) -> String {
 /// - `vec2 da = v4 * s;` / `da = v4 * s;` / `da.xy *= v4;` -> a wider vector variable used
 ///   directly as an operand is truncated to the target width.
 fn convert_vector_statement(line: &str, widths: &HashMap<String, usize>) -> String {
-    let decl = re!(r"^(\s*)(?:const\s+)?(?:vec|float)([234])\s+(.+?)\s*;\s*(//.*)?$");
-    let assign = re!(
-        r"^(\s*)(\w+)(\.[xyzwrgba]{2,4})?\s*(=|\+=|-=|\*=|/=)\s*([^=].*?)\s*;\s*(//.*)?$"
+    // `float v = texSample2D(...)` keeps the first channel; `int bar = step(...)` is a float in
+    // HLSL terms (it later multiplies vectors).
+    let sampled = re!(
+        r"^(\s*)float\s+(\w+)\s*=\s*((?:texSample2D|texture|texSample2DLod|textureLod)\s*\(.*\))\s*;\s*(//.*)?$"
     );
+    if let Some(c) = sampled.captures(line) {
+        if call_spans_whole_expression(&c[3]) {
+            let comment = c
+                .get(4)
+                .map(|m| format!(" {}", m.as_str()))
+                .unwrap_or_default();
+            return format!("{}float {} = {}.x;{comment}", &c[1], &c[2], &c[3]);
+        }
+    }
+    let int_float =
+        re!(r"^(\s*)int(\s+\w+\s*=\s*(?:step|smoothstep|sign|saturate|lerp|mix)\s*\(.*)$");
+    if let Some(c) = int_float.captures(line) {
+        return format!("{}float{}", &c[1], &c[2]);
+    }
+    let decl = re!(r"^(\s*)(?:const\s+)?(?:vec|float)([234])\s+(.+?)\s*;\s*(//.*)?$");
+    let assign =
+        re!(r"^(\s*)(\w+)(\.[xyzwrgba]{2,4})?\s*(=|\+=|-=|\*=|/=)\s*([^=].*?)\s*;\s*(//.*)?$");
     if let Some(c) = decl.captures(line) {
         if !c[3].contains('=') {
             return line.to_string();
         }
         let n: usize = c[2].parse().unwrap_or(0);
-        let ty = line.trim_start().split_whitespace().next().unwrap_or("");
+        let ty = line.split_whitespace().next().unwrap_or("");
         let ty = if ty == "const" {
-            line.trim_start().split_whitespace().nth(1).unwrap_or("")
+            line.split_whitespace().nth(1).unwrap_or("")
         } else {
             ty
         };
@@ -249,7 +299,10 @@ fn convert_vector_statement(line: &str, widths: &HashMap<String, usize>) -> Stri
                 _ => d.trim().to_string(),
             })
             .collect();
-        let comment = c.get(4).map(|m| format!(" {}", m.as_str())).unwrap_or_default();
+        let comment = c
+            .get(4)
+            .map(|m| format!(" {}", m.as_str()))
+            .unwrap_or_default();
         let konst = if line.trim_start().starts_with("const ") {
             "const "
         } else {
@@ -269,7 +322,10 @@ fn convert_vector_statement(line: &str, widths: &HashMap<String, usize>) -> Stri
         if rhs == c[5] {
             return line.to_string();
         }
-        let comment = c.get(6).map(|m| format!(" {}", m.as_str())).unwrap_or_default();
+        let comment = c
+            .get(6)
+            .map(|m| format!(" {}", m.as_str()))
+            .unwrap_or_default();
         return format!(
             "{}{}{} {} {rhs};{comment}",
             &c[1],
@@ -279,6 +335,27 @@ fn convert_vector_statement(line: &str, widths: &HashMap<String, usize>) -> Stri
         );
     }
     line.to_string()
+}
+
+/// Whether the first `(` of `expr` is closed by its last character (one call spans it all).
+fn call_spans_whole_expression(expr: &str) -> bool {
+    let Some(open) = expr.find('(') else {
+        return false;
+    };
+    let mut depth = 0i32;
+    for (i, ch) in expr.char_indices().skip_while(|&(i, _)| i < open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1 == expr.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Splits on commas that are not nested in brackets.
@@ -317,14 +394,13 @@ fn truncate_operands(expr: &str, width: usize, widths: &HashMap<String, usize>) 
             let is_call = prev.is_some_and(|p| p.is_ascii_alphanumeric() || p == '_');
             stack.push(is_call);
             call_depth += usize::from(is_call);
-        } else if ch == ')' {
-            if stack.pop() == Some(true) {
-                call_depth -= 1;
-            }
+        } else if ch == ')' && stack.pop() == Some(true) {
+            call_depth -= 1;
         }
         if ch.is_ascii_alphabetic() || ch == '_' {
             let start = i;
-            while i < bytes.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
+            while i < bytes.len()
+                && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
             {
                 i += 1;
             }
@@ -358,11 +434,25 @@ fn truncate_operands(expr: &str, width: usize, widths: &HashMap<String, usize>) 
     out
 }
 
-/// Fragment shaders may assign to their varyings (HLSL inputs are writable copies); GLSL `in`
-/// variables are read-only. Every written varying keeps its declaration (so linking by name still
-/// works) and all other uses move to a writable global that `main` initialises from it.
-pub fn make_written_varyings_mutable(frag: &str) -> String {
+/// Fragment shaders may assign to their varyings (HLSL inputs are writable copies) and may
+/// declare a varying narrower than the vertex stage writes it (`vec2` against `vec4`); GLSL `in`
+/// variables are read-only and pipelines need matching types. Such a varying keeps its name (so
+/// linking by name still works) with the vertex stage's type, and all other uses move to a
+/// writable global of the declared type that `main` initialises from it.
+pub fn localize_fragment_varyings(vert: &str, frag: &str) -> String {
     let decl = re!(r"(?m)^\s*(?:varying|in)\s+(?:(?:highp|mediump|lowp)\s+)?(\w+)\s+(\w+)\s*;");
+    let vert_decl =
+        re!(r"(?m)^\s*(?:varying|out)\s+(?:(?:highp|mediump|lowp)\s+)?(vec[234])\s+(\w+)\s*;");
+    let vert_types: HashMap<&str, &str> = vert_decl
+        .captures_iter(vert)
+        .map(|c| {
+            (
+                c.get(2).expect("name").as_str(),
+                c.get(1).expect("type").as_str(),
+            )
+        })
+        .collect();
+    let width_of = |ty: &str| ty.strip_prefix("vec").and_then(|w| w.parse::<usize>().ok());
     let mut init = String::new();
     let mut globals = String::new();
     let mut result = frag.to_string();
@@ -373,17 +463,24 @@ pub fn make_written_varyings_mutable(frag: &str) -> String {
         ))
         .map(|r| r.is_match(frag))
         .unwrap_or(false);
-        if !written {
+        let wider_in_vertex = vert_types
+            .get(name)
+            .copied()
+            .filter(|vt| width_of(vt) > width_of(ty) && width_of(ty).is_some());
+        if !written && wider_in_vertex.is_none() {
             continue;
         }
         let local = format!("tp_local_{name}");
         let word = Regex::new(&format!(r"\b{name}\b")).expect("valid regex");
+        let input_type = wider_in_vertex.unwrap_or(ty);
         result = result
             .lines()
             .map(|l| {
                 let t = l.trim_start();
-                if t.starts_with('#') || decl.is_match(l) {
+                if t.starts_with('#') {
                     l.to_string()
+                } else if decl.is_match(l) && l.contains(name) {
+                    l.replacen(ty, input_type, 1)
                 } else {
                     word.replace_all(l, local.as_str()).into_owned()
                 }
@@ -392,15 +489,24 @@ pub fn make_written_varyings_mutable(frag: &str) -> String {
             .join("\n");
         result.push('\n');
         globals.push_str(&format!("{ty} {local};\n"));
-        init.push_str(&format!("{local} = {name}; "));
+        match (wider_in_vertex, width_of(ty)) {
+            (Some(_), Some(w)) => init.push_str(&format!("{local} = {name}.{}; ", &"xyzw"[..w])),
+            _ => init.push_str(&format!("{local} = {name}; ")),
+        }
     }
     if init.is_empty() {
         return frag.to_string();
     }
-    let Some(at) = re!(r"\bvoid\s+main\s*\(\s*\)\s*\{").find(&result).map(|m| m.end()) else {
+    let Some(at) = re!(r"\bvoid\s+main\s*\(\s*\)\s*\{")
+        .find(&result)
+        .map(|m| m.end())
+    else {
         return frag.to_string();
     };
-    let entry_start = re!(r"\bvoid\s+main\s*\(").find(&result).map(|m| m.start()).unwrap_or(at);
+    let entry_start = re!(r"\bvoid\s+main\s*\(")
+        .find(&result)
+        .map(|m| m.start())
+        .unwrap_or(at);
     format!(
         "{}{globals}{}{init}{}",
         &result[..entry_start],
@@ -538,7 +644,10 @@ mod tests {
     #[test]
     fn unsized_array_alias_becomes_a_define() {
         let out = fixup_hlsl_source("\tfloat spectrum[] = g_AudioSpectrum16Left;\n");
-        assert!(out.contains("#define spectrum g_AudioSpectrum16Left"), "{out}");
+        assert!(
+            out.contains("#define spectrum g_AudioSpectrum16Left"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -562,7 +671,10 @@ mod tests {
     #[test]
     fn comparison_results_are_converted_before_arithmetic() {
         let out = fixup_hlsl_source("\tdepth *= (depth < limit) * 6.0;\n\tx = 2.0 * (a >= b);\n");
-        assert!(out.contains("depth *= float(depth < limit) * 6.0;"), "{out}");
+        assert!(
+            out.contains("depth *= float(depth < limit) * 6.0;"),
+            "{out}"
+        );
         assert!(out.contains("x = 2.0 * float(a >= b);"), "{out}");
         let call = fixup_hlsl_source("\tx = foo(a < b) * 2.0;\n");
         assert!(call.contains("foo(a < b) * 2.0"), "{call}");
@@ -584,9 +696,89 @@ mod tests {
     }
 
     #[test]
+    fn bool_and_comparison_operands_of_compound_assignments_become_floats() {
+        let out = fixup_hlsl_source(
+            "bool left = y < 0.5;\nbar *= left; bar2 *= other;\nbar *= x > 0.0 && x < 1.0;\n",
+        );
+        assert!(out.contains("bar *= float(left); bar2 *= other;"), "{out}");
+        assert!(out.contains("bar *= float(x > 0.0 && x < 1.0);"), "{out}");
+    }
+
+    #[test]
+    fn vector_declarations_get_constructors_and_truncation() {
+        let out = fixup_hlsl_source(
+            "varying vec4 v_P;\nvec2 radial = 0.0, center = c;\nvec2 da = v_P * s * 0.001;\nvec2 k = foo(v_P);\n",
+        );
+        assert!(
+            out.contains("vec2 radial = vec2(0.0), center = c;"),
+            "{out}"
+        );
+        assert!(out.contains("vec2 da = v_P.xy * s * 0.001;"), "{out}");
+        assert!(out.contains("vec2 k = foo(v_P);"), "{out}");
+    }
+
+    #[test]
+    fn sampled_scalars_and_step_ints_follow_hlsl_typing() {
+        let out = fixup_hlsl_source(
+            "float v = texSample2D(g_Texture1, uv);\nfloat w = texSample2D(t, uv).r;\nint bar = step(a, b);\nint i = 3;\n",
+        );
+        assert!(
+            out.contains("float v = texSample2D(g_Texture1, uv).x;"),
+            "{out}"
+        );
+        assert!(out.contains("float w = texSample2D(t, uv).r;"), "{out}");
+        assert!(out.contains("float bar = step(a, b);"), "{out}");
+        assert!(out.contains("int i = 3;"), "{out}");
+    }
+
+    #[test]
+    fn negation_of_a_float_is_a_bool_in_conditions_and_a_float_in_values() {
+        let out =
+            fixup_hlsl_source("if (!h) {}\nv = vec2(h, !h);\nx = c ? !h : h;\nbool b = !h;\n");
+        assert!(out.contains("if (!bool(h)) {}"), "{out}");
+        assert!(out.contains("vec2(h, float(!bool(h)))"), "{out}");
+        assert!(out.contains("c ? float(!bool(h)) : h"), "{out}");
+        assert!(out.contains("bool b = !bool(h);"), "{out}");
+    }
+
+    #[test]
+    fn written_fragment_varying_gets_a_local_copy() {
+        let out = localize_fragment_varyings(
+            "",
+            "varying vec2 v_TexCoord;\nvoid main() {\n\tv_TexCoord.y = 1.0 - v_TexCoord.y;\n}\n",
+        );
+        assert!(out.contains("varying vec2 v_TexCoord;"), "{out}");
+        assert!(out.contains("vec2 tp_local_v_TexCoord;"), "{out}");
+        assert!(out.contains("{tp_local_v_TexCoord = v_TexCoord; "), "{out}");
+        assert!(
+            out.contains("tp_local_v_TexCoord.y = 1.0 - tp_local_v_TexCoord.y;"),
+            "{out}"
+        );
+        let untouched = "varying vec2 v_A;\nvoid main() { x = v_A; }\n";
+        assert_eq!(localize_fragment_varyings("", untouched), untouched);
+    }
+
+    #[test]
+    fn fragment_varying_narrower_than_the_vertex_one_takes_the_vertex_type() {
+        let vert = "varying vec4 v_TexCoord;\nvoid main() { v_TexCoord.xy = a; }\n";
+        let frag = "varying vec2 v_TexCoord;\nvoid main() { x = tex(v_TexCoord); }\n";
+        let out = localize_fragment_varyings(vert, frag);
+        assert!(out.contains("varying vec4 v_TexCoord;"), "{out}");
+        assert!(out.contains("vec2 tp_local_v_TexCoord;"), "{out}");
+        assert!(
+            out.contains("tp_local_v_TexCoord = v_TexCoord.xy;"),
+            "{out}"
+        );
+        assert!(out.contains("tex(tp_local_v_TexCoord)"), "{out}");
+    }
+
+    #[test]
     fn lax_overloads_cover_mixed_widths_and_only_called_functions() {
         let out = lax_builtin_overloads("x = mix(a, b, t);");
-        assert!(out.contains("vec3 tp_mix(vec4 a0, vec3 a1, float a2)"), "{out}");
+        assert!(
+            out.contains("vec3 tp_mix(vec4 a0, vec3 a1, float a2)"),
+            "{out}"
+        );
         assert!(out.contains("#define mix tp_mix"), "{out}");
         assert!(!out.contains("tp_step"), "{out}");
         let step = lax_builtin_overloads("v = step(a, 1);");

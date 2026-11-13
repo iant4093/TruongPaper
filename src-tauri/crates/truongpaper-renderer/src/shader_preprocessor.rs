@@ -616,12 +616,14 @@ pub fn translate_we_shader_pair(
     raw_vert_preprocessed: &str,
     raw_frag_preprocessed: &str,
 ) -> Result<TranslatedWeShaderPair, String> {
-    let first =
-        match translate_we_shader_pair_strict(label, raw_vert_preprocessed, raw_frag_preprocessed)
-        {
-            Ok(translated) => return Ok(translated),
-            Err(first) => first,
-        };
+    let first = match translate_we_shader_pair_strict(
+        label,
+        raw_vert_preprocessed,
+        raw_frag_preprocessed,
+    ) {
+        Ok(translated) => return Ok(translated),
+        Err(first) => first,
+    };
     // Retry with HLSL-style lax builtin overloads (mixed vector widths).
     let add = |src: &str| {
         let overloads = crate::shader_compat::lax_builtin_overloads(src);
@@ -658,7 +660,7 @@ fn translate_we_shader_pair_strict(
     let linked_frag = apply_truncating_assignment_compatibility(&linked_frag);
     let linked_vert = apply_scalar_conversion_compatibility(&linked_vert);
     let linked_frag = apply_scalar_conversion_compatibility(&linked_frag);
-    let linked_frag = crate::shader_compat::make_written_varyings_mutable(&linked_frag);
+    let linked_frag = crate::shader_compat::localize_fragment_varyings(&linked_vert, &linked_frag);
 
     let (vert_450, frag_450, uniform_fields, ubo_size) =
         upgrade_to_naga_glsl450(&linked_vert, &linked_frag);

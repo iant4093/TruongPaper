@@ -762,3 +762,21 @@ fn hidden_parents_hide_their_children() {
     let vis = |n: &str| g.effective_visible(g.find_layer(n).unwrap());
     assert!(vis("Child") && vis("Shown") && !vis("Grandchild"));
 }
+
+#[test]
+fn depth_test_solid_layer_renders_as_a_solid_without_any_model_file() {
+    let t = TempDir::new("sg-solid-depth");
+    let g = load(
+        &t,
+        r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } }, "objects": [
+            { "name": "Depth", "image": "models/util/solidlayer_depthtest.json", "color": "1 0 0" }
+        ] }"#,
+        None,
+    );
+    assert_eq!(g.layers.len(), 1, "warnings: {:?}", g.warnings);
+    match &g.layers[0].kind {
+        SceneLayerKind::Solid { color } => assert_eq!(*color, Vec3::new(1.0, 0.0, 0.0)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(g.layers[0].transform.size, Vec2::new(1920.0, 1080.0));
+}

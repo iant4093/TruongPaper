@@ -48,6 +48,7 @@ use crate::effect_chain::{
 };
 use crate::json::Value;
 use crate::model3d::{GpuModel, ModelFrame, ModelMaterial, ModelResources, DEFAULT_LIGHT_DIR};
+use crate::particle_tree::{plan_draw_sets, DrawSetPlan, SetGeometry};
 use crate::particles::SpriteParticleVertex;
 use crate::puppet::{
     layered_bone_matrices, parse_mdl_skeleton, PuppetDeformer, PuppetLayer, PuppetSkeleton,
@@ -730,7 +731,9 @@ fn vs_main(v: VsIn) -> VsOut {
     let rotated = vec2<f32>(corner.x * c - corner.y * s, corner.x * s + corner.y * c);
     var out: VsOut;
     out.position = u.mvp * vec4<f32>(v.position + vec3<f32>(rotated, 0.0), 1.0);
-    out.uv = uv;
+    // `rotation_xy` carries the sampling uv (a sprite-sheet frame remaps it); `uv` only places
+    // the quad corner.
+    out.uv = v.rotation_xy;
     out.color = v.color * u.color;
     return out;
 }
@@ -895,12 +898,25 @@ struct GpuGroup {
     members: Vec<usize>,
 }
 
-struct GpuParticles {
+/// One draw set of a particle layer: every system (parent and children) sharing a material.
+struct GpuParticleSet {
     draw: SimpleDraw,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     capacity: usize,
     blending: BlendMode,
+    /// Indices written by the last `update`.
+    index_count: u32,
+}
+
+struct GpuParticles {
+    /// Draw order: the system first, then its children.
+    sets: Vec<GpuParticleSet>,
+    /// Index of each set's plan entry in `plan`, parallel to `sets`.
+    set_plan: Vec<usize>,
+    plan: Vec<DrawSetPlan>,
+    /// Sprite sheet of each plan entry's texture.
+    sheets: Vec<Option<std::sync::Arc<SpriteSheet>>>,
 }
 
 /// A rasterized text layer: the bitmap is rebuilt only when the string or style changes.
@@ -2025,113 +2041,119 @@ impl SceneRenderer {
                     SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
                 ))),
                 SceneLayerKind::Particle { spec, path } => 'particle: {
-                    // A system without renderers only drives its child systems (Wallpaper
-                    // Engine's `children`, e.g. a glow, trail and body following one emitter);
-                    // it draws nothing itself. Child systems are not supported yet. A system with
-                    // no renderer and no children (e.g. the stock `snowflat` and `light_shafts`
-                    // presets) keeps drawing as sprites, which is how it rendered before.
-                    if spec.renderer.is_empty() {
-                        let children = vfs
-                            .read_string(path)
+                    // A system draws through its own renderer and through its child systems
+                    // (a glow, trail and body following one emitter), each with its own
+                    // material; systems sharing a material share one draw set.
+                    let plan = plan_draw_sets(spec);
+                    let mut sets = Vec::new();
+                    let mut set_plan = Vec::new();
+                    let mut sheets = vec![None; plan.len()];
+                    for (pi, entry) in plan.iter().enumerate() {
+                        let first_pass = vfs
+                            .read_string(&entry.material)
                             .ok()
-                            .and_then(|s| Value::parse(&s).ok())
-                            .and_then(|v| {
-                                v.get("children")
-                                    .and_then(Value::as_array)
-                                    .map(<[Value]>::len)
-                            })
-                            .unwrap_or(0);
-                        if children > 0 {
+                            .and_then(|s| MaterialFile::from_json_str(&s).ok())
+                            .and_then(|m| m.passes.into_iter().next());
+                        // `REFRACT` particles show the scene behind them bent by a normal map;
+                        // their colour texture is a plain white mask, so drawing it as a sprite
+                        // paints opaque squares. Without refraction support they are left out.
+                        if first_pass
+                            .as_ref()
+                            .is_some_and(|p| p.combos.get("REFRACT").copied().unwrap_or(0) != 0)
+                        {
                             let msg = format!(
-                                "layer '{}' particle {path}: no renderer and {children} child \
-                                 system(s), which are not supported; layer draws nothing",
+                                "layer '{}' particle material {}: refraction is not supported; \
+                                 layer skipped",
+                                layer.key(),
+                                entry.material
+                            );
+                            tracing::warn!("{msg}");
+                            warnings.push(msg);
+                            continue;
+                        }
+                        let tex_path = first_pass.map(|p| {
+                            (
+                                p.textures
+                                    .first()
+                                    .cloned()
+                                    .flatten()
+                                    .map(|t| material_texture_path(&t)),
+                                BlendMode::parse(&p.blending),
+                            )
+                        });
+                        let (tex_path, blending) = match tex_path {
+                            Some((t, b)) => (t, b),
+                            None => (None, BlendMode::Translucent),
+                        };
+                        let blending = if blending == BlendMode::Normal {
+                            BlendMode::Translucent
+                        } else {
+                            blending
+                        };
+                        if let Some(p) = &tex_path {
+                            self.ensure_texture(device, queue, vfs, p, &mut warnings);
+                        }
+                        self.ensure_particle_pipeline(device, blending);
+                        if let Some(p) = &tex_path {
+                            sheets[pi] = self.textures.get(p).and_then(|t| t.sprite.clone());
+                        }
+                        // Missing sprite texture -> nothing drawn; no texture named -> soft dot.
+                        let view = match tex_path.as_deref() {
+                            Some(p) => self
+                                .textures
+                                .get(p)
+                                .map(|t| &t.view)
+                                .unwrap_or(&self.transparent.view),
+                            None => &self.soft_particle,
+                        };
+                        let draw = Self::make_simple_draw_raw(
+                            device,
+                            &self.simple_layout,
+                            view,
+                            &self.clamp_sampler,
+                            SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
+                        );
+                        let capacity = entry.capacity.max(1);
+                        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("scene_particle_vertices"),
+                            size: (capacity * 4 * std::mem::size_of::<SpriteParticleVertex>())
+                                as u64,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("scene_particle_indices"),
+                            size: (capacity * 6 * 2) as u64,
+                            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        sets.push(GpuParticleSet {
+                            draw,
+                            vertex_buffer,
+                            index_buffer,
+                            capacity,
+                            blending,
+                            index_count: 0,
+                        });
+                        set_plan.push(pi);
+                    }
+                    if sets.is_empty() {
+                        if plan.is_empty() {
+                            let msg = format!(
+                                "layer '{}' particle {path}: no renderer and no loadable child \
+                                 system; layer draws nothing",
                                 layer.key()
                             );
                             tracing::warn!("{msg}");
                             warnings.push(msg);
-                            break 'particle None;
                         }
-                    }
-                    let first_pass = vfs
-                        .read_string(&spec.material)
-                        .ok()
-                        .and_then(|s| MaterialFile::from_json_str(&s).ok())
-                        .and_then(|m| m.passes.into_iter().next());
-                    // `REFRACT` particles show the scene behind them bent by a normal map; their
-                    // colour texture is a plain white mask, so drawing it as a sprite paints
-                    // opaque squares. Without refraction support they are left out.
-                    if first_pass
-                        .as_ref()
-                        .is_some_and(|p| p.combos.get("REFRACT").copied().unwrap_or(0) != 0)
-                    {
-                        let msg = format!(
-                            "layer '{}' particle material {}: refraction is not supported; \
-                             layer skipped",
-                            layer.key(),
-                            spec.material
-                        );
-                        tracing::warn!("{msg}");
-                        warnings.push(msg);
                         break 'particle None;
                     }
-                    let tex_path = first_pass.map(|p| {
-                        (
-                            p.textures
-                                .first()
-                                .cloned()
-                                .flatten()
-                                .map(|t| material_texture_path(&t)),
-                            BlendMode::parse(&p.blending),
-                        )
-                    });
-                    let (tex_path, blending) = match tex_path {
-                        Some((t, b)) => (t, b),
-                        None => (None, BlendMode::Translucent),
-                    };
-                    let blending = if blending == BlendMode::Normal {
-                        BlendMode::Translucent
-                    } else {
-                        blending
-                    };
-                    if let Some(p) = &tex_path {
-                        self.ensure_texture(device, queue, vfs, p, &mut warnings);
-                    }
-                    self.ensure_particle_pipeline(device, blending);
-                    // Missing sprite texture -> nothing drawn; no texture named -> soft dot.
-                    let view = match tex_path.as_deref() {
-                        Some(p) => self
-                            .textures
-                            .get(p)
-                            .map(|t| &t.view)
-                            .unwrap_or(&self.transparent.view),
-                        None => &self.soft_particle,
-                    };
-                    let draw = Self::make_simple_draw_raw(
-                        device,
-                        &self.simple_layout,
-                        view,
-                        &self.clamp_sampler,
-                        SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
-                    );
-                    let capacity = spec.maxcount.clamp(1, 10_000) as usize;
-                    let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("scene_particle_vertices"),
-                        size: (capacity * 4 * std::mem::size_of::<SpriteParticleVertex>()) as u64,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("scene_particle_indices"),
-                        size: (capacity * 6 * 2) as u64,
-                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
                     Some(GpuLayer::Particles(Box::new(GpuParticles {
-                        draw,
-                        vertex_buffer,
-                        index_buffer,
-                        capacity,
-                        blending,
+                        sets,
+                        set_plan,
+                        plan,
+                        sheets,
                     })))
                 }
                 SceneLayerKind::Model { mdl_path } => self
@@ -3040,12 +3062,24 @@ impl SceneRenderer {
                 }
                 Some(GpuLayer::Particles(ps)) => {
                     if let Some(sys) = graph.particle_system(li) {
-                        let (mut verts, mut idx) = sys.build_sprite_vertices();
-                        verts.truncate(ps.capacity * 4);
-                        idx.truncate(ps.capacity * 6);
-                        if !verts.is_empty() {
-                            queue.write_buffer(&ps.vertex_buffer, 0, bytemuck::cast_slice(&verts));
-                            queue.write_buffer(&ps.index_buffer, 0, bytemuck::cast_slice(&idx));
+                        let mut geo = vec![SetGeometry::default(); ps.plan.len()];
+                        sys.gather_geometry(&ps.plan, &ps.sheets, &mut geo);
+                        for (set, &pi) in ps.sets.iter_mut().zip(&ps.set_plan) {
+                            let g = &mut geo[pi];
+                            g.fit(set.capacity);
+                            set.index_count = g.indices.len() as u32;
+                            if !g.vertices.is_empty() {
+                                queue.write_buffer(
+                                    &set.vertex_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&g.vertices),
+                                );
+                                queue.write_buffer(
+                                    &set.index_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&g.indices),
+                                );
+                            }
                         }
                     }
                 }
@@ -3223,29 +3257,27 @@ impl SceneRenderer {
                 });
             }
             GpuLayer::Particles(ps) => {
-                let count = graph
-                    .particle_system(li)
-                    .map(|s| s.particles.len().min(ps.capacity))
-                    .unwrap_or(0);
-                if count == 0 {
-                    return;
+                for set in &ps.sets {
+                    if set.index_count == 0 {
+                        continue;
+                    }
+                    queue.write_buffer(
+                        &set.draw.uniform,
+                        0,
+                        bytemuck::bytes_of(&SimpleUniforms::new(
+                            matrices.model_view_projection,
+                            (layer.color * layer.brightness).extend(layer.alpha),
+                        )),
+                    );
+                    let pipeline = &self.particle_pipelines[&set.blending];
+                    run_pass(encoder, "scene_particles", &dest.view, None, |rp| {
+                        rp.set_pipeline(pipeline);
+                        rp.set_bind_group(0, &set.draw.bind_group, &[]);
+                        rp.set_vertex_buffer(0, set.vertex_buffer.slice(..));
+                        rp.set_index_buffer(set.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        rp.draw_indexed(0..set.index_count, 0, 0..1);
+                    });
                 }
-                queue.write_buffer(
-                    &ps.draw.uniform,
-                    0,
-                    bytemuck::bytes_of(&SimpleUniforms::new(
-                        matrices.model_view_projection,
-                        (layer.color * layer.brightness).extend(layer.alpha),
-                    )),
-                );
-                let pipeline = &self.particle_pipelines[&ps.blending];
-                run_pass(encoder, "scene_particles", &dest.view, None, |rp| {
-                    rp.set_pipeline(pipeline);
-                    rp.set_bind_group(0, &ps.draw.bind_group, &[]);
-                    rp.set_vertex_buffer(0, ps.vertex_buffer.slice(..));
-                    rp.set_index_buffer(ps.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                    rp.draw_indexed(0..(count * 6) as u32, 0, 0..1);
-                });
             }
         }
     }

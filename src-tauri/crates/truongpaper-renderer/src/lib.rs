@@ -8,6 +8,7 @@ pub mod diagnostics;
 pub mod effect_chain;
 pub mod json;
 pub mod model3d;
+pub mod particle_tree;
 pub mod particles;
 pub mod puppet;
 pub mod scene_assets;

@@ -136,12 +136,12 @@ pub fn measure_text(metrics: &impl TextMetrics, text: &str, padding: f32) -> (f3
 
 /// Places every line of `text` inside a `size` box according to the style's alignment.
 ///
-/// The saved `size` of a text layer is the editor's measured box. Newer scenes save it as text
-/// + `2 * padding` (2134765860: a 302 x 226 clock with padding 82 next to its 202 x 126 shadow
-/// with padding 32, both right-aligned to the same edge), older ones as the bare text (3122339805:
-/// 23-unit headers with padding 32). So the inset is the padding only as far as the box has
-/// room for it around the text block: `clamp((size.h - block_h) / 2, 0, padding)`, and per line
-/// never more than the horizontal slack, so text never leaves its box.
+/// The saved `size` of a text layer is the editor's measured box. Newer scenes save it as the
+/// text plus `2 * padding` (2134765860: a 302 x 226 clock with padding 82 next to its 202 x 126
+/// shadow with padding 32, both right-aligned to the same edge), older ones as the bare text
+/// (3122339805: 23-unit headers with padding 32). So the inset is the padding only as far as
+/// the box has room for it around the text block: `clamp((size.h - block_h) / 2, 0, padding)`,
+/// and per line never more than the horizontal slack, so text never leaves its box.
 pub fn layout_text(
     metrics: &impl TextMetrics,
     text: &str,

@@ -336,12 +336,17 @@ pub struct SceneLayer {
     pub effects: Vec<SceneEffectRef>,
     /// Size used when the object has no `size` (model width/height or texture size).
     pub fallback_size: Vec2,
+    /// Unique script key for a layer whose name an earlier layer of the same class (text or
+    /// not) already uses; `name` stays the scene name so `getLayer(name)` finds the first.
+    pub dup_key: Option<String>,
 }
 
 impl SceneLayer {
     /// `"<name>"`, or the id when the name is empty, or `"#<object index>"`.
     pub fn key(&self) -> String {
-        if !self.name.is_empty() {
+        if let Some(k) = &self.dup_key {
+            k.clone()
+        } else if !self.name.is_empty() {
             self.name.clone()
         } else if let Some(id) = self.id {
             id.to_string()
@@ -995,9 +1000,17 @@ impl SceneGraph {
                     color_blend_mode: obj.color_blend_mode.unwrap_or(0),
                     effects: obj.effects.clone(),
                     fallback_size,
+                    dup_key: None,
                 });
             }
             self.nodes.push(node);
+        }
+        let mut seen = HashSet::new();
+        for l in &mut self.layers {
+            let is_text = matches!(l.kind, SceneLayerKind::Text { .. });
+            if !seen.insert((l.key(), is_text)) {
+                l.dup_key = Some(format!("{}#dup{}", l.key(), l.object_index));
+            }
         }
         for li in 0..self.layers.len() {
             self.resolve_layer_values(li);

@@ -1025,6 +1025,31 @@ mod tests {
     }
 
     #[test]
+    fn text_scripts_reach_text_layers_sharing_one_name() {
+        let t = TempDir::new("text-dup2");
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } }, "objects": [
+                { "id": 1, "name": "Clock", "size": "100 20",
+                  "text": { "script": "export function update(v) { return 'one'; }", "value": "<Clock>" } },
+                { "id": 2, "name": "Clock", "size": "100 20",
+                  "text": { "script": "export function update(v) { return 'two'; }", "value": "<Clock>" } }
+            ] }"#,
+        );
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
+        let texts: Vec<_> = rt
+            .graph()
+            .layers
+            .iter()
+            .filter_map(|l| match &l.kind {
+                truongpaper_renderer::SceneLayerKind::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
     fn diagnostics_report_skipped_content_and_merge_external_notes() {
         let t = scene_dir("diag");
         let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();

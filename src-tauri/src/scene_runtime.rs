@@ -517,6 +517,7 @@ impl SceneRuntime {
 
     /// Exposes parent/child links to `getParent()/getChildren()`. Transform-only parents
     /// (groups) are registered as non-enumerable pseudo layers.
+    #[allow(clippy::map_entry)]
     fn register_hierarchy(&self) -> anyhow::Result<()> {
         let mut keys: HashMap<usize, String> = HashMap::new();
         let mut used: HashSet<String> = HashSet::new();

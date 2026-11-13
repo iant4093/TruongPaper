@@ -429,8 +429,10 @@ fn plausible_header(bytes: &[u8], pos: usize) -> bool {
         let length = r.i32("length")?;
         let _ = r.i32("unk2")?;
         let bones = r.u32("bones")? as usize;
+        // Slow clips exist: 2477602742's FrontPole_puppet.mdl has a 0.48 fps "Animation 2".
         Ok(fps.is_finite()
-            && (1.0..=240.0).contains(&fps)
+            && fps > 0.0
+            && fps <= 240.0
             && (1..=100_000).contains(&length)
             && bones <= 4096
             && bones * 8 <= r.remaining())
@@ -764,11 +766,15 @@ mod resync_tests {
     use super::*;
 
     fn header(id: i32, bones: u32) -> Vec<u8> {
+        header_fps(id, bones, 30.0)
+    }
+
+    fn header_fps(id: i32, bones: u32, fps: f32) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend(id.to_le_bytes());
         b.extend(0i32.to_le_bytes());
         b.extend(b"wave\0loop\0");
-        b.extend(30.0f32.to_le_bytes());
+        b.extend(fps.to_le_bytes());
         b.extend(10i32.to_le_bytes());
         b.extend(0i32.to_le_bytes());
         b.extend(bones.to_le_bytes());
@@ -784,5 +790,13 @@ mod resync_tests {
         bytes.extend(header(241, 2));
         assert_eq!(find_next_header(&bytes, 0), Some(at));
         assert!(!plausible_header(&bytes, 0));
+    }
+
+    /// Regression (2477602742): a 0.48 fps clip header is still a clip header.
+    #[test]
+    fn slow_clip_header_is_plausible() {
+        let bytes = header_fps(159, 2, 0.483);
+        assert!(plausible_header(&bytes, 0));
+        assert!(!plausible_header(&header_fps(159, 2, 0.0), 0));
     }
 }

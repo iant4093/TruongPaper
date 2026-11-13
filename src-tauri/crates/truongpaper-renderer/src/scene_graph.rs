@@ -548,7 +548,20 @@ fn text_style(obj: &SceneObject, props: &UserPropertyMap) -> TextStyle {
         halign: HAlign::parse(obj.horizontalalign.as_deref()),
         valign: VAlign::parse(obj.verticalalign.as_deref()),
         padding: opt_vec2_x(&obj.padding, props, 0.0).max(0.0),
+        // A box hung from its origin by the text alignment (`anchor` none) keeps the text edge
+        // on the origin (2134765860's bottom-right date sits just under its clock); only a box
+        // anchored explicitly (`anchor: center`, its clock) insets its text by the padding.
+        inset_padding: !text_anchored_by_alignment(obj),
     }
+}
+
+fn text_anchored_by_alignment(obj: &SceneObject) -> bool {
+    obj.alignment.is_none()
+        && obj
+            .anchor
+            .as_deref()
+            .map(|a| a.trim().to_ascii_lowercase())
+            .is_none_or(|a| a.is_empty() || a == "none")
 }
 
 fn normalize_path(p: &str) -> String {
@@ -1416,7 +1429,7 @@ impl SceneGraph {
             let obj = &self.scene.objects[layer.object_index];
             let key = layer.key();
             let user_props = &self.user_props;
-            let mut push = |prop: ScriptProperty,
+            let mut push = |prop: &str,
                             script: Option<&str>,
                             sp: Option<&HashMap<String, serde_json::Value>>,
                             initial: String| {
@@ -1427,9 +1440,9 @@ impl SceneGraph {
                         .map(|(k, v)| (k.clone(), resolve_json_binding(v, user_props)))
                         .collect();
                     out.push(PropertyScriptSlot {
-                        slot_key: format!("{key}/{}", prop.as_str()),
+                        slot_key: format!("{key}/{prop}"),
                         layer_name: layer.name.clone(),
-                        property: prop.as_str().to_string(),
+                        property: prop.to_string(),
                         script: script.to_string(),
                         initial_value: initial,
                         script_properties_json: serde_json::Value::Object(resolved).to_string(),
@@ -1437,62 +1450,83 @@ impl SceneGraph {
                 }
             };
             push(
-                ScriptProperty::Origin,
+                ScriptProperty::Origin.as_str(),
                 obj.origin.script(),
                 obj.origin.script_properties(),
                 obj.origin.default_value().clone(),
             );
             push(
-                ScriptProperty::Scale,
+                ScriptProperty::Scale.as_str(),
                 obj.scale.script(),
                 obj.scale.script_properties(),
                 obj.scale.default_value().clone(),
             );
             push(
-                ScriptProperty::Angles,
+                ScriptProperty::Angles.as_str(),
                 obj.angles.script(),
                 obj.angles.script_properties(),
                 obj.angles.default_value().clone(),
             );
             push(
-                ScriptProperty::Alpha,
+                ScriptProperty::Alpha.as_str(),
                 obj.alpha.script(),
                 obj.alpha.script_properties(),
                 obj.alpha.default_value().to_string(),
             );
             push(
-                ScriptProperty::Visible,
+                ScriptProperty::Visible.as_str(),
                 obj.visible.script(),
                 obj.visible.script_properties(),
                 obj.visible.default_value().to_string(),
             );
             push(
-                ScriptProperty::Color,
+                ScriptProperty::Color.as_str(),
                 obj.color.script(),
                 obj.color.script_properties(),
                 obj.color.default_value().clone(),
             );
             if let Some(size) = &obj.size {
                 push(
-                    ScriptProperty::Size,
+                    ScriptProperty::Size.as_str(),
                     size.script(),
                     size.script_properties(),
                     size.default_value().clone(),
                 );
             }
             push(
-                ScriptProperty::Brightness,
+                ScriptProperty::Brightness.as_str(),
                 obj.brightness.script(),
                 obj.brightness.script_properties(),
                 obj.brightness.default_value().to_string(),
             );
             if let Some(text) = &obj.text {
                 push(
-                    ScriptProperty::Text,
+                    ScriptProperty::Text.as_str(),
                     text.script(),
                     text.script_properties(),
                     text.default_value().clone(),
                 );
+            }
+            // Scripted effect constants (`constantshadervalues`): run so their `init`/`update`
+            // side effects (shared state) happen, as in Wallpaper Engine.
+            for (ei, effect) in obj.effects.iter().enumerate() {
+                for (pi, pass) in effect.passes.iter().enumerate() {
+                    let mut names: Vec<&String> = pass.constantshadervalues.keys().collect();
+                    names.sort();
+                    for name in names {
+                        let bound = &pass.constantshadervalues[name];
+                        let initial = match bound.default_value() {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        push(
+                            &effect_constant_property(ei, pi, name),
+                            bound.script(),
+                            bound.script_properties(),
+                            initial,
+                        );
+                    }
+                }
             }
         }
         out
@@ -1771,6 +1805,11 @@ impl SceneGraph {
     pub fn particle_systems(&self) -> impl Iterator<Item = (usize, &ParticleSystemInstance)> {
         self.particles.iter().map(|(li, p)| (*li, p))
     }
+}
+
+/// Slot property name of a scripted effect constant: `effect.<effect>.<pass>.<constant>`.
+pub fn effect_constant_property(effect: usize, pass: usize, constant: &str) -> String {
+    format!("effect.{effect}.{pass}.{}", constant.replace('/', "_"))
 }
 
 /// User property names used by bindings the renderer bakes into its GPU plans.

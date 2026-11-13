@@ -1315,6 +1315,13 @@ impl SceneGraph {
         self.nodes.get(object_index).and_then(|n| n.parent)
     }
 
+    /// Name and local transform of any `scene.objects` entry (including transform-only groups).
+    pub fn object_node(&self, object_index: usize) -> Option<(&str, &LayerTransform)> {
+        let obj = self.scene.objects.get(object_index)?;
+        let node = self.nodes.get(object_index)?;
+        Some((obj.name.as_str(), &node.transform))
+    }
+
     /// Index of the first layer whose name (or id string) equals `key`.
     pub fn find_layer(&self, key: &str) -> Option<usize> {
         self.layers

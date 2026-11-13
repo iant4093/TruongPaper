@@ -216,6 +216,7 @@ impl SceneRuntime {
         }
         // register_layer has no size/color: sync the full state once.
         rt.push_layers()?;
+        rt.register_hierarchy()?;
 
         let initial_props = user_props_json.map(plain_properties_json);
         if let Some(json) = &initial_props {
@@ -512,6 +513,70 @@ impl SceneRuntime {
 
     fn scene_size(&self) -> [f32; 2] {
         self.graph.scene_size.to_array()
+    }
+
+    /// Exposes parent/child links to `getParent()/getChildren()`. Transform-only parents
+    /// (groups) are registered as non-enumerable pseudo layers.
+    fn register_hierarchy(&self) -> anyhow::Result<()> {
+        let mut keys: HashMap<usize, String> = HashMap::new();
+        let mut used: HashSet<String> = HashSet::new();
+        for l in &self.graph.layers {
+            let k = l.key();
+            used.insert(k.clone());
+            keys.entry(l.object_index).or_insert(k);
+        }
+        let mut groups = Vec::new();
+        let mut parents = Vec::new();
+        for l in &self.graph.layers {
+            let mut child = l.object_index;
+            let mut parent = l.parent_object;
+            let mut hops = 0;
+            while let Some(p) = parent {
+                hops += 1;
+                if hops > 256 {
+                    break;
+                }
+                if !keys.contains_key(&p) {
+                    let Some((name, t)) = self.graph.object_node(p) else {
+                        break;
+                    };
+                    let mut key = if name.is_empty() {
+                        format!("#{p}")
+                    } else {
+                        name.to_string()
+                    };
+                    if !used.insert(key.clone()) {
+                        key = format!("#{p}");
+                        used.insert(key.clone());
+                    }
+                    self.engine.register_layer(
+                        &key,
+                        t.origin.to_array(),
+                        t.scale.to_array(),
+                        t.angles.to_array(),
+                        1.0,
+                        true,
+                    )?;
+                    groups.push(key.clone());
+                    keys.insert(p, key);
+                }
+                parents.push((keys[&child].clone(), keys[&p].clone()));
+                child = p;
+                parent = self.graph.object_parent(p);
+                if parents.iter().any(|(c, _)| *c == keys[&child]) {
+                    break;
+                }
+            }
+        }
+        parents.sort();
+        parents.dedup();
+        let ids: Vec<(String, i32)> = self
+            .graph
+            .layers
+            .iter()
+            .filter_map(|l| l.id.map(|id| (l.key(), id)))
+            .collect();
+        self.engine.set_layer_hierarchy(&parents, &groups, &ids)
     }
 
     fn graph_layer_state(&self, key: &str) -> LayerState {

@@ -148,8 +148,15 @@ globalThis.input = {
 };
 
 globalThis.thisScene = {
-    getLayer(name) { return globalThis.__layers[name] || null; },
-    enumerateLayers() { return Object.values(globalThis.__layers); },
+    getLayer(name) {
+        const l = globalThis.__layers[name];
+        return l === undefined || l.__group ? null : l;
+    },
+    getLayerByID(id) {
+        for (const l of Object.values(globalThis.__layers)) if (!l.__group && l.id === id) return l;
+        return null;
+    },
+    enumerateLayers() { return Object.values(globalThis.__layers).filter((l) => !l.__group); },
 };
 
 globalThis.console = {
@@ -231,15 +238,52 @@ globalThis.__WEColor = {
     globalThis.engine.AUDIO_RESOLUTION_32 = 32;
     globalThis.engine.AUDIO_RESOLUTION_64 = 64;
     globalThis.engine.openUserShortcut = function () {};
-    globalThis.engine.setTimeout = function () { return 0; };
-    globalThis.engine.setInterval = function () { return 0; };
-    globalThis.engine.clearTimeout = function () {};
-    globalThis.engine.clearInterval = function () {};
+    // Timers run on engine.runtime and fire from `__fireTimers` each frame.
+    const timers = new Map();
+    let nextTimer = 1;
+    const addTimer = (fn, ms, repeat) => {
+        if (typeof fn !== 'function') return -1;
+        const delay = Math.max(0, Number(ms) || 0) / 1000;
+        const id = nextTimer++;
+        timers.set(id, { fn, delay, repeat, due: globalThis.engine.runtime + delay });
+        return id;
+    };
+    // Like Wallpaper Engine, the returned handle is a function that cancels the timer.
+    const handle = (id) => { const stop = () => { timers.delete(id); }; stop.id = id; return stop; };
+    globalThis.engine.setTimeout = (fn, ms) => handle(addTimer(fn, ms, false));
+    globalThis.engine.setInterval = (fn, ms) => handle(addTimer(fn, ms, true));
+    const clear = (h) => { if (typeof h === 'function') h(); else timers.delete(h); };
+    globalThis.engine.clearTimeout = clear;
+    globalThis.engine.clearInterval = clear;
+    globalThis.__fireTimers = function () {
+        const now = globalThis.engine.runtime;
+        for (const [id, t] of [...timers]) {
+            if (!timers.has(id) || t.due > now) continue;
+            if (t.repeat) t.due = now + Math.max(t.delay, 0.001); else timers.delete(id);
+            try { t.fn(); } catch (e) { __log('error', `[timer] ${e}`); }
+        }
+    };
     globalThis.engine.isRunningInEditor = function () { return false; };
     globalThis.engine.isPortrait = function () { return false; };
     globalThis.engine.isLandscape = function () { return true; };
 })();
 
+
+// Windows media-integration events: classes exist so scripts can reference them; the host
+// never delivers media callbacks.
+globalThis.MediaPlaybackEvent = class MediaPlaybackEvent {
+    constructor(state) { this.state = state === undefined ? MediaPlaybackEvent.PLAYBACK_STOPPED : state; }
+};
+Object.assign(globalThis.MediaPlaybackEvent, { PLAYBACK_STOPPED: 0, PLAYBACK_PLAYING: 1, PLAYBACK_PAUSED: 2 });
+globalThis.MediaPropertiesEvent = class MediaPropertiesEvent {
+    constructor() { this.title = ''; this.artist = ''; this.subTitle = ''; this.albumTitle = ''; this.albumArtist = ''; this.genres = []; this.contentType = ''; }
+};
+globalThis.MediaThumbnailEvent = class MediaThumbnailEvent {
+    constructor() { this.primaryColor = new Vec3(0, 0, 0); this.secondaryColor = new Vec3(0, 0, 0); this.tertiaryColor = new Vec3(0, 0, 0); this.highContrastColor = new Vec3(1, 1, 1); this.textColor = new Vec3(1, 1, 1); }
+};
+globalThis.MediaTimelineEvent = class MediaTimelineEvent {
+    constructor() { this.position = 0; this.duration = 0; }
+};
 
 // Animation / hierarchy API: accepted and inert (the renderer drives animation itself).
 globalThis.__animStub = function () {
@@ -250,6 +294,44 @@ globalThis.__animStub = function () {
     };
     return a;
 };
+globalThis.__parents = {};
+// 4x4 matrix, column-major like the engine's (`m[12..14]` is the translation).
+globalThis.Mat4 = class Mat4 {
+    constructor(m) { this.m = m ? Array.from(m) : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; }
+    static identity() { return new Mat4(); }
+    copy() { return new Mat4(this.m); }
+    identity() { this.m = new Mat4().m; return this; }
+    multiply(o) {
+        const a = this.m, b = o.m, r = new Array(16).fill(0);
+        for (let c = 0; c < 4; c++) for (let rw = 0; rw < 4; rw++) {
+            for (let k = 0; k < 4; k++) r[c * 4 + rw] += a[k * 4 + rw] * b[c * 4 + k];
+        }
+        return new Mat4(r);
+    }
+    translation(v) { if (v === undefined) return new Vec3(this.m[12], this.m[13], this.m[14]); const r = this.copy(); r.m[12] += v.x; r.m[13] += v.y; r.m[14] += v.z; return r; }
+    scale(v) { if (v === undefined) return new Vec3(Math.hypot(this.m[0], this.m[1], this.m[2]), Math.hypot(this.m[4], this.m[5], this.m[6]), Math.hypot(this.m[8], this.m[9], this.m[10])); const s = new Mat4(); s.m[0] = v.x; s.m[5] = v.y; s.m[10] = v.z; return this.multiply(s); }
+    transformPoint(v) { const m = this.m; return new Vec3(m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12], m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13], m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]); }
+    toString() { return this.m.join(' '); }
+};
+globalThis.__localMatrix = function (l) {
+    const d = Math.PI / 180, a = l.angles || new Vec3(0, 0, 0), s = l.scale || new Vec3(1, 1, 1), o = l.origin || new Vec3(0, 0, 0);
+    const cx = Math.cos(a.x * d), sx = Math.sin(a.x * d), cy = Math.cos(a.y * d), sy = Math.sin(a.y * d), cz = Math.cos(a.z * d), sz = Math.sin(a.z * d);
+    // R = Rz * Ry * Rx
+    const r00 = cz * cy, r01 = cz * sy * sx - sz * cx, r02 = cz * sy * cx + sz * sx;
+    const r10 = sz * cy, r11 = sz * sy * sx + cz * cx, r12 = sz * sy * cx - cz * sx;
+    const r20 = -sy, r21 = cy * sx, r22 = cy * cx;
+    return new Mat4([r00 * s.x, r10 * s.x, r20 * s.x, 0, r01 * s.y, r11 * s.y, r21 * s.y, 0, r02 * s.z, r12 * s.z, r22 * s.z, 0, o.x, o.y, o.z, 1]);
+};
+globalThis.__videoStub = function () {
+    const v = { _playing: false, _pos: 0, rate: 1, volume: 1, duration: 0 };
+    v.play = function () { v._playing = true; };
+    v.pause = function () { v._playing = false; };
+    v.stop = function () { v._playing = false; v._pos = 0; };
+    v.isPlaying = function () { return v._playing; };
+    v.setCurrentTime = function (t) { v._pos = t; };
+    v.getCurrentTime = function () { return v._pos; };
+    return v;
+};
 globalThis.__layerStubs = function () {
     return {
         getAnimation() { return globalThis.__animStub(); },
@@ -257,8 +339,25 @@ globalThis.__layerStubs = function () {
         getTextureAnimation() { return globalThis.__animStub(); },
         play() {}, stop() {}, pause() {}, isPlaying() { return false; },
         setVolume() {}, getVolume() { return 1; }, volume: 1,
-        getParent() { return null; },
-        getChildren() { return []; },
+        getTransformMatrix() {
+            let m = globalThis.__localMatrix(this), cur = globalThis.__parents[this.name], hops = 0;
+            while (cur !== undefined && globalThis.__layers[cur] && hops++ < 256) {
+                m = globalThis.__localMatrix(globalThis.__layers[cur]).multiply(m);
+                cur = globalThis.__parents[cur];
+            }
+            return m;
+        },
+        getVideoTexture() { return this.__video || (this.__video = globalThis.__videoStub()); },
+        getParent() {
+            const p = globalThis.__parents[this.name];
+            return p === undefined ? null : (globalThis.__layers[p] || null);
+        },
+        getChildren() {
+            const me = this.name;
+            return Object.keys(globalThis.__parents)
+                .filter((k) => globalThis.__parents[k] === me && globalThis.__layers[k])
+                .map((k) => globalThis.__layers[k]);
+        },
         getBoundingBox() { return null; },
         getInitialLayer() { return this; },
         setParent() {},
@@ -273,9 +372,6 @@ globalThis.__layerStubs = function () {
         size: new Vec2(0, 0), color: new Vec3(1, 1, 1), alpha: 1, visible: true, text: '',
         getEffect() { return { visible: true }; },
     }, globalThis.__layerStubs());
-    globalThis.thisScene.getLayer = function (name) {
-        return globalThis.__layers[name] || (globalThis.__layers[name] = stubLayer(name));
-    };
     globalThis.thisScene.getAnimation = function () { return globalThis.__animStub(); };
     globalThis.thisScene.destroyLayer = function () {};
     globalThis.thisScene.createLayer = function (d) { return stubLayer(typeof d === 'string' ? d : 'layer'); };
@@ -494,6 +590,34 @@ impl SceneScriptEngine {
         let out = self.context.with(|ctx| f(&ctx));
         *self.deadline.lock() = None;
         out
+    }
+
+    /// Records the layer hierarchy (`(child key, parent key)`) for `getParent()/getChildren()`.
+    /// `group_keys` are transform-only parents: reachable through `getParent()` but not
+    /// through `thisScene.getLayer()/enumerateLayers()`.
+    pub fn set_layer_hierarchy(
+        &self,
+        parents: &[(String, String)],
+        group_keys: &[String],
+        ids: &[(String, i32)],
+    ) -> anyhow::Result<()> {
+        let ids_json = serde_json::to_string(&ids.iter().cloned().collect::<Vec<_>>())?;
+        let map: std::collections::BTreeMap<&str, &str> = parents
+            .iter()
+            .map(|(c, p)| (c.as_str(), p.as_str()))
+            .collect();
+        let map_json = serde_json::to_string(&map)?;
+        let groups_json = serde_json::to_string(group_keys)?;
+        self.guarded(INIT_BUDGET, |ctx| {
+            eval_js::<()>(
+                ctx,
+                format!(
+                    "globalThis.__parents = {map_json};
+                     for (const [k, id] of {ids_json}) if (globalThis.__layers[k]) globalThis.__layers[k].id = id;
+                     for (const g of {groups_json}) if (globalThis.__layers[g]) globalThis.__layers[g].__group = true;"
+                ),
+            )
+        })
     }
 
     pub fn register_layer(
@@ -834,6 +958,7 @@ impl SceneScriptEngine {
                 "(function() {{
                     engine.frametime = {dt};
                     engine.runtime = {runtime};
+                    globalThis.__fireTimers();
                     input.cursorWorldPosition.x = {cx};
                     input.cursorWorldPosition.y = {cy};
                     const L = [{left_csv}];
@@ -1252,5 +1377,87 @@ mod tests {
                 "0"
             )
             .is_err());
+    }
+
+    fn run(e: &SceneScriptEngine, slot: &str, layer: &str, body: &str) -> String {
+        e.register_property_script(slot, layer, body, "0").unwrap();
+        step(e)[slot].clone()
+    }
+
+    #[test]
+    fn get_layer_unknown_is_null_and_hierarchy_works() {
+        let e = engine();
+        e.register_layer("child", [1.0, 2.0, 0.0], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_layer("grp", [10.0, 0.0, 0.0], [2.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.set_layer_hierarchy(
+            &[("child".into(), "grp".into())],
+            &["grp".into()],
+            &[("child".into(), 7)],
+        )
+        .unwrap();
+        let out = run(
+            &e,
+            "h",
+            "child",
+            "export function update() { return [thisScene.getLayer('nope') === null,\
+             thisScene.getLayer('grp') === null, thisLayer.getParent().name,\
+             thisLayer.getParent().getChildren().length, thisLayer.getParent().getParent() === null,\
+             thisScene.getLayerByID(7).name, thisScene.enumerateLayers().length,\
+             thisLayer.getTransformMatrix().m[12]].join(','); }",
+        );
+        assert_eq!(out, "true,true,grp,1,true,child,1,12");
+    }
+
+    #[test]
+    fn timers_fire_and_cancel_with_function_handle() {
+        let e = engine();
+        e.register_property_script(
+            "t",
+            "L",
+            "let n = 0; let stop;\
+             engine.setTimeout(() => { n += 10; }, 500);\
+             stop = engine.setTimeout(() => { n += 1000; }, 500); stop();\
+             engine.setInterval(() => { n += 1; }, 1000);\
+             export function update() { return n; }",
+            "0",
+        )
+        .unwrap();
+        let at = |t: f32| e.step_frame(0.016, t, [0.0; 3], &Z64, &Z64).unwrap()["t"].clone();
+        assert_eq!(at(0.1), "0");
+        assert_eq!(at(0.6), "10");
+        assert_eq!(at(1.2), "11");
+    }
+
+    #[test]
+    fn media_classes_and_video_texture_exist() {
+        let e = engine();
+        e.register_layer("v", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        let out = run(
+            &e,
+            "m",
+            "v",
+            "export function update() { const ev = new MediaPlaybackEvent(MediaPlaybackEvent.PLAYBACK_STOPPED);\
+             new MediaPropertiesEvent(); new MediaThumbnailEvent(); new MediaTimelineEvent();\
+             const vt = thisLayer.getVideoTexture(); vt.play(); const p = vt.isPlaying(); vt.pause();\
+             return ev.state + ':' + p + ':' + vt.isPlaying(); }",
+        );
+        assert_eq!(out, "0:true:false");
+    }
+
+    #[test]
+    fn mat4_multiply_and_translation() {
+        let e = engine();
+        let out = run(
+            &e,
+            "x",
+            "L",
+            "export function update() { const a = new Mat4().translation(new Vec3(1, 2, 3));\
+             const b = a.multiply(new Mat4().scale(new Vec3(2, 2, 2)));\
+             return b.transformPoint(new Vec3(1, 1, 1)).toString() + '|' + b.scale().x; }",
+        );
+        assert_eq!(out, "3 4 5|2");
     }
 }

@@ -496,3 +496,11 @@ fn custom_vertex_shaders_that_forward_positions_get_pixel_space_quads() {
     let clip = "void main() {\n\tgl_Position = vec4(a_Position, 1.0);\n\tv_Pos = a_Position;\n}\n";
     assert!(!vertex_wants_pixel_positions(clip));
 }
+
+#[test]
+fn additive_light_blend_mode_31_uses_the_backdrop_blend_path() {
+    use truongpaper_renderer::scene_renderer::{is_color_blend_mode, SCENE_COMPOSITE_WGSL};
+    assert!(is_color_blend_mode(31));
+    assert!(SCENE_COMPOSITE_WGSL.contains("case 31: { rgb = b + l; }"));
+    assert!(!is_color_blend_mode(0) && !is_color_blend_mode(30));
+}

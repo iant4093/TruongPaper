@@ -272,3 +272,45 @@ fn bundled_tint_recolours_the_image() {
         "expected red, got {c:?}"
     );
 }
+
+#[test]
+fn bundled_xray_reveals_a_spot_at_the_pointer_using_size_multiply_and_mask() {
+    let grey = |_x: u32, _y: u32| [64, 64, 64, 255];
+    let t = TempDir::new("gpu-bundled-xray-off");
+    let Some((plain, _)) = render(&t, grey, "[]") else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let run = |name: &str, values: &str| {
+        let t = TempDir::new(name);
+        let effects = format!(
+            r#"[ {{ "file": "effects/xray/effect.json",
+                    "passes": [ {{ "constantshadervalues": {values} }} ] }} ]"#
+        );
+        let (px, diag) = render(&t, grey, &effects).unwrap();
+        assert_no_skips(&diag);
+        px
+    };
+    // Pointer rests at the centre: the white blend texture shows there, not in the corner.
+    let spot = run("gpu-bundled-xray-on", r#"{ "size": 0.5, "multiply": 1 }"#);
+    assert!(
+        at(&spot, 32, 32)[0] > at(&plain, 32, 32)[0] + 0.2,
+        "centre should be revealed, got {:?}",
+        at(&spot, 32, 32)
+    );
+    assert!(
+        (at(&spot, 2, 2)[0] - at(&plain, 2, 2)[0]).abs() < 0.01,
+        "corner stays untouched"
+    );
+    // A smaller size shrinks the revealed spot.
+    let small = run("gpu-bundled-xray-small", r#"{ "size": 0.15, "multiply": 1 }"#);
+    assert!(
+        at(&small, 44, 32)[0] < at(&spot, 44, 32)[0] - 0.05,
+        "smaller size reveals less off-centre"
+    );
+    // multiply 0 and size 0 both switch it off.
+    let none = run("gpu-bundled-xray-mult0", r#"{ "size": 0.5, "multiply": 0 }"#);
+    assert!((at(&none, 32, 32)[0] - at(&plain, 32, 32)[0]).abs() < 0.01);
+    let off = run("gpu-bundled-xray-size0", r#"{ "size": 0, "multiply": 1 }"#);
+    assert!((at(&off, 32, 32)[0] - at(&plain, 32, 32)[0]).abs() < 0.01);
+}

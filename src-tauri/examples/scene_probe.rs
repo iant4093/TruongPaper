@@ -206,7 +206,15 @@ async fn render() -> anyhow::Result<()> {
         runtime.graph().layers.len(),
         warnings.len()
     );
-    let (width, height) = dims("PROBE_OUT", (1280, 720));
+    let (out_w, out_h) = dims("PROBE_OUT", (1280, 720));
+    // The desktop host shows a scene with `FitMode::Fill` (cover), so a non-16:9 orthographic
+    // scene (e.g. 5760x1080) is cropped, not squeezed. The probe renders a cover-sized target and
+    // crops its centre; PROBE_STRETCH=1 keeps the old squeezed output.
+    let (width, height) = if std::env::var("PROBE_STRETCH").is_ok() {
+        (out_w, out_h)
+    } else {
+        cover_render_size(runtime.graph().scene_size.to_array(), out_w, out_h)
+    };
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
@@ -379,6 +387,8 @@ async fn render() -> anyhow::Result<()> {
         .map_async(wgpu::MapMode::Read, |result| result.unwrap());
     device.poll(wgpu::Maintain::Wait);
     let pixels = output.slice(..).get_mapped_range().to_vec();
+    let pixels = crop_center(&pixels, width, height, out_w, out_h);
+    let (width, height) = (out_w, out_h);
     image::save_buffer(&args[3], &pixels, width, height, image::ColorType::Rgba8)?;
     if let Ok(reference) = std::env::var("PROBE_DIFF") {
         let other = image::open(&reference)?.to_rgba8();
@@ -393,4 +403,31 @@ async fn render() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Render-target size that covers `out_w`x`out_h` with the scene's aspect ratio. The width is a
+/// multiple of 64 so `bytes_per_row` stays 256-byte aligned for the readback copy.
+fn cover_render_size(scene: [f32; 2], out_w: u32, out_h: u32) -> (u32, u32) {
+    let aspect = (scene[0] / scene[1].max(1.0)).max(0.001);
+    let out_aspect = out_w as f32 / out_h as f32;
+    let (w, h) = if aspect > out_aspect {
+        ((out_h as f32 * aspect).round() as u32, out_h)
+    } else {
+        (out_w, (out_w as f32 / aspect).round() as u32)
+    };
+    (w.max(out_w).div_ceil(64) * 64, h.max(out_h).min(8192))
+}
+
+/// Centre `out_w`x`out_h` crop of a tightly packed RGBA8 `width`x`height` image.
+fn crop_center(pixels: &[u8], width: u32, height: u32, out_w: u32, out_h: u32) -> Vec<u8> {
+    if (width, height) == (out_w, out_h) {
+        return pixels.to_vec();
+    }
+    let (x0, y0) = ((width - out_w) / 2, (height - out_h) / 2);
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for y in y0..y0 + out_h {
+        let start = ((y * width + x0) * 4) as usize;
+        out.extend_from_slice(&pixels[start..start + (out_w * 4) as usize]);
+    }
+    out
 }

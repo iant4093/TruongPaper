@@ -16,6 +16,7 @@ pub mod scene_math;
 pub mod scene_renderer;
 pub mod shader_compat;
 pub mod shader_preprocessor;
+pub mod sprite;
 pub mod text;
 pub mod timeline;
 pub mod video_runtime;

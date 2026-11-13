@@ -578,12 +578,14 @@ impl ParticleSystemInstance {
                         p.rotation += p.angular_velocity * dt;
                     }
                     "alphafade" => {
+                        // Wallpaper Engine's defaults are 0.5 / 0.5 (linux-wallpaperengine's
+                        // ObjectParser agrees): fade in over the first half, out over the second.
                         let fade_in =
-                            op.get("fadeintime").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
+                            op.get("fadeintime").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
                         let fade_out = op
                             .get("fadeouttime")
                             .and_then(|v| v.as_f64())
-                            .unwrap_or(0.8) as f32;
+                            .unwrap_or(0.5) as f32;
                         let factor = if life_frac < fade_in && fade_in > 0.0 {
                             life_frac / fade_in
                         } else if life_frac > fade_out && fade_out < 1.0 {

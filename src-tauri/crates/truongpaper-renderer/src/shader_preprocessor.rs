@@ -658,6 +658,7 @@ fn translate_we_shader_pair_strict(
     let linked_frag = apply_truncating_assignment_compatibility(&linked_frag);
     let linked_vert = apply_scalar_conversion_compatibility(&linked_vert);
     let linked_frag = apply_scalar_conversion_compatibility(&linked_frag);
+    let linked_frag = crate::shader_compat::make_written_varyings_mutable(&linked_frag);
 
     let (vert_450, frag_450, uniform_fields, ubo_size) =
         upgrade_to_naga_glsl450(&linked_vert, &linked_frag);

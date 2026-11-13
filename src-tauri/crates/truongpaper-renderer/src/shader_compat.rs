@@ -11,7 +11,7 @@
 //! - mixed-width arguments to `mix` / `step` / `clamp` / ... (HLSL truncates to the shortest
 //!   vector), through an overload set that is only added when the plain translation fails.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -34,6 +34,7 @@ pub fn fixup_hlsl_source(body: &str) -> String {
         .captures_iter(body)
         .map(|c| c[1].to_string())
         .collect();
+    let widths = vector_widths(body);
     let main_variable = re!(r"\b(?:vec[234]|float[234]?|int)\s+main\b").is_match(body);
 
     let mut out_lines: Vec<String> = Vec::new();
@@ -92,6 +93,10 @@ pub fn fixup_hlsl_source(body: &str) -> String {
             }
         }
         l = comparison_arithmetic(&l);
+        if !l.trim_start().starts_with('#') {
+            l = negate_non_bool(&l);
+            l = convert_vector_statement(&l, &widths);
+        }
 
         let code = l.split("//").next().unwrap_or("");
         depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
@@ -137,6 +142,271 @@ fn prune_unused_blend_helpers(lines: &mut Vec<String>) {
             break;
         }
     }
+}
+
+/// Width of every vector variable declared in the shader; names declared with two different
+/// widths (shadowing) are left out.
+fn vector_widths(body: &str) -> HashMap<String, usize> {
+    let decl = re!(
+        r"(?m)^\s*(?:(?:varying|uniform|in|out|attribute|const)\s+)*(?:(?:highp|mediump|lowp)\s+)?(vec[234]|float[234]?|int|uint|bool|mat[234]|[ib]vec[234])\s+(\w+)\s*[;=,]"
+    );
+    let mut widths: HashMap<String, Option<usize>> = HashMap::new();
+    for c in decl.captures_iter(body) {
+        // Scalars and matrices are recorded too so a shadowing declaration cancels the entry.
+        let width: usize = match &c[1] {
+            "float" | "int" | "uint" | "bool" => 1,
+            t if t.starts_with("vec") || t.starts_with("float") => {
+                t[t.len() - 1..].parse().unwrap_or(0)
+            }
+            _ => 0,
+        };
+        widths
+            .entry(c[2].to_string())
+            .and_modify(|w| {
+                if *w != Some(width) {
+                    *w = None;
+                }
+            })
+            .or_insert(Some(width));
+    }
+    widths
+        .into_iter()
+        .filter_map(|(name, w)| w.map(|w| (name, w)))
+        .collect()
+}
+
+/// HLSL converts a float to bool for `!x`; GLSL requires a bool operand. In value positions
+/// (call arguments, ternary branches, arithmetic) the result is a float again, as in HLSL.
+fn negate_non_bool(line: &str) -> String {
+    let negation = re!(r"!\s*([A-Za-z_]\w*)\b(\s*[(.\[])?");
+    let bool_decl = line.trim_start().starts_with("bool ");
+    let mut out = String::with_capacity(line.len() + 16);
+    let mut last = 0;
+    for c in negation.captures_iter(line) {
+        let whole = c.get(0).expect("match");
+        out.push_str(&line[last..whole.start()]);
+        last = whole.end();
+        if c.get(2).is_some() || matches!(&c[1], "true" | "false") {
+            out.push_str(whole.as_str());
+            continue;
+        }
+        let before = line[..whole.start()].trim_end();
+        let value_context = !bool_decl
+            && (before.ends_with([',', '?', ':', '*', '+', '/', '-', '='])
+                && !before.ends_with("&&")
+                && !before.ends_with("||")
+                || (before.ends_with('(')
+                    && before[..before.len() - 1]
+                        .trim_end()
+                        .chars()
+                        .last()
+                        .is_some_and(|p| p.is_ascii_alphanumeric() || p == '_')
+                    && !before[..before.len() - 1].trim_end().ends_with("if")
+                    && !before[..before.len() - 1].trim_end().ends_with("while")));
+        if value_context {
+            out.push_str(&format!("float(!bool({}))", &c[1]));
+        } else {
+            out.push_str(&format!("!bool({})", &c[1]));
+        }
+    }
+    out.push_str(&line[last..]);
+    out
+}
+
+/// Statement-level HLSL conversions around vector widths:
+///
+/// - `vec2 a = 0.0, b = x;` -> a scalar literal initialising a vector gets its constructor;
+/// - `vec2 da = v4 * s;` / `da = v4 * s;` / `da.xy *= v4;` -> a wider vector variable used
+///   directly as an operand is truncated to the target width.
+fn convert_vector_statement(line: &str, widths: &HashMap<String, usize>) -> String {
+    let decl = re!(r"^(\s*)(?:const\s+)?(?:vec|float)([234])\s+(.+?)\s*;\s*(//.*)?$");
+    let assign = re!(
+        r"^(\s*)(\w+)(\.[xyzwrgba]{2,4})?\s*(=|\+=|-=|\*=|/=)\s*([^=].*?)\s*;\s*(//.*)?$"
+    );
+    if let Some(c) = decl.captures(line) {
+        if !c[3].contains('=') {
+            return line.to_string();
+        }
+        let n: usize = c[2].parse().unwrap_or(0);
+        let ty = line.trim_start().split_whitespace().next().unwrap_or("");
+        let ty = if ty == "const" {
+            line.trim_start().split_whitespace().nth(1).unwrap_or("")
+        } else {
+            ty
+        };
+        let vec_ty = format!("vec{n}");
+        let declarators: Vec<String> = split_top_level(&c[3])
+            .into_iter()
+            .map(|d| match d.split_once('=') {
+                Some((name, init)) if !init.starts_with('=') => {
+                    let init = init.trim();
+                    if re!(r"^[-+]?[0-9]*\.?[0-9]+f?$").is_match(init) {
+                        format!("{} = {vec_ty}({init})", name.trim())
+                    } else {
+                        format!("{} = {}", name.trim(), truncate_operands(init, n, widths))
+                    }
+                }
+                _ => d.trim().to_string(),
+            })
+            .collect();
+        let comment = c.get(4).map(|m| format!(" {}", m.as_str())).unwrap_or_default();
+        let konst = if line.trim_start().starts_with("const ") {
+            "const "
+        } else {
+            ""
+        };
+        return format!("{}{konst}{ty} {};{comment}", &c[1], declarators.join(", "));
+    }
+    if let Some(c) = assign.captures(line) {
+        let n = match c.get(3) {
+            Some(sw) => sw.as_str().len() - 1,
+            None => match widths.get(&c[2]) {
+                Some(&w) => w,
+                None => return line.to_string(),
+            },
+        };
+        let rhs = truncate_operands(&c[5], n, widths);
+        if rhs == c[5] {
+            return line.to_string();
+        }
+        let comment = c.get(6).map(|m| format!(" {}", m.as_str())).unwrap_or_default();
+        return format!(
+            "{}{}{} {} {rhs};{comment}",
+            &c[1],
+            &c[2],
+            c.get(3).map(|m| m.as_str()).unwrap_or(""),
+            &c[4]
+        );
+    }
+    line.to_string()
+}
+
+/// Splits on commas that are not nested in brackets.
+fn split_top_level(s: &str) -> Vec<&str> {
+    let (mut parts, mut depth, mut start) = (Vec::new(), 0i32, 0usize);
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Appends a swizzle to every bare wider-vector variable of `expr` that is not inside a call or
+/// constructor (those take the full vector legitimately).
+fn truncate_operands(expr: &str, width: usize, widths: &HashMap<String, usize>) -> String {
+    if !(2..=4).contains(&width) {
+        return expr.to_string();
+    }
+    let bytes = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len() + 8);
+    let mut call_depth = 0usize;
+    let mut stack: Vec<bool> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if ch == '(' {
+            let prev = expr[..i].trim_end().chars().last();
+            let is_call = prev.is_some_and(|p| p.is_ascii_alphanumeric() || p == '_');
+            stack.push(is_call);
+            call_depth += usize::from(is_call);
+        } else if ch == ')' {
+            if stack.pop() == Some(true) {
+                call_depth -= 1;
+            }
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = i;
+            while i < bytes.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            let word = &expr[start..i];
+            out.push_str(word);
+            let before = expr[..start].trim_end().chars().last();
+            let after = expr[i..].trim_start().chars().next();
+            let bare = before != Some('.') && !matches!(after, Some('(' | '.' | '['));
+            if let Some(&w) = widths.get(word) {
+                if bare && call_depth == 0 && w > width {
+                    out.push('.');
+                    out.push_str(&"xyzw"[..width]);
+                }
+            }
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            // Numbers (including `1.0e-3`) are copied whole so exponent letters stay intact.
+            let start = i;
+            while i < bytes.len()
+                && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'.')
+            {
+                i += 1;
+            }
+            out.push_str(&expr[start..i]);
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// Fragment shaders may assign to their varyings (HLSL inputs are writable copies); GLSL `in`
+/// variables are read-only. Every written varying keeps its declaration (so linking by name still
+/// works) and all other uses move to a writable global that `main` initialises from it.
+pub fn make_written_varyings_mutable(frag: &str) -> String {
+    let decl = re!(r"(?m)^\s*(?:varying|in)\s+(?:(?:highp|mediump|lowp)\s+)?(\w+)\s+(\w+)\s*;");
+    let mut init = String::new();
+    let mut globals = String::new();
+    let mut result = frag.to_string();
+    for c in decl.captures_iter(frag) {
+        let (ty, name) = (&c[1], &c[2]);
+        let written = Regex::new(&format!(
+            r"\b{name}\b(?:\s*\.\s*\w+)?\s*(?:=[^=]|\+=|-=|\*=|/=)"
+        ))
+        .map(|r| r.is_match(frag))
+        .unwrap_or(false);
+        if !written {
+            continue;
+        }
+        let local = format!("tp_local_{name}");
+        let word = Regex::new(&format!(r"\b{name}\b")).expect("valid regex");
+        result = result
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                if t.starts_with('#') || decl.is_match(l) {
+                    l.to_string()
+                } else {
+                    word.replace_all(l, local.as_str()).into_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        result.push('\n');
+        globals.push_str(&format!("{ty} {local};\n"));
+        init.push_str(&format!("{local} = {name}; "));
+    }
+    if init.is_empty() {
+        return frag.to_string();
+    }
+    let Some(at) = re!(r"\bvoid\s+main\s*\(\s*\)\s*\{").find(&result).map(|m| m.end()) else {
+        return frag.to_string();
+    };
+    let entry_start = re!(r"\bvoid\s+main\s*\(").find(&result).map(|m| m.start()).unwrap_or(at);
+    format!(
+        "{}{globals}{}{init}{}",
+        &result[..entry_start],
+        &result[entry_start..at],
+        &result[at..]
+    )
 }
 
 /// Whether a `const` initializer is a constant expression: no uniform and no function call other
@@ -233,7 +503,7 @@ pub fn lax_builtin_overloads(source: &str) -> String {
                 args.join(", ")
             ));
         }
-        routes.push_str(&format!("#define {name} {tp}\n"));
+        routes.push_str(&format!("#undef {name}\n#define {name} {tp}\n"));
     }
     format!("{defs}{routes}")
 }

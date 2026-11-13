@@ -780,3 +780,29 @@ fn depth_test_solid_layer_renders_as_a_solid_without_any_model_file() {
     }
     assert_eq!(g.layers[0].transform.size, Vec2::new(1920.0, 1080.0));
 }
+
+#[test]
+fn model_objects_and_scripted_groups_become_layers() {
+    let t = TempDir::new("model-objects");
+    let g = load(
+        &t,
+        r#"{ "camera": { "center": "0 0 0", "eye": "0 0 10", "up": "0 1 0" },
+             "general": { "orthogonalprojection": null },
+             "objects": [
+            { "id": 1, "name": "Pivot",
+              "scale": { "script": "export function update(v) { return 2; }", "value": "1 1 1" } },
+            { "id": 2, "name": "Plain group" },
+            { "id": 3, "name": "Ball", "parent": 1, "model": "models/ball/ball.mdl",
+              "origin": "1 0 0", "scale": "0.5 0.5 0.5" }
+        ] }"#,
+        None,
+    );
+    let kinds: Vec<&str> = g.layers.iter().map(|l| l.kind.name()).collect();
+    assert_eq!(kinds, ["group", "model"]);
+    let mut g = g;
+    // A bare number returned for `scale` scales uniformly and reaches the child model.
+    assert!(g.apply_script_output("Pivot/scale", "2"));
+    assert_eq!(g.layers[0].transform.scale, Vec3::splat(2.0));
+    let p = g.layers[1].world_matrix.transform_point3(Vec3::ZERO);
+    assert!(p.abs_diff_eq(Vec3::new(2.0, 0.0, 0.0), 1e-5), "{p:?}");
+}

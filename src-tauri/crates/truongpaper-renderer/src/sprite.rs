@@ -104,6 +104,108 @@ impl SpriteSheet {
     }
 }
 
+/// Largest packed sheet side. wgpu's default `max_texture_dimension_2d` is 8192.
+pub const MAX_PACKED_DIMENSION: u32 = 8192;
+/// Largest packed RGBA sheet in bytes; bigger sheets are downscaled by powers of two.
+pub const MAX_PACKED_BYTES: usize = 160 * 1024 * 1024;
+
+/// Number of atlas images a frame table refers to (`max(image_id) + 1`).
+pub fn sprite_atlas_count(frames: &[TexFrameInfo]) -> usize {
+    frames
+        .iter()
+        .map(|f| f.image_id.max(0) as usize + 1)
+        .max()
+        .unwrap_or(1)
+}
+
+/// Several atlas images packed into one RGBA texture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedAtlas {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Packs the atlas images of a multi-image sprite sheet (frames carry an `image_id`) into one
+/// texture: a grid of `w x h` slots (the first atlas's size; a smaller atlas is padded with
+/// transparency), downscaled by a power of two when the result would exceed
+/// [`MAX_PACKED_DIMENSION`] or [`MAX_PACKED_BYTES`]. Frame rectangles are moved into their
+/// slot and scaled to match. `None` when the atlases cannot be packed (frames unchanged).
+pub fn pack_sprite_atlases(
+    parts: &[(Vec<u8>, u32, u32)],
+    frames: &mut [TexFrameInfo],
+) -> Option<PackedAtlas> {
+    let &(_, w, h) = parts.first()?;
+    if w == 0
+        || h == 0
+        || parts.iter().any(|(rgba, pw, ph)| {
+            *pw > w || *ph > h || rgba.len() < (*pw as usize) * (*ph as usize) * 4
+        })
+    {
+        return None;
+    }
+    let n = parts.len() as u32;
+    let mut shift = 0u32;
+    let (cols, rows, sw, sh) = loop {
+        let (sw, sh) = (w >> shift, h >> shift);
+        if sw == 0 || sh == 0 {
+            return None;
+        }
+        let best = (1..=n)
+            .map(|cols| (cols, n.div_ceil(cols)))
+            .filter(|(c, r)| c * sw <= MAX_PACKED_DIMENSION && r * sh <= MAX_PACKED_DIMENSION)
+            .min_by_key(|(c, r)| (c * sw).max(r * sh));
+        if let Some((c, r)) = best {
+            let bytes = (c * sw) as usize * (r * sh) as usize * 4;
+            if bytes <= MAX_PACKED_BYTES {
+                break (c, r, sw, sh);
+            }
+        }
+        shift += 1;
+    };
+    let (out_w, out_h) = (cols * sw, rows * sh);
+    let mut rgba = vec![0u8; out_w as usize * out_h as usize * 4];
+    let step = 1usize << shift;
+    for (i, (src, pw, ph)) in parts.iter().enumerate() {
+        let (col, row) = (i as u32 % cols, i as u32 / cols);
+        let (dw, dh) = (*pw as usize / step, *ph as usize / step);
+        for y in 0..dh {
+            for x in 0..dw {
+                let mut acc = [0u32; 4];
+                for sy in 0..step {
+                    let base = ((y * step + sy) * *pw as usize + x * step) * 4;
+                    for sx in 0..step {
+                        for c in 0..4 {
+                            acc[c] += src[base + sx * 4 + c] as u32;
+                        }
+                    }
+                }
+                let dst =
+                    (((row * sh) as usize + y) * out_w as usize + (col * sw) as usize + x) * 4;
+                let area = (step * step) as u32;
+                for c in 0..4 {
+                    rgba[dst + c] = (acc[c] / area) as u8;
+                }
+            }
+        }
+    }
+    let scale = 1.0 / step as f32;
+    for f in frames.iter_mut() {
+        let id = f.image_id.clamp(0, n as i32 - 1) as u32;
+        f.x = f.x * scale + (id % cols * sw) as f32;
+        f.y = f.y * scale + (id / cols * sh) as f32;
+        f.width *= scale;
+        f.width_y *= scale;
+        f.height_x *= scale;
+        f.height *= scale;
+    }
+    Some(PackedAtlas {
+        rgba,
+        width: out_w,
+        height: out_h,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +291,56 @@ mod tests {
             assert!(src.contains("g_Texture0Rotation"), "{name}");
             assert!(src.contains("g_Texture0Translation"), "{name}");
         }
+    }
+    fn atlas_frame(id: i32, x: f32, y: f32) -> TexFrameInfo {
+        TexFrameInfo {
+            image_id: id,
+            ..frame(x, y, 2.0, 2.0, 0.1)
+        }
+    }
+
+    #[test]
+    fn atlas_count_follows_highest_image_id() {
+        let frames = [atlas_frame(0, 0.0, 0.0), atlas_frame(2, 0.0, 0.0)];
+        assert_eq!(sprite_atlas_count(&frames), 3);
+        assert_eq!(sprite_atlas_count(&[]), 1);
+    }
+
+    #[test]
+    fn packs_atlases_into_slots_and_moves_frames() {
+        let parts = vec![(vec![1; 4 * 4 * 4], 4, 4), (vec![2; 4 * 2 * 4], 4, 2)];
+        let mut frames = [atlas_frame(0, 2.0, 0.0), atlas_frame(1, 0.0, 2.0)];
+        let p = pack_sprite_atlases(&parts, &mut frames).unwrap();
+        // Two 4x4 slots stacked (ties keep one column); the short second atlas is padded.
+        assert_eq!((p.width, p.height), (4, 8));
+        assert_eq!(p.rgba[4 * 4 * 4], 2);
+        assert_eq!(p.rgba[7 * 4 * 4], 0);
+        assert_eq!((frames[0].x, frames[0].y), (2.0, 0.0));
+        assert_eq!((frames[1].x, frames[1].y), (0.0, 6.0));
+    }
+
+    #[test]
+    fn oversized_sheets_are_downscaled() {
+        // 16384-wide atlases exceed the side limit, so they are halved and stacked.
+        let w = MAX_PACKED_DIMENSION * 2;
+        let parts = vec![
+            (vec![255; w as usize * 2 * 4], w, 2),
+            (vec![0; w as usize * 2 * 4], w, 2),
+        ];
+        let mut frames = [atlas_frame(1, 64.0, 0.0)];
+        let p = pack_sprite_atlases(&parts, &mut frames).unwrap();
+        assert_eq!((p.width, p.height), (MAX_PACKED_DIMENSION, 2));
+        assert_eq!(frames[0].width, 1.0);
+        assert_eq!((frames[0].x, frames[0].y), (32.0, 1.0));
+        assert_eq!(p.rgba[0], 255);
+        assert_eq!(p.rgba[MAX_PACKED_DIMENSION as usize * 4], 0);
+    }
+
+    #[test]
+    fn larger_later_atlas_is_rejected() {
+        let parts = vec![(vec![0; 2 * 2 * 4], 2, 2), (vec![0; 4 * 4 * 4], 4, 4)];
+        let mut frames = [atlas_frame(1, 1.0, 1.0)];
+        assert!(pack_sprite_atlases(&parts, &mut frames).is_none());
+        assert_eq!(frames[0].x, 1.0);
     }
 }

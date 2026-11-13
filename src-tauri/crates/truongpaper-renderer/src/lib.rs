@@ -12,6 +12,7 @@ pub mod particle_tree;
 pub mod particles;
 pub mod puppet;
 pub mod scene_assets;
+pub mod scene_attachment;
 pub mod scene_camera;
 pub mod scene_graph;
 pub mod scene_math;

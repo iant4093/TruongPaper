@@ -160,4 +160,20 @@ mod tests {
         .unwrap();
         assert_eq!(s.frame_index(5.0), 0);
     }
+
+    #[test]
+    fn every_base_image_vertex_shader_applies_the_frame_mapping() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/core-assets/assets/shaders");
+        for name in [
+            "genericimage.vert",
+            "genericimage2.vert",
+            "genericimage3.vert",
+            "genericimage4.vert",
+        ] {
+            let src = std::fs::read_to_string(dir.join(name)).unwrap();
+            assert!(src.contains("g_Texture0Rotation"), "{name}");
+            assert!(src.contains("g_Texture0Translation"), "{name}");
+        }
+    }
 }

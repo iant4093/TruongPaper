@@ -189,9 +189,10 @@ pub fn layer_local_projection(size: Vec2) -> Mat4 {
 /// `colorBlendMode` values composited with the backdrop-reading blend shader (Wallpaper
 /// Engine's blend list: 1 darken, 2 multiply, 3 colour burn, 4 linear burn, 5 darker colour,
 /// 6 lighten, 7 screen, 8 colour dodge, 9 linear dodge / add, 10 lighter colour, 11 overlay,
-/// 12 soft light, 13 hard light, 18 difference, 19 exclusion, 20 subtract). 0 is normal.
+/// 12 soft light, 13 hard light, 18 difference, 19 exclusion, 20 subtract, 31 additive light).
+/// 0 is normal.
 pub fn is_color_blend_mode(mode: i32) -> bool {
-    matches!(mode, 1..=13 | 18..=20)
+    matches!(mode, 1..=13 | 18..=20 | 31)
 }
 
 /// Matrix for drawing the clip-space full-frame quad into a composition layer's own FBO.
@@ -691,6 +692,7 @@ fn fs_layer_color(in: VsOut) -> @location(0) vec4<f32> {
         case 13: { rgb = mix(2.0 * b * l, 1.0 - 2.0 * (1.0 - b) * (1.0 - l), step(vec3(0.5), l)); }
         case 18: { rgb = abs(b - l); }
         case 19: { rgb = b + l - 2.0 * b * l; }
+        case 31: { rgb = b + l; }
         default: {}
     }
     return vec4(mix(b, rgb, alpha), dst.a);
@@ -813,6 +815,8 @@ struct GpuTexture {
     uv_scale: [f32; 2],
     tex_format: Option<TexFormat>,
     sprite: Option<std::sync::Arc<SpriteSheet>>,
+    /// `.tex` header flag `ClampUVs`: sample with ClampToEdge instead of Repeat.
+    clamp_uvs: bool,
 }
 
 struct SimpleDraw {
@@ -1112,6 +1116,7 @@ struct DecodedTex {
     uv_scale: [f32; 2],
     format: TexFormat,
     sprite: Option<std::sync::Arc<SpriteSheet>>,
+    clamp_uvs: bool,
 }
 
 /// Result of decoding a `.tex` asset.
@@ -1196,6 +1201,7 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
         uv_scale: [resolution.z / resolution.x, resolution.w / resolution.y],
         format: h_.format,
         sprite,
+        clamp_uvs: h_.flags & truongpaper_we_formats::tex_flags::CLAMP_UVS != 0,
     }))
 }
 
@@ -1329,6 +1335,7 @@ impl SceneRenderer {
             uv_scale: [1.0, 1.0],
             sprite: None,
             tex_format: None,
+            clamp_uvs: false,
         };
         let (clear_tex, clear_view) =
             upload_rgba(device, queue, "scene_transparent", 1, 1, &[0; 4]);
@@ -1339,6 +1346,7 @@ impl SceneRenderer {
             uv_scale: [1.0, 1.0],
             sprite: None,
             tex_format: None,
+            clamp_uvs: false,
         };
         const SPRITE_SIZE: u32 = 32;
         let mut sprite = Vec::with_capacity((SPRITE_SIZE * SPRITE_SIZE * 4) as usize);
@@ -1722,6 +1730,7 @@ impl SceneRenderer {
                         uv_scale: d.uv_scale,
                         tex_format: Some(d.format),
                         sprite: d.sprite,
+                        clamp_uvs: d.clamp_uvs,
                     },
                 );
                 true
@@ -1751,6 +1760,7 @@ impl SceneRenderer {
                         uv_scale: [1.0, 1.0],
                         tex_format: None,
                         sprite: None,
+                        clamp_uvs: false,
                     },
                 );
                 self.video_textures
@@ -1825,7 +1835,7 @@ impl SceneRenderer {
             Some(t) => SlotBinding {
                 view: &t.view,
                 resolution: t.resolution,
-                repeat: true,
+                repeat: !t.clamp_uvs,
             },
             None => SlotBinding {
                 view: &self.transparent.view,

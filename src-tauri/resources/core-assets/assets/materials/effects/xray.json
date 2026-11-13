@@ -8,7 +8,8 @@
 			"cullmode": "nocull",
 			"textures": [
 				null,
-				"util/black"
+				"util/white",
+				"particle/halo_6"
 			]
 		}
 	]

@@ -460,6 +460,42 @@ pub fn json_value_floats(v: &Value) -> Option<Vec<f32>> {
     }
 }
 
+/// Layer id of a `_rt_imageLayerComposite_<id>_a` / `_b` texture name (WE ping-pongs `_a`/`_b`;
+/// both mean the layer's finished image).
+pub fn parse_layer_composite(name: &str) -> Option<i32> {
+    name.strip_prefix("_rt_imageLayerComposite_")
+        .and_then(|n| n.strip_suffix("_a").or_else(|| n.strip_suffix("_b")))
+        .and_then(|id| id.parse().ok())
+}
+
+/// Composite layer ids sampled by the texture slots of a model's material.
+fn model_composite_refs(vfs: &WeVirtualFileSystem, mdl_path: &str) -> Vec<i32> {
+    let Ok(bytes) = vfs.read_bytes(mdl_path) else {
+        return Vec::new();
+    };
+    let Ok(mesh) = truongpaper_we_formats::parse_static_mdl(&bytes) else {
+        return Vec::new();
+    };
+    let Some(material) = vfs
+        .read_string(&mesh.material)
+        .ok()
+        .and_then(|t| MaterialFile::from_json_str(&t).ok())
+    else {
+        return Vec::new();
+    };
+    material
+        .passes
+        .first()
+        .map(|p| {
+            p.textures
+                .iter()
+                .flatten()
+                .filter_map(|n| parse_layer_composite(n))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Maps material `constantshadervalues` (keyed by the uniform comment `material` key, or by the
 /// uniform name) to GLSL uniform names, falling back to each uniform's comment `default`.
 pub fn map_material_constants(
@@ -1867,7 +1903,7 @@ impl SceneRenderer {
                 .then(|| EffectChainPlan::build(vfs, layer, &graph.user_props))
             })
             .collect();
-        let referenced: std::collections::HashSet<_> = plans
+        let mut referenced: std::collections::HashSet<i32> = plans
             .iter()
             .flatten()
             .flat_map(|plan| plan.passes())
@@ -1877,6 +1913,13 @@ impl SceneRenderer {
                 _ => None,
             })
             .collect();
+        // 3D model materials may also sample another layer's composite (a skybox painted by a
+        // hidden image layer).
+        for layer in &graph.layers {
+            if let SceneLayerKind::Model { mdl_path } = &layer.kind {
+                referenced.extend(model_composite_refs(vfs, mdl_path));
+            }
+        }
         for (layer, plan) in graph.layers.iter().zip(&plans) {
             if let (Some(id), Some(plan)) = (layer.id, plan) {
                 if referenced.contains(&id) {
@@ -2079,6 +2122,7 @@ impl SceneRenderer {
             }
         };
         let mut slot_paths = [None, None];
+        let mut slot_outputs: [Option<i32>; 2] = [None, None];
         for (i, slot) in [0usize, 2].into_iter().enumerate() {
             if let Some(name) = pass
                 .textures
@@ -2086,6 +2130,10 @@ impl SceneRenderer {
                 .and_then(|t| t.as_deref())
                 .filter(|s| !s.is_empty())
             {
+                if let Some(id) = parse_layer_composite(name) {
+                    slot_outputs[i] = Some(id);
+                    continue;
+                }
                 let path = material_texture_path(name);
                 // `fail` borrows `warnings` mutably; texture warnings go to a scratch list.
                 let mut tex_warnings = Vec::new();
@@ -2097,14 +2145,26 @@ impl SceneRenderer {
                 }
             }
         }
-        let diffuse = slot_paths[0]
-            .as_ref()
-            .and_then(|p| self.textures.get(p))
-            .map_or(&self.white.view, |t| &t.view);
-        let mask = slot_paths[1]
-            .as_ref()
-            .and_then(|p| self.textures.get(p))
-            .map_or(&self.transparent.view, |t| &t.view);
+        let diffuse = slot_outputs[0]
+            .and_then(|id| self.layer_outputs.get(&id))
+            .map(|t| &t.view)
+            .or_else(|| {
+                slot_paths[0]
+                    .as_ref()
+                    .and_then(|p| self.textures.get(p))
+                    .map(|t| &t.view)
+            })
+            .unwrap_or(&self.white.view);
+        let mask = slot_outputs[1]
+            .and_then(|id| self.layer_outputs.get(&id))
+            .map(|t| &t.view)
+            .or_else(|| {
+                slot_paths[1]
+                    .as_ref()
+                    .and_then(|p| self.textures.get(p))
+                    .map(|t| &t.view)
+            })
+            .unwrap_or(&self.transparent.view);
         let (w, h) = (self.scene.width, self.scene.height);
         let res = self
             .model3d

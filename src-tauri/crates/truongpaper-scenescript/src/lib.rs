@@ -150,10 +150,10 @@ globalThis.input = {
 globalThis.thisScene = {
     getLayer(name) {
         const l = globalThis.__layers[name];
-        return l === undefined || l.__group ? null : l;
+        return l === undefined ? null : l;
     },
     getLayerByID(id) {
-        for (const l of Object.values(globalThis.__layers)) if (!l.__group && l.id === id) return l;
+        for (const l of Object.values(globalThis.__layers)) if (l.id === id) return l;
         return null;
     },
     enumerateLayers() { return Object.values(globalThis.__layers).filter((l) => !l.__group); },
@@ -263,6 +263,7 @@ globalThis.__WEColor = {
             try { t.fn(); } catch (e) { __log('error', `[timer] ${e}`); }
         }
     };
+    globalThis.engine.isScreensaver = function () { return false; };
     globalThis.engine.isRunningInEditor = function () { return false; };
     globalThis.engine.isPortrait = function () { return false; };
     globalThis.engine.isLandscape = function () { return true; };
@@ -288,7 +289,7 @@ globalThis.MediaTimelineEvent = class MediaTimelineEvent {
 // Animation / hierarchy API: accepted and inert (the renderer drives animation itself).
 globalThis.__animStub = function () {
     const a = {
-        rate: 1, frame: 0, visible: true, name: '', duration: 0,
+        rate: 1, frame: 0, frameCount: 1, visible: true, name: '', duration: 0,
         play() {}, pause() {}, stop() {}, isPlaying() { return false; },
         setFrame(f) { a.frame = f; }, getFrame() { return a.frame; },
     };
@@ -593,8 +594,8 @@ impl SceneScriptEngine {
     }
 
     /// Records the layer hierarchy (`(child key, parent key)`) for `getParent()/getChildren()`.
-    /// `group_keys` are transform-only parents: reachable through `getParent()` but not
-    /// through `thisScene.getLayer()/enumerateLayers()`.
+    /// `group_keys` are transform-only parents: reachable through `getParent()` and
+    /// `thisScene.getLayer()` but not listed by `enumerateLayers()`.
     pub fn set_layer_hierarchy(
         &self,
         parents: &[(String, String)],
@@ -1447,12 +1448,27 @@ mod tests {
             "h",
             "child",
             "export function update() { return [thisScene.getLayer('nope') === null,\
-             thisScene.getLayer('grp') === null, thisLayer.getParent().name,\
+             thisScene.getLayer('grp').name, thisLayer.getParent().name,\
              thisLayer.getParent().getChildren().length, thisLayer.getParent().getParent() === null,\
              thisScene.getLayerByID(7).name, thisScene.enumerateLayers().length,\
              thisLayer.getTransformMatrix().m[12]].join(','); }",
         );
-        assert_eq!(out, "true,true,grp,1,true,child,1,12");
+        assert_eq!(out, "true,grp,grp,1,true,child,1,12");
+    }
+
+    #[test]
+    fn engine_screensaver_and_animation_frame_count_exist() {
+        let e = engine();
+        e.register_property_script(
+            "a",
+            "L",
+            "export function update() { const a = thisLayer.getTextureAnimation();\
+             return [engine.isScreensaver(), a.frameCount, a.getFrame() == a.frameCount - 1].join(','); }",
+            "0",
+        )
+        .unwrap();
+        let out = e.step_frame(0.016, 0.1, [0.0; 3], &Z64, &Z64).unwrap()["a"].clone();
+        assert_eq!(out, "false,1,true");
     }
 
     #[test]

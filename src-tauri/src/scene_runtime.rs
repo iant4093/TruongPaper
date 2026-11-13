@@ -78,7 +78,23 @@ fn initial_value_expr(prop: Option<ScriptProperty>, raw: &str) -> String {
             };
             visible.to_string()
         }
-        None => js_string(),
+        // Effect constants: `0.3` is a number, `"1 0 0"` a `Vec2`/`Vec3`/`Vec4`.
+        None => {
+            let nums: Option<Vec<f32>> = raw
+                .trim_matches('"')
+                .split_whitespace()
+                .map(|p| p.parse::<f32>().ok().filter(|n| n.is_finite()))
+                .collect();
+            match nums.as_deref() {
+                Some([n]) => format!("{n}"),
+                Some(v @ [_, _]) => format!("new Vec2({}, {})", v[0], v[1]),
+                Some(v @ [_, _, _]) => format!("new Vec3({}, {}, {})", v[0], v[1], v[2]),
+                Some(v @ [_, _, _, _]) => {
+                    format!("new Vec4({}, {}, {}, {})", v[0], v[1], v[2], v[3])
+                }
+                _ => js_string(),
+            }
+        }
     }
 }
 
@@ -777,6 +793,34 @@ mod tests {
         assert_eq!(initial_value_expr(Some(Visible), "0"), "false");
         assert_eq!(initial_value_expr(Some(Visible), "true"), "true");
         assert_eq!(initial_value_expr(None, "x"), r#""x""#);
+        assert_eq!(initial_value_expr(None, "0.3"), "0.3");
+        assert_eq!(initial_value_expr(None, "0.5 0 1"), "new Vec3(0.5, 0, 1)");
+    }
+
+    #[test]
+    fn effect_constant_scripts_run_and_share_state() {
+        let t = scene_dir("effectconst");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Bg", "image": "models/solid.json",
+                "effects": [ { "file": "effects/tint/effect.json", "passes": [ { "constantshadervalues": {
+                  "color": { "script": "export function init(v) { shared.bg = v; }\nexport function update(v) { shared.bg = v; return v; }",
+                             "value": "0.25 0.5 1" } } } ] } ] },
+              { "name": "Reader", "image": "models/solid.json",
+                "color": { "script": "export function update(v) { return new Vec3(1, 1, 1).mix(shared.bg, 1); }",
+                           "value": "1 1 1" } }
+            ]
+        }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        assert!(rt
+            .script_slots()
+            .contains(&"Bg/effect.0.0.color".to_string()));
+        step(&mut rt);
+        assert_eq!(layer(&rt, "Reader").color.to_array(), [0.25, 0.5, 1.0]);
     }
 
     #[test]

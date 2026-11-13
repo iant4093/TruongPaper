@@ -294,6 +294,222 @@ particleFiles['nature/rosepetals.tex'] = sprite(64, 64, (u, v) => {
   return (1 - smooth(0.7, 1, body)) * (0.75 + 0.25 * x);
 });
 
+// ---- Extended particle families -------------------------------------------------------------
+const segDist = (px, py, ax, ay, bx, by) => {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const t = Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+};
+const polyDist = (u, v, pts) => {
+  let d = Infinity;
+  for (let i = 0; i + 1 < pts.length; i++) d = Math.min(d, segDist(u, v, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]));
+  return d;
+};
+const rot = (u, v, a) => [u * Math.cos(a) + v * Math.sin(a), -u * Math.sin(a) + v * Math.cos(a)];
+const glowDot = (r, k) => Math.pow(1 - smooth(0, 1, r), k);
+
+// Light shafts 5..8 (wider / softer continuation of the 0..4 set).
+for (let n = 5; n <= 8; n++) {
+  const wdt = 0.15 + 0.1 * n;
+  particleFiles[`light/light_shafts_${n}.tex`] = sprite(128, 256, (u, v) => {
+    const across = Math.exp(-((u / wdt) ** 2) * 1.5);
+    const along = smooth(-1, -0.5, v) * (1 - smooth(-0.2, 1, v));
+    return across * along * 0.7;
+  });
+}
+// Flares: soft radial core with N rays (flare_0 has no rays, 1..6 add more).
+for (let n = 0; n <= 6; n++) {
+  const rays = n === 0 ? 0 : 2 + n;
+  particleFiles[`light/flare_${n}.tex`] = sprite(128, 128, (u, v) => {
+    const r = Math.hypot(u, v);
+    const ang = Math.atan2(v, u);
+    const core = glowDot(r, 3) * 0.9;
+    const ray = rays
+      ? Math.pow(Math.abs(Math.cos((ang * rays) / 2)), 24) * Math.pow(1 - smooth(0, 1, r), 2) * 0.8
+      : 0;
+    return Math.max(core, ray);
+  });
+}
+// Rain: thin vertical streaks with soft alpha.
+for (let n = 0; n <= 5; n++) {
+  const wdt = 0.05 + 0.02 * n;
+  particleFiles[`nature/rain${n}.tex`] = sprite(32, 128, (u, v) =>
+    Math.exp(-((u / wdt) ** 2) * 2) * smooth(-1, -0.4, v) * (1 - smooth(0.5, 1, v)) * (0.6 + 0.4 * smooth(-0.4, 0.5, v)));
+}
+// Leaves: white silhouettes with a midrib; shape varies with n.
+for (let n = 0; n <= 10; n++) {
+  const rand = rng(1300 + n);
+  const len = 0.75 + 0.2 * rand();
+  const wid = 0.28 + 0.25 * rand();
+  const bend = (rand() - 0.5) * 0.5;
+  const tilt = rand() * Math.PI;
+  const pointy = 1 + 1.5 * rand();
+  particleFiles[`nature/leaves${n}.tex`] = sprite(64, 64, (u, v) => {
+    const [x, yy] = rot(u, v, tilt);
+    const t = x / len; // -1..1 along the leaf
+    if (Math.abs(t) > 1) return 0;
+    const y = yy - bend * (1 - t * t);
+    const half = wid * Math.pow(1 - Math.abs(t), 0.8) * (t > 0 ? 1 : 1 / pointy * 1.4) * Math.sqrt(1 - t * t * 0.3);
+    const body = 1 - smooth(half * 0.75, half, Math.abs(y));
+    const vein = Math.exp(-((y / 0.025) ** 2)) * 0.25;
+    return body * (0.85 - vein);
+  });
+}
+// Lightning: jagged vertical bolts with glow and a side branch.
+for (let n = 1; n <= 4; n++) {
+  const rand = rng(1700 + n);
+  const pts = [];
+  const steps = 10 + n * 2;
+  let x = (rand() - 0.5) * 0.3;
+  for (let i = 0; i <= steps; i++) {
+    pts.push([x, -0.95 + (1.9 * i) / steps]);
+    x = Math.max(-0.5, Math.min(0.5, x + (rand() - 0.5) * 0.35));
+  }
+  const mid = pts[Math.floor(steps / 2)];
+  const branch = [mid, [mid[0] + (rand() - 0.5) * 0.5, mid[1] + 0.25], [mid[0] + (rand() - 0.5) * 0.9, mid[1] + 0.55]];
+  particleFiles[`lightning/lightning${n}.tex`] = sprite(64, 256, (u, v) => {
+    const d = Math.min(polyDist(u, v, pts), polyDist(u, v, branch) * 1.6);
+    const core = 1 - smooth(0.012, 0.04, d);
+    const glow = Math.exp(-((d / 0.12) ** 2)) * 0.45;
+    return Math.max(core, glow);
+  });
+}
+// Debris: small irregular chunks (noisy radial outline).
+for (let n = 0; n <= 5; n++) {
+  const rand = rng(1900 + n);
+  const lobes = Array.from({ length: 7 }, () => 0.55 + 0.4 * rand());
+  particleFiles[`debris/debris${n}.tex`] = sprite(32, 32, (u, v) => {
+    const r = Math.hypot(u, v);
+    const f = ((Math.atan2(v, u) + Math.PI) / (2 * Math.PI)) * lobes.length;
+    const i = Math.floor(f) % lobes.length;
+    const t = f - Math.floor(f);
+    const edge = lobes[i] * (1 - t) + lobes[(i + 1) % lobes.length] * t;
+    return (1 - smooth(edge - 0.1, edge, r)) * (0.7 + 0.3 * (1 - r));
+  });
+}
+// Rings: plain alpha ring, and normal-map style rings (RGB encodes the surface slope).
+particleFiles['ring.tex'] = sprite(128, 128, (u, v) => {
+  const r = Math.hypot(u, v);
+  return Math.exp(-(((r - 0.7) / 0.08) ** 2)) * (1 - smooth(0.9, 1, r));
+});
+function normalRing(profile) {
+  const w = 128;
+  const px = new Uint8Array(w * w * 4);
+  for (let y = 0; y < w; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = ((x + 0.5) / w) * 2 - 1;
+      const v = ((y + 0.5) / w) * 2 - 1;
+      const r = Math.hypot(u, v) || 1e-6;
+      const slope = profile(r); // d(height)/dr
+      const nx = (-slope * u) / r;
+      const ny = (-slope * v) / r;
+      const len = Math.hypot(nx, ny, 1);
+      const a = Math.round(255 * (1 - smooth(0.92, 1, r)));
+      px.set([Math.round((0.5 + nx / len / 2) * 255), Math.round((0.5 + ny / len / 2) * 255), Math.round((0.5 + 1 / len / 2) * 255), a], (y * w + x) * 4);
+    }
+  }
+  return texFile(w, w, px, CLAMP_UVS);
+}
+const bump = (r, c, wd) => Math.exp(-(((r - c) / wd) ** 2));
+particleFiles['normal_ring.tex'] = normalRing((r) => -2 * ((r - 0.7) / 0.1 ** 2) * bump(r, 0.7, 0.1) * 0.12);
+particleFiles['normal_ring_smooth.tex'] = normalRing((r) => -2 * ((r - 0.6) / 0.25 ** 2) * bump(r, 0.6, 0.25) * 0.1);
+// Smoke variant for lit smoke: softer and more transparent than smoke2.
+{
+  const noise = fractal(128, 4, 3, 2101);
+  particleFiles['smoke/smoke2light.tex'] = sprite(128, 128, (u, v, x, y) =>
+    (1 - smooth(0.05, 1, Math.hypot(u, v))) * (0.25 + 0.5 * noise[y * 128 + x]) * 0.8);
+}
+// Stars: N-point stars with a glow, N = 4..6.
+for (let n = 1; n <= 3; n++) {
+  const pts = n + 3;
+  particleFiles[`star${n}.tex`] = sprite(64, 64, (u, v) => {
+    const r = Math.hypot(u, v);
+    const spike = Math.pow(Math.abs(Math.cos((Math.atan2(v, u) * pts) / 2)), 14) * Math.pow(1 - smooth(0, 1, r), 1.6);
+    return Math.max(spike, glowDot(r, 3) * 0.8);
+  });
+}
+// Sparkles: thin cross with bright centre.
+for (let n = 1; n <= 3; n++) {
+  const thin = 0.03 + 0.02 * n;
+  particleFiles[`sparkle${n}.tex`] = sprite(64, 64, (u, v) => {
+    const r = Math.hypot(u, v);
+    const cross = Math.max(Math.exp(-((u / thin) ** 2)) * (1 - smooth(0, 1, Math.abs(v))), Math.exp(-((v / thin) ** 2)) * (1 - smooth(0, 1, Math.abs(u))));
+    return Math.max(cross * 0.9, glowDot(r, 4));
+  });
+}
+// Dust: tiny soft specks / mote clusters.
+for (let n = 1; n <= 3; n++) {
+  const rand = rng(2300 + n);
+  const motes = Array.from({ length: n * 3 }, () => [rand() * 1.4 - 0.7, rand() * 1.4 - 0.7, 0.08 + 0.12 * rand()]);
+  particleFiles[`dust${n}.tex`] = sprite(32, 32, (u, v) =>
+    Math.max(...motes.map(([mx, my, s]) => glowDot(Math.hypot(u - mx, v - my) / s, 2) * 0.8)));
+}
+// Bokeh: disc with brighter rim; later ones have a harder rim.
+for (let n = 1; n <= 3; n++) {
+  particleFiles[`bokeh${n}.tex`] = sprite(128, 128, (u, v) => {
+    const r = Math.hypot(u, v);
+    const disc = 1 - smooth(0.85, 0.95, r);
+    return disc * (0.35 + 0.4 * n * smooth(0.55, 0.9, r) * 0.5);
+  });
+}
+// Petals (generic): rounded tip with notch; sakura-like.
+for (let n = 1; n <= 3; n++) {
+  const wid = 0.35 + 0.1 * n;
+  particleFiles[`nature/petal${n}.tex`] = sprite(64, 64, (u, v) => {
+    const [x, y] = rot(u, v, Math.PI / 3);
+    const t = (x + 0.8) / 1.6;
+    if (t < 0 || t > 1) return 0;
+    const half = wid * Math.sin(Math.PI * Math.pow(t, 0.7)) * (1 - 0.15 * Math.exp(-(((t - 1) / 0.08) ** 2)));
+    return 1 - smooth(half * 0.7, half, Math.abs(y));
+  });
+}
+// Feathers: curved quill with barbs fading outward.
+for (let n = 1; n <= 3; n++) {
+  const rand = rng(2500 + n);
+  const curve = 0.15 + 0.15 * rand();
+  const wid = 0.16 + 0.05 * n;
+  particleFiles[`feather${n}.tex`] = sprite(32, 128, (u, v) => {
+    const t = v; // -1..1 along the feather
+    const cx = curve * (1 - t * t);
+    const half = wid * Math.sqrt(Math.max(0, 1 - t * t)) * (1 - 0.2 * smooth(-0.8, 0.8, t));
+    const dx = Math.abs(u - cx);
+    const barbs = 0.8 + 0.2 * Math.sin((dx / (half || 1)) * 0 + t * 60);
+    const quill = Math.exp(-((dx / 0.03) ** 2));
+    return Math.max((1 - smooth(half * 0.8, half, dx)) * barbs * (1 - 0.4 * smooth(0, 1, dx / (half || 1))), quill * 0.9 * (Math.abs(t) < 0.97 ? 1 : 0));
+  });
+}
+// Snow 0..5: flakes of increasing detail (0 = soft dot, 5 = six-armed crystal).
+for (let n = 0; n <= 5; n++) {
+  particleFiles[`nature/snow${n}.tex`] = sprite(64, 64, (u, v) => {
+    const r = Math.hypot(u, v);
+    const dot = 1 - smooth(0.2 + 0.05 * n, 0.65 - 0.03 * n, r);
+    if (n < 2) return dot;
+    const arms = Math.pow(Math.abs(Math.cos(Math.atan2(v, u) * 3)), 40 - n * 4) * (1 - smooth(0.2, 0.9, r)) * (0.4 + 0.1 * n);
+    return Math.max(dot * (1 - 0.12 * n), arms);
+  });
+}
+// Fire: flame tongue, vertical and flickering via noise.
+for (let n = 1; n <= 3; n++) {
+  const noise = fractal(128, 3 + n, 3, 2700 + n * 7);
+  particleFiles[`fire${n}.tex`] = sprite(64, 128, (u, v, x, y) => {
+    const t = v * 0.5 + 0.5; // 0 top .. 1 bottom
+    const half = 0.65 * Math.pow(t, 0.7) * (1 - 0.3 * t);
+    const wobble = (noise[y * 128 + Math.min(127, x * 2)] - 0.5) * 0.25 * (1 - t);
+    const across = 1 - smooth(half * 0.4, half + 0.001, Math.abs(u + wobble));
+    return across * smooth(0, 0.2, t) * (1 - smooth(0.9, 1, t) * 0.6) * (0.6 + 0.4 * t);
+  });
+}
+// Embers: small hot cores with a falloff glow.
+for (let n = 1; n <= 3; n++) {
+  particleFiles[`ember${n}.tex`] = sprite(32, 32, (u, v) =>
+    Math.max(1 - smooth(0.1 * n, 0.2 * n + 0.1, Math.hypot(u, v)), glowDot(Math.hypot(u, v), 3) * 0.5));
+}
+// Glows: soft round glows of increasing size.
+for (let n = 1; n <= 3; n++) {
+  particleFiles[`glow${n}.tex`] = sprite(128, 128, (u, v) => glowDot(Math.hypot(u, v), 1 + n * 0.8));
+}
+
 for (const [dir, entries] of [
   [outDir, files],
   [join(outDir, '../effects'), effectFiles],

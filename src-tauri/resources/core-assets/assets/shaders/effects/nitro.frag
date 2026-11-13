@@ -15,9 +15,9 @@ void main() {
 	float mask = texSample2D(g_Texture1, v_TexCoord).r;
 	float tick = floor(g_Time * g_Speed * 8.0);
 	float slice = floor(v_TexCoord.y * g_Scale);
-	float pick = hash12(vec2(slice, tick));
+	float pick = tpHash12(vec2(slice, tick));
 	float active = step(1.0 - g_Strength * 0.35, pick) * mask;
-	float shift = (hash12(vec2(tick, slice + 7.0)) - 0.5) * 0.1 * g_Strength * active;
+	float shift = (tpHash12(vec2(tick, slice + 7.0)) - 0.5) * 0.1 * g_Strength * active;
 	vec2 uv = v_TexCoord + vec2(shift, 0.0);
 	vec4 color = texSample2D(g_Texture0, uv);
 	color.r = texSample2D(g_Texture0, uv + vec2(shift * 0.5, 0.0)).r;

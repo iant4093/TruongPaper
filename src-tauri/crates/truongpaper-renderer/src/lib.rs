@@ -11,6 +11,7 @@ pub mod model3d;
 pub mod particles;
 pub mod puppet;
 pub mod scene_assets;
+pub mod scene_camera;
 pub mod scene_graph;
 pub mod scene_math;
 pub mod scene_renderer;

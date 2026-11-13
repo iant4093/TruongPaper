@@ -239,11 +239,11 @@ particleFiles['chromaticdot.tex'] = sprite(64, 64, (u, v) => {
 });
 // Light shafts: tall soft beams with different widths.
 for (let n = 0; n < 5; n++) {
-  const wdt = 0.15 + 0.1 * n;
+  const wdt = 0.3 + 0.1 * n;
   particleFiles[`light/light_shafts_${n}.tex`] = sprite(128, 256, (u, v) => {
-    const across = Math.exp(-((u / wdt) ** 2) * 1.5);
-    const along = smooth(-1, -0.6, v) * (1 - smooth(0.2, 1, v));
-    return across * along * 0.4;
+    const across = Math.exp(-((u / wdt) ** 2) * 1.5) * (1 - smooth(0.6, 1, Math.abs(u)));
+    const along = smooth(-1, -0.3, v) * (1 - smooth(-0.1, 1, v));
+    return across * along * 0.17;
   });
 }
 // Fog puffs: low-frequency cloudy blobs.
@@ -315,7 +315,7 @@ for (let n = 5; n <= 8; n++) {
   particleFiles[`light/light_shafts_${n}.tex`] = sprite(128, 256, (u, v) => {
     const across = Math.exp(-((u / wdt) ** 2) * 1.5);
     const along = smooth(-1, -0.5, v) * (1 - smooth(-0.2, 1, v));
-    return across * along * 0.35;
+    return across * along * 0.17;
   });
 }
 // Flares: soft radial core with N rays (flare_0 has no rays, 1..6 add more).
@@ -335,9 +335,9 @@ for (let n = 0; n <= 6; n++) {
 // pixels (raindownpour draws them 800-1600 px tall), so the streak must stay a few pixels wide
 // or the additive layers read as wide white light bars.
 for (let n = 0; n <= 5; n++) {
-  const wdt = 0.01 + 0.003 * n;
-  particleFiles[`nature/rain${n}.tex`] = sprite(128, 256, (u, v) =>
-    Math.exp(-((u / wdt) ** 2) * 2) * smooth(-1, -0.4, v) * (1 - smooth(0.5, 1, v)) * 0.5 * (0.6 + 0.4 * smooth(-0.4, 0.5, v)));
+  const wdt = 0.006 + 0.0015 * n;
+  particleFiles[`nature/rain${n}.tex`] = sprite(512, 128, (u, v) =>
+    Math.exp(-((u / wdt) ** 2) * 2) * smooth(-1, -0.4, v) * (1 - smooth(0.5, 1, v)) * 0.3 * (0.6 + 0.4 * smooth(-0.4, 0.5, v)));
 }
 // Leaves: white silhouettes with a midrib; shape varies with n.
 for (let n = 0; n <= 10; n++) {

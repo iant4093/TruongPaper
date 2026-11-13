@@ -127,6 +127,8 @@ pub fn fixup_hlsl_source(body: &str) -> String {
         }
         if !l.trim_start().starts_with('#') {
             l = negate_non_bool(&l);
+            l = ternary_condition_bool(&l, &bools);
+            l = for_loop_int_bounds(&l);
             l = convert_vector_statement(&l, &widths);
         }
 
@@ -205,6 +207,54 @@ fn vector_widths(body: &str) -> HashMap<String, usize> {
         .into_iter()
         .filter_map(|(name, w)| w.map(|w| (name, w)))
         .collect()
+}
+
+/// `cond ? a : b` where `cond` is a bare identifier: HLSL accepts a float or int condition, GLSL
+/// needs a bool, so `outside ? a : b` becomes `bool(outside) ? a : b`.
+fn ternary_condition_bool(line: &str, bools: &HashSet<String>) -> String {
+    let ternary = re!(r"(^\s*|[=(,:?]\s*|\breturn\s+)([A-Za-z_]\w*)(\s*\?)");
+    ternary
+        .replace_all(line, |c: &regex::Captures| {
+            let name = &c[2];
+            if bools.contains(name) || matches!(name, "true" | "false") {
+                c[0].to_string()
+            } else {
+                format!("{}bool({name}){}", &c[1], &c[3])
+            }
+        })
+        .into_owned()
+}
+
+/// `for (int i = -radius; i <= radius; ...)` where the bounds are floats: HLSL converts them
+/// implicitly, GLSL does not, so the initialiser and the compared bound get an `int(...)`.
+fn for_loop_int_bounds(line: &str) -> String {
+    let Some(c) = re!(
+        r"^(\s*for\s*\(\s*int\s+(\w+)\s*=\s*)([^;]+);\s*(\w+)\s*(<=|>=|<|>|!=)\s*([^;]+);(.*)$"
+    )
+    .captures(line) else {
+        return line.to_string();
+    };
+    let literal = re!(r"^[-+]?\d+$");
+    if c[2] != c[4] {
+        return line.to_string();
+    }
+    let wrap = |e: &str| {
+        let e = e.trim();
+        if literal.is_match(e) || e.starts_with("int(") && call_spans_whole_expression(e) {
+            e.to_string()
+        } else {
+            format!("int({e})")
+        }
+    };
+    format!(
+        "{}{}; {} {} {};{}",
+        &c[1],
+        wrap(&c[3]),
+        &c[4],
+        &c[5],
+        wrap(&c[6]),
+        &c[7]
+    )
 }
 
 /// HLSL converts a float to bool for `!x`; GLSL requires a bool operand. In value positions
@@ -619,6 +669,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn float_ternary_condition_becomes_a_bool() {
+        let bools: HashSet<String> = ["flag".to_string()].into_iter().collect();
+        assert_eq!(
+            ternary_condition_bool("vec4 f = outside ? a : b;", &bools),
+            "vec4 f = bool(outside) ? a : b;"
+        );
+        assert_eq!(
+            ternary_condition_bool("mask = INVERT ? 1 - mask : mask;", &bools),
+            "mask = bool(INVERT) ? 1 - mask : mask;"
+        );
+        assert_eq!(
+            ternary_condition_bool("x = flag ? 1.0 : 0.0;", &bools),
+            "x = flag ? 1.0 : 0.0;"
+        );
+        assert_eq!(
+            ternary_condition_bool("x = a < b ? 1.0 : 0.0;", &bools),
+            "x = a < b ? 1.0 : 0.0;"
+        );
+    }
+
+    #[test]
+    fn float_loop_bounds_are_cast_to_int() {
+        assert_eq!(
+            for_loop_int_bounds("\t\tfor (int i = -iterations; i <= iterations; i++){"),
+            "\t\tfor (int i = int(-iterations); i <= int(iterations); i++){"
+        );
+        assert_eq!(
+            for_loop_int_bounds("for (int i = 0; i < 8; i++) {"),
+            "for (int i = 0; i < 8; i++) {"
+        );
+    }
+
+    #[test]
     fn user_function_named_like_a_preamble_macro_gets_an_undef() {
         let out = fixup_hlsl_source("float log10(float x) { return log(x) / 2.3; }\n");
         assert!(out.starts_with("#undef log10\n"), "{out}");
@@ -737,7 +820,7 @@ mod tests {
             fixup_hlsl_source("if (!h) {}\nv = vec2(h, !h);\nx = c ? !h : h;\nbool b = !h;\n");
         assert!(out.contains("if (!bool(h)) {}"), "{out}");
         assert!(out.contains("vec2(h, float(!bool(h)))"), "{out}");
-        assert!(out.contains("c ? float(!bool(h)) : h"), "{out}");
+        assert!(out.contains("bool(c) ? float(!bool(h)) : h"), "{out}");
         assert!(out.contains("bool b = !bool(h);"), "{out}");
     }
 

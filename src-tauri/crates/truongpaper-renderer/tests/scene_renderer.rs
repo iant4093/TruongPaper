@@ -7,8 +7,9 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 use truongpaper_renderer::json::Value;
 use truongpaper_renderer::scene_renderer::{
     downsample_spectrum, json_value_floats, layer_vertex_attributes, map_material_constants,
-    plan_video_upload, reflect_texture_slots, vertex_attribute_locations, video_frame_to_rgba,
-    VideoUpload, EMBEDDED_VIDEO_FORMAT, QUAD_INDICES, SCENE_COMPOSITE_WGSL, SCENE_PARTICLE_WGSL,
+    plan_video_upload, reflect_texture_slots, vertex_attribute_locations,
+    vertex_wants_pixel_positions, video_frame_to_rgba, VideoUpload, EMBEDDED_VIDEO_FORMAT,
+    QUAD_INDICES, SCENE_COMPOSITE_WGSL, SCENE_PARTICLE_WGSL,
 };
 use truongpaper_renderer::{
     layer_quad_vertices, pack_uniform_block, parse_uniform_comment_metadata, preprocess_we_shader,
@@ -481,4 +482,17 @@ fn layer_composite_texture_names_parse_to_layer_ids() {
     );
     assert_eq!(parse_layer_composite("_rt_imageLayerComposite_x_a"), None);
     assert_eq!(parse_layer_composite("_rt_FullFrameBuffer"), None);
+}
+
+#[test]
+fn custom_vertex_shaders_that_forward_positions_get_pixel_space_quads() {
+    // 3141421197 "myfirstshader": `v_Position = a_Position.xy` feeds a ray-marcher that expects
+    // layer pixels, projected with `g_ModelViewProjectionMatrix`.
+    let custom = "uniform mat4 g_ModelViewProjectionMatrix;\nvoid main() {\n\tgl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n\tv_Position.xy = a_Position.xy;\n}\n";
+    assert!(vertex_wants_pixel_positions(custom));
+    // Stock effect passes only project the clip-space quad.
+    let stock = "uniform mat4 g_ModelViewProjectionMatrix;\nvoid main() {\n\tgl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n\tv_TexCoord = a_TexCoord;\n}\n";
+    assert!(!vertex_wants_pixel_positions(stock));
+    let clip = "void main() {\n\tgl_Position = vec4(a_Position, 1.0);\n\tv_Pos = a_Position;\n}\n";
+    assert!(!vertex_wants_pixel_positions(clip));
 }

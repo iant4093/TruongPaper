@@ -37,6 +37,8 @@ vec3 ApplyBlending(int mode, vec3 base, vec3 layer, float amount) {
     else if (mode == 29) result = TpBlendSetLum(base, TpBlendLum(layer));
     // 30 is the effect default of `tint`: the colour multiplies the image (white = no change).
     else if (mode == 30) result = base * layer;
+    // 31 is the default of workshop bloom combines (2822917890 `apply`): the light adds on top.
+    else if (mode == 31) result = base + layer;
     if (mode == 5 || mode == 10) return result;
     return mix(base, result, amount);
 }

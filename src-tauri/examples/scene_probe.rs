@@ -144,6 +144,20 @@ async fn render() -> anyhow::Result<()> {
     {
         runtime.graph_mut().camera.zoom = z;
     }
+    // PROBE_FXKEEP="0,2" keeps only those effect indices on every layer.
+    if let Ok(keep) = std::env::var("PROBE_FXKEEP") {
+        let keep: Vec<usize> = keep
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        for l in runtime.graph_mut().layers.iter_mut() {
+            let mut i = 0;
+            l.effects.retain(|_| {
+                i += 1;
+                keep.contains(&(i - 1))
+            });
+        }
+    }
     if std::env::var("PROBE_NOFX").is_ok() {
         for l in runtime.graph_mut().layers.iter_mut() {
             l.effects.clear();

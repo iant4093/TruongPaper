@@ -465,3 +465,32 @@ fn unique_fbo_override_names_and_layer_composite_b_resolve() {
         TextureBinding::Target(RenderTargetId::LayerOutput(13))
     );
 }
+
+#[test]
+fn own_layer_composite_binds_the_current_source() {
+    // 3152793212: a CRT effect binds `_rt_imageLayerComposite_<own id>_b` as its input; that is
+    // the layer's own chain, not a finished layer output (which is still empty at that point).
+    let t = TempDir::new("fx-own-composite");
+    setup(&t);
+    t.write(
+        "scene.json",
+        r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+              "objects": [ { "id": 246, "name": "L", "image": "models/sq.json", "effects": [
+                { "file": "effects/combo/effect.json",
+                  "passes": [ { "textures": [ "_rt_imageLayerComposite_246_b" ] } ] },
+                { "file": "effects/combo/effect.json",
+                  "passes": [ { "textures": [ "_rt_imageLayerComposite_13_a" ] } ] } ] } ] }"#,
+    );
+    let vfs = WeVirtualFileSystem::mount(t.path().to_path_buf(), t.path().join("core"));
+    let g = SceneGraph::load(&vfs, "scene.json", None, Vec2::new(1920.0, 1080.0)).unwrap();
+    let p = EffectChainPlan::build(&vfs, &g.layers[0], &g.user_props);
+    let passes: Vec<_> = p.passes().collect();
+    assert_eq!(
+        passes[0].textures[&0],
+        TextureBinding::Target(RenderTargetId::FboA)
+    );
+    assert_eq!(
+        passes[1].textures[&0],
+        TextureBinding::Target(RenderTargetId::LayerOutput(13))
+    );
+}

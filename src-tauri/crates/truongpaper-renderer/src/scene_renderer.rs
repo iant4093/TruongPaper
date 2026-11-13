@@ -170,6 +170,16 @@ pub fn layer_quad_vertices(size: Vec2, uv_scale: [f32; 2]) -> [LayerVertex; 4] {
     ]
 }
 
+/// Whether a translated vertex shader copies `a_Position` into a varying and also transforms it by
+/// `g_ModelViewProjectionMatrix` (custom effects such as the editor's "my first shader").
+pub fn vertex_wants_pixel_positions(vert: &str) -> bool {
+    static COPY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let copy = COPY.get_or_init(|| {
+        regex::Regex::new(r"\bv_\w+(?:\.\w+)?\s*=\s*a_Position\b").expect("valid regex")
+    });
+    vert.contains("g_ModelViewProjectionMatrix") && copy.is_match(vert)
+}
+
 /// Orthographic projection mapping a layer-local quad of `size` onto a whole FBO.
 pub fn layer_local_projection(size: Vec2) -> Mat4 {
     let (hw, hh) = (size.x.max(1.0) * 0.5, size.y.max(1.0) * 0.5);
@@ -824,6 +834,9 @@ struct GpuPass {
     target: RenderTargetId,
     effect_index: usize,
     pass_index: usize,
+    /// The vertex shader forwards `a_Position` to a varying and projects it with
+    /// `g_ModelViewProjectionMatrix`, so it expects layer-space pixel positions.
+    pixel_space: bool,
 }
 
 enum GpuStep {
@@ -1861,6 +1874,7 @@ impl SceneRenderer {
             entries: &entries,
         });
         Ok(GpuPass {
+            pixel_space: vertex_wants_pixel_positions(&vert),
             pipeline,
             uniform_buffer,
             uniform_bind_group,
@@ -2010,22 +2024,62 @@ impl SceneRenderer {
                     &self.clamp_sampler,
                     SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
                 ))),
-                SceneLayerKind::Particle { spec, .. } => {
-                    let tex_path = vfs
+                SceneLayerKind::Particle { spec, path } => 'particle: {
+                    // A system without renderers only drives its child systems (Wallpaper
+                    // Engine's `children`, e.g. a glow, trail and body following one emitter);
+                    // it draws nothing itself. Child systems are not supported yet.
+                    if spec.renderer.is_empty() {
+                        let children = vfs
+                            .read_string(path)
+                            .ok()
+                            .and_then(|s| Value::parse(&s).ok())
+                            .and_then(|v| {
+                                v.get("children")
+                                    .and_then(Value::as_array)
+                                    .map(<[Value]>::len)
+                            })
+                            .unwrap_or(0);
+                        let msg = format!(
+                            "layer '{}' particle {path}: no renderer and {children} child \
+                             system(s), which are not supported; layer draws nothing",
+                            layer.key()
+                        );
+                        tracing::warn!("{msg}");
+                        warnings.push(msg);
+                        break 'particle None;
+                    }
+                    let first_pass = vfs
                         .read_string(&spec.material)
                         .ok()
                         .and_then(|s| MaterialFile::from_json_str(&s).ok())
-                        .and_then(|m| m.passes.into_iter().next())
-                        .map(|p| {
-                            (
-                                p.textures
-                                    .first()
-                                    .cloned()
-                                    .flatten()
-                                    .map(|t| material_texture_path(&t)),
-                                BlendMode::parse(&p.blending),
-                            )
-                        });
+                        .and_then(|m| m.passes.into_iter().next());
+                    // `REFRACT` particles show the scene behind them bent by a normal map; their
+                    // colour texture is a plain white mask, so drawing it as a sprite paints
+                    // opaque squares. Without refraction support they are left out.
+                    if first_pass
+                        .as_ref()
+                        .is_some_and(|p| p.combos.get("REFRACT").copied().unwrap_or(0) != 0)
+                    {
+                        let msg = format!(
+                            "layer '{}' particle material {}: refraction is not supported; \
+                             layer skipped",
+                            layer.key(),
+                            spec.material
+                        );
+                        tracing::warn!("{msg}");
+                        warnings.push(msg);
+                        break 'particle None;
+                    }
+                    let tex_path = first_pass.map(|p| {
+                        (
+                            p.textures
+                                .first()
+                                .cloned()
+                                .flatten()
+                                .map(|t| material_texture_path(&t)),
+                            BlendMode::parse(&p.blending),
+                        )
+                    });
                     let (tex_path, blending) = match tex_path {
                         Some((t, b)) => (t, b),
                         None => (None, BlendMode::Translucent),
@@ -2411,7 +2465,17 @@ impl SceneRenderer {
             steps.push(match step {
                 EffectStep::DrawBase { .. } => GpuStep::DrawBase,
                 EffectStep::Pass(p) => match target_format(&p.target) {
-                    None => GpuStep::Pass(None),
+                    None => {
+                        let msg = format!(
+                            "layer '{}' effect {} pass {}: no usable render target; pass skipped",
+                            layer.key(),
+                            p.effect_file,
+                            p.pass_index
+                        );
+                        tracing::warn!("{msg}");
+                        warnings.push(msg);
+                        GpuStep::Pass(None)
+                    }
                     Some(fmt) => {
                         let mut bindings = BTreeMap::new();
                         for (slot, b) in &p.textures {
@@ -3399,17 +3463,35 @@ impl SceneRenderer {
                     let Some(view) = target_view(&pass.target) else {
                         continue;
                     };
+                    let pixel_values = UniformValues {
+                        matrices: PassMatrices {
+                            model_view_projection: local,
+                            model_view_projection_inverse: local.inverse(),
+                            view_projection: local,
+                            ..effect_values.matrices
+                        },
+                        ..effect_values.clone()
+                    };
                     Self::write_we_uniforms(
                         queue,
                         pass,
-                        &effect_values,
+                        if pass.pixel_space {
+                            &pixel_values
+                        } else {
+                            &effect_values
+                        },
                         graph.effect_constant_overrides(li, pass.effect_index, pass.pass_index),
                     );
                     run_pass(encoder, "scene_effect_pass", view, transparent, |rp| {
                         rp.set_pipeline(&pass.pipeline);
                         rp.set_bind_group(0, &pass.uniform_bind_group, &[]);
                         rp.set_bind_group(1, &pass.texture_bind_group, &[]);
-                        rp.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
+                        let quad = if pass.pixel_space {
+                            &fx.effect_quad
+                        } else {
+                            &self.fullscreen_quad
+                        };
+                        rp.set_vertex_buffer(0, quad.slice(..));
                         rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
                         rp.draw_indexed(0..6, 0, 0..1);
                     });

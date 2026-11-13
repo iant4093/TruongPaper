@@ -43,8 +43,9 @@ pub use particles::{
     SingleParticle, SpriteParticleVertex,
 };
 pub use puppet::{
-    parse_mdl_skeleton, puppet_combos, PuppetAnimation, PuppetAnimationMode, PuppetAnimator,
-    PuppetBone, PuppetDeformer, PuppetError, PuppetFrame, PuppetSkeleton,
+    parse_mdl_skeleton, parse_mdl_skeleton_or_rest, puppet_combos, PuppetAnimation,
+    PuppetAnimationMode, PuppetAnimator, PuppetBone, PuppetDeformer, PuppetError, PuppetFrame,
+    PuppetSkeleton,
 };
 pub use scene_assets::{
     EffectBindSlot, EffectFboSpec, EffectFile, EffectPassSpec, MaterialFile, MaterialPassSpec,

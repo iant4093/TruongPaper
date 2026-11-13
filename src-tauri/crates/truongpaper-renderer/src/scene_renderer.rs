@@ -51,7 +51,7 @@ use crate::model3d::{GpuModel, ModelFrame, ModelMaterial, ModelResources, DEFAUL
 use crate::particle_tree::{plan_draw_sets, DrawSetPlan, SetGeometry};
 use crate::particles::SpriteParticleVertex;
 use crate::puppet::{
-    layered_bone_matrices, parse_mdl_skeleton, PuppetDeformer, PuppetLayer, PuppetSkeleton,
+    layered_bone_matrices, parse_mdl_skeleton_or_rest, PuppetDeformer, PuppetLayer, PuppetSkeleton,
 };
 use crate::scene_assets::{material_texture_path, shader_stage_paths, MaterialFile};
 use crate::scene_graph::{CameraState, SceneGraph, SceneLayer, SceneLayerKind};
@@ -2885,7 +2885,7 @@ impl SceneRenderer {
         let bytes = vfs.read_bytes(path).map_err(|e| e.to_string())?;
         // Layer size 0 keeps file coordinates (x, -y); flip y back to model space (y up).
         let mesh = parse_mdl(&bytes, [0.0, 0.0]).map_err(|e| e.to_string())?;
-        let skeleton = parse_mdl_skeleton(&bytes, &mesh).map_err(|e| e.to_string())?;
+        let skeleton = parse_mdl_skeleton_or_rest(&bytes, &mesh).map_err(|e| e.to_string())?;
         let vertices: Vec<MdlPuppetVertex> = mesh
             .vertices
             .iter()

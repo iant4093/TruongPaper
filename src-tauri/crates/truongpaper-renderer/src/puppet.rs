@@ -292,6 +292,29 @@ pub fn parse_mdl_skeleton(
     })
 }
 
+/// Like [`parse_mdl_skeleton`], but a mesh with no `MDLS` section (an unskinned puppet) gets a
+/// single identity root bone and no animations, so every vertex stays at its rest position.
+pub fn parse_mdl_skeleton_or_rest(
+    bytes: &[u8],
+    mesh: &ParsedMdlMesh,
+) -> Result<PuppetSkeleton, PuppetError> {
+    if mesh.section("MDLS").is_some() {
+        return parse_mdl_skeleton(bytes, mesh);
+    }
+    let bones = vec![PuppetBone {
+        name: "root".to_string(),
+        parent: None,
+        transform: Mat4::IDENTITY,
+    }];
+    let offsets = bind_offsets(&bones);
+    Ok(PuppetSkeleton {
+        version: 0,
+        bones,
+        animations: Vec::new(),
+        offsets,
+    })
+}
+
 fn parse_mdla(
     bytes: &[u8],
     offset: usize,

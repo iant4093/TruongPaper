@@ -688,8 +688,17 @@ impl SceneGraph {
         user_props_json: Option<&str>,
         monitor_size: Vec2,
     ) -> Result<SceneGraph, SceneLoadError> {
+        // GIF-scene packages (`gifscene.pkg`, e.g. 843532366) ship `gifscene.json` instead.
+        let mut gif_scene = scene_path.eq_ignore_ascii_case("gifscene.json");
         let text = vfs
             .read_string(scene_path)
+            .or_else(|e| match scene_path {
+                "scene.json" if e.kind() == std::io::ErrorKind::NotFound => {
+                    gif_scene = true;
+                    vfs.read_string("gifscene.json").map_err(|_| e)
+                }
+                _ => Err(e),
+            })
             .map_err(|source| SceneLoadError::Io {
                 path: scene_path.to_string(),
                 source,
@@ -747,6 +756,9 @@ impl SceneGraph {
                 .is_none_or(Value::is_null);
         graph.resolve_general(perspective);
         graph.build_nodes(vfs);
+        if gif_scene && !perspective && graph.scene.general.orthogonalprojection.auto {
+            graph.fit_gif_scene();
+        }
         graph.render_bound_keys = collect_render_bound_keys(&graph.scene);
         graph.resolve_particle_overrides();
         if let Some(raw) = &raw {
@@ -754,6 +766,24 @@ impl SceneGraph {
         }
         graph.step_animations(0.0);
         Ok(graph)
+    }
+
+    /// GIF scenes (`gifscene.json`) are one image laid out in its own pixel space with an
+    /// `auto` projection; the scene is the image's extent, scaled to the screen like any scene
+    /// (843532366 is a 480x300 image centered at 240,150).
+    fn fit_gif_scene(&mut self) {
+        let extent = self.layers.iter().fold(Vec2::ZERO, |acc, l| {
+            let half = (l.transform.size * l.transform.scale.truncate()).abs() * 0.5;
+            acc.max(l.transform.origin.truncate() + half)
+        });
+        if extent.x >= 1.0 && extent.y >= 1.0 {
+            let p = &mut self.scene.general.orthogonalprojection;
+            p.auto = false;
+            p.width = extent.x;
+            p.height = extent.y;
+            self.resolve_general(false);
+            self.recompute_world();
+        }
     }
 
     fn resolve_general(&mut self, perspective: bool) {

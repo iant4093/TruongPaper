@@ -726,3 +726,18 @@ fn parent_alignment_text_anchor_and_solid_effects() {
         bars.kind.name()
     );
 }
+
+/// Regression (843532366): GIF-scene packages ship `gifscene.json` and no `scene.json`.
+#[test]
+fn gif_scene_packages_load_gifscene_json() {
+    let t = TempDir::new("sg-gifscene");
+    t.write(
+        "gifscene.json",
+        r#"{ "general": { "orthogonalprojection": { "auto": true } },
+            "objects": [ { "name": "bg", "image": "models/util/solidlayer.json",
+                           "origin": "240 150 0", "size": "480 300" } ] }"#,
+    );
+    t.write("core/models/util/solidlayer.json", r#"{ }"#);
+    let g = SceneGraph::load(&mount(&t), "scene.json", None, MONITOR).expect("gifscene loads");
+    assert_eq!(g.scene_size, Vec2::new(480.0, 300.0));
+}

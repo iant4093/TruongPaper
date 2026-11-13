@@ -1076,13 +1076,16 @@ impl SceneGraph {
                         .map_err(|e| format!("invalid particle {path}: {e}"))
                 });
             return match spec {
-                Ok(spec) => Some((
-                    SceneLayerKind::Particle {
-                        path: path.to_string(),
-                        spec,
-                    },
-                    Vec2::ZERO,
-                )),
+                Ok(mut spec) => {
+                    spec.resolve_children(&|p| vfs.read_string(p).ok());
+                    Some((
+                        SceneLayerKind::Particle {
+                            path: path.to_string(),
+                            spec,
+                        },
+                        Vec2::ZERO,
+                    ))
+                }
                 Err(e) => {
                     self.warn(format!("layer '{label}' skipped: {e}"));
                     self.diagnostics

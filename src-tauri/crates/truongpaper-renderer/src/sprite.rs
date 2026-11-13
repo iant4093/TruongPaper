@@ -76,7 +76,21 @@ impl SpriteSheet {
     /// `(g_Texture0Rotation, g_Texture0Translation)` for the frame shown at `time`:
     /// `uv' = (dot(uv, rot.xy), dot(uv, rot.zw)) + translation`.
     pub fn uniforms(&self, time: f32) -> (Vec4, Vec2) {
-        let f = &self.frames[self.frame_index(time)];
+        self.frame_uniforms(self.frame_index(time))
+    }
+
+    /// Maps a 0..1 quad uv into the texture region of `frame` (clamped to the last frame).
+    pub fn map_uv(&self, frame: usize, uv: [f32; 2]) -> [f32; 2] {
+        let (rot, trans) = self.frame_uniforms(frame);
+        [
+            uv[0] * rot.x + uv[1] * rot.y + trans.x,
+            uv[0] * rot.z + uv[1] * rot.w + trans.y,
+        ]
+    }
+
+    /// Like [`Self::uniforms`] for a given frame index.
+    pub fn frame_uniforms(&self, frame: usize) -> (Vec4, Vec2) {
+        let f = &self.frames[frame.min(self.frames.len() - 1)];
         let t = self.texture_size;
         (
             Vec4::new(

@@ -303,13 +303,19 @@ fn bundled_xray_reveals_a_spot_at_the_pointer_using_size_multiply_and_mask() {
         "corner stays untouched"
     );
     // A smaller size shrinks the revealed spot.
-    let small = run("gpu-bundled-xray-small", r#"{ "size": 0.15, "multiply": 1 }"#);
+    let small = run(
+        "gpu-bundled-xray-small",
+        r#"{ "size": 0.15, "multiply": 1 }"#,
+    );
     assert!(
         at(&small, 44, 32)[0] < at(&spot, 44, 32)[0] - 0.05,
         "smaller size reveals less off-centre"
     );
     // multiply 0 and size 0 both switch it off.
-    let none = run("gpu-bundled-xray-mult0", r#"{ "size": 0.5, "multiply": 0 }"#);
+    let none = run(
+        "gpu-bundled-xray-mult0",
+        r#"{ "size": 0.5, "multiply": 0 }"#,
+    );
     assert!((at(&none, 32, 32)[0] - at(&plain, 32, 32)[0]).abs() < 0.01);
     let off = run("gpu-bundled-xray-size0", r#"{ "size": 0, "multiply": 1 }"#);
     assert!((at(&off, 32, 32)[0] - at(&plain, 32, 32)[0]).abs() < 0.01);

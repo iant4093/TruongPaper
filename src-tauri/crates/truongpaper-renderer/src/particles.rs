@@ -20,7 +20,7 @@ pub struct SpriteParticleVertex {
     pub texcoord_rot_size: [f32; 4], // offset 12..28: (u, v, rotation.z, size)
     pub color: [f32; 4],             // offset 28..44: (r, g, b, a)
     pub velocity_life: [f32; 4],     // offset 44..60: (vx, vy, vz, normalized_age)
-    pub rotation_xy: [f32; 2],       // offset 60..68: (rotation.x, rotation.y)
+    pub rotation_xy: [f32; 2],       // offset 60..68: sampling uv (after sprite-sheet remap)
 }
 const _: () = assert!(std::mem::size_of::<SpriteParticleVertex>() == 68);
 
@@ -47,6 +47,63 @@ pub struct ParticleFile {
     pub operator: Vec<Value>,
     pub renderer: Vec<ParticleRendererSpec>,
     pub controlpoint: Vec<ParticleControlPointSpec>,
+    /// Particle `flags` (bit 0: world space, particles stay put when the system moves).
+    pub flags: u32,
+    /// Sprite-sheet animation cycles per particle lifetime (`sequencemultiplier`).
+    pub sequence_multiplier: f32,
+    /// Child systems that follow this system's particles.
+    pub children: Vec<ParticleChildSpec>,
+    /// The parsed file of each entry of `children` (`None` when it could not be loaded); filled
+    /// by [`ParticleFile::resolve_children`].
+    pub child_files: Vec<Option<std::sync::Arc<ParticleFile>>>,
+}
+
+/// How a child system is spawned from its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticleChildKind {
+    /// One instance at a fixed offset from the parent system.
+    Static,
+    /// One instance per live parent particle, following it.
+    EventFollow,
+    /// A short burst at each parent particle's spawn position.
+    EventSpawn,
+    /// A short burst where each parent particle dies.
+    EventDeath,
+}
+
+/// One entry of a particle file's `children` array.
+#[derive(Debug, Clone)]
+pub struct ParticleChildSpec {
+    pub name: String,
+    pub kind: ParticleChildKind,
+    pub origin: Vec3,
+    pub scale: Vec3,
+    pub angles: Vec3,
+    pub maxcount: u32,
+    pub probability: f32,
+}
+
+impl ParticleChildSpec {
+    pub fn from_json(v: &Value) -> Self {
+        let kind = match json_string(v, "type", "eventfollow")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "static" => ParticleChildKind::Static,
+            "eventspawn" => ParticleChildKind::EventSpawn,
+            "eventdeath" => ParticleChildKind::EventDeath,
+            _ => ParticleChildKind::EventFollow,
+        };
+        Self {
+            name: json_string(v, "name", ""),
+            kind,
+            origin: parse_vec3_json(v.get("origin"), Vec3::ZERO),
+            scale: parse_vec3_json(v.get("scale"), Vec3::ONE),
+            angles: parse_vec3_json(v.get("angles"), Vec3::ZERO),
+            maxcount: json_u32(v, "maxcount", 10),
+            probability: json_f32(v, "probability", 1.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,7 +276,50 @@ impl ParticleFile {
                 .iter()
                 .map(ParticleControlPointSpec::from_json)
                 .collect(),
+            flags: json_u32(v, "flags", 0),
+            sequence_multiplier: json_f32(v, "sequencemultiplier", 1.0),
+            children: json_array(v, "children")
+                .iter()
+                .map(ParticleChildSpec::from_json)
+                .collect(),
+            child_files: Vec::new(),
         })
+    }
+
+    /// Loads and parses the file of every child system through `read` (a path -> text lookup),
+    /// recursively up to a small depth. Each distinct file is parsed once.
+    pub fn resolve_children(&mut self, read: &dyn Fn(&str) -> Option<String>) {
+        let mut cache = std::collections::HashMap::new();
+        self.resolve_children_cached(read, &mut cache, 0);
+    }
+
+    fn resolve_children_cached(
+        &mut self,
+        read: &dyn Fn(&str) -> Option<String>,
+        cache: &mut std::collections::HashMap<String, Option<std::sync::Arc<ParticleFile>>>,
+        depth: u32,
+    ) {
+        self.child_files.clear();
+        if depth >= 4 {
+            self.child_files = vec![None; self.children.len()];
+            return;
+        }
+        for child in &self.children {
+            let loaded = match cache.get(&child.name) {
+                Some(hit) => hit.clone(),
+                None => {
+                    let parsed = read(&child.name)
+                        .and_then(|t| ParticleFile::from_json_str(&t).ok())
+                        .map(|mut f| {
+                            f.resolve_children_cached(read, cache, depth + 1);
+                            std::sync::Arc::new(f)
+                        });
+                    cache.insert(child.name.clone(), parsed.clone());
+                    parsed
+                }
+            };
+            self.child_files.push(loaded);
+        }
     }
 }
 
@@ -240,6 +340,8 @@ pub struct SingleParticle {
     pub lifetime: f32,
     pub noise_seed: f32,
     pub alive: bool,
+    /// Unique within the system; child instances use it to find the particle they follow.
+    pub id: u64,
 }
 
 /// Scene-object `instanceoverride` multipliers applied on top of the particle preset.
@@ -280,10 +382,42 @@ pub struct ParticleSystemInstance {
     pub rng_state: u64,
     pub elapsed_time: f32,
     pub spawned_instantaneous: bool,
+    /// Offset of this system's origin from the layer origin (non-zero for child systems).
+    pub anchor: Vec3,
+    /// World-space systems keep particles where they were emitted when `anchor` moves.
+    pub worldspace: bool,
+    /// Scale applied to particle sizes when drawn (a child's `scale`).
+    pub draw_scale: f32,
+    /// `false` stops spawning (the system drains and can then be dropped).
+    pub emitting: bool,
+    /// Elapsed time after which emission stops (burst children).
+    pub emit_until: Option<f32>,
+    pub(crate) next_id: u64,
+    /// Layer-space positions of particles spawned / dead during the last step.
+    pub(crate) spawn_events: Vec<Vec3>,
+    pub(crate) death_events: Vec<Vec3>,
+    pub(crate) groups: Vec<crate::particle_tree::ChildGroup>,
 }
 
 impl ParticleSystemInstance {
     pub fn new(spec: ParticleFile) -> Self {
+        let mut inst = Self::new_unwarmed(spec);
+        inst.prewarm();
+        inst
+    }
+
+    /// Runs the `starttime` warm-up (at most 10 s).
+    pub fn prewarm(&mut self) {
+        let prewarm = self.spec.starttime.min(10.0);
+        if prewarm > 0.0 {
+            let steps = (prewarm / 0.05).ceil() as usize;
+            for _ in 0..steps {
+                self.step(0.05, Vec3::ZERO);
+            }
+        }
+    }
+
+    pub fn new_unwarmed(spec: ParticleFile) -> Self {
         let max_count = spec.maxcount.clamp(1, 10_000) as usize;
         let mut control_points = [Vec3::ZERO; 8];
         for cp in &spec.controlpoint {
@@ -291,7 +425,16 @@ impl ParticleSystemInstance {
                 control_points[cp.id] = parse_vec3_str(&cp.offset, Vec3::ZERO);
             }
         }
-        let mut inst = Self {
+        let inst = Self {
+            worldspace: spec.flags & 1 != 0,
+            anchor: Vec3::ZERO,
+            draw_scale: 1.0,
+            emitting: true,
+            emit_until: None,
+            next_id: 0,
+            spawn_events: Vec::new(),
+            death_events: Vec::new(),
+            groups: Vec::new(),
             emit_accumulators: vec![0.0; spec.emitter.len()],
             particles: Vec::with_capacity(max_count),
             control_points,
@@ -301,13 +444,8 @@ impl ParticleSystemInstance {
             overrides: ParticleOverrides::default(),
             spec,
         };
-        let prewarm = inst.spec.starttime.min(10.0);
-        if prewarm > 0.0 {
-            let steps = (prewarm / 0.05).ceil() as usize;
-            for _ in 0..steps {
-                inst.step(0.05, Vec3::ZERO);
-            }
-        }
+        let mut inst = inst;
+        inst.groups = crate::particle_tree::ChildGroup::build(&inst.spec);
         inst
     }
 
@@ -343,11 +481,20 @@ impl ParticleSystemInstance {
         min + (max - min) * self.rand01()
     }
 
+    /// Steps this system, then its child systems.
     pub fn step(&mut self, dt: f32, cursor_layer_pos: Vec3) {
         if dt <= 0.0 {
             return;
         }
+        self.step_self(dt, cursor_layer_pos);
+        self.step_children(dt, cursor_layer_pos);
+    }
+
+    fn step_self(&mut self, dt: f32, cursor_layer_pos: Vec3) {
         self.elapsed_time += dt;
+        if self.emit_until.is_some_and(|t| self.elapsed_time > t) {
+            self.emitting = false;
+        }
 
         // 1. Update cursor-bound control points
         for cp in &self.spec.controlpoint {
@@ -369,11 +516,25 @@ impl ParticleSystemInstance {
             self.emit_accumulators[e_idx] -= periodic as f32;
             to_spawn += periodic;
 
+            if !self.emitting {
+                continue;
+            }
             for _ in 0..to_spawn {
                 if self.particles.len() >= max_count {
                     break;
                 }
-                let p = self.spawn_one_particle(emitter);
+                let mut p = self.spawn_one_particle(emitter);
+                if self.worldspace {
+                    p.position += self.anchor;
+                    p.initial_position += self.anchor;
+                }
+                self.next_id += 1;
+                p.id = self.next_id;
+                self.spawn_events.push(if self.worldspace {
+                    p.position
+                } else {
+                    self.anchor + p.position
+                });
                 self.particles.push(p);
             }
         }
@@ -384,9 +545,16 @@ impl ParticleSystemInstance {
         let cps = self.control_points;
         let time = self.elapsed_time;
 
+        let (anchor, worldspace) = (self.anchor, self.worldspace);
+        let mut deaths = Vec::new();
         self.particles.retain_mut(|p| {
             p.age += dt;
             if p.age >= p.lifetime {
+                deaths.push(if worldspace {
+                    p.position
+                } else {
+                    anchor + p.position
+                });
                 return false;
             }
             let life_frac = (p.age / p.lifetime.max(0.0001)).clamp(0.0, 1.0);
@@ -516,6 +684,7 @@ impl ParticleSystemInstance {
             }
             true
         });
+        self.death_events = deaths;
     }
 
     fn spawn_one_particle(&mut self, emitter: &ParticleEmitterSpec) -> SingleParticle {
@@ -563,6 +732,7 @@ impl ParticleSystemInstance {
             lifetime: 5.0,
             noise_seed: self.rand01(),
             alive: true,
+            id: 0,
         };
 
         for init in &self.spec.initializer.clone() {
@@ -655,7 +825,7 @@ impl ParticleSystemInstance {
                     texcoord_rot_size: [uv[0], uv[1], p.rotation.z, p.size * 0.5],
                     color: [p.color.x, p.color.y, p.color.z, p.alpha],
                     velocity_life: [p.velocity.x, p.velocity.y, p.velocity.z, norm_age],
-                    rotation_xy: [p.rotation.x, p.rotation.y],
+                    rotation_xy: uv,
                 });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

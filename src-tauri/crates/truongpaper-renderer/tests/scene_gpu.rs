@@ -225,3 +225,32 @@ fn composition_layer_renders_its_children_through_its_effects() {
         "group outside child is clear, got {bg:?}"
     );
 }
+
+/// Regression (2983846453 & co.): a named but missing texture draws nothing, not a white box.
+#[test]
+fn missing_texture_falls_back_to_transparent() {
+    let t = TempDir::new("gpu-missing-tex");
+    t.write(
+        "models/img.json",
+        r#"{ "material": "materials/img.json", "width": 64, "height": 64 }"#,
+    );
+    t.write(
+        "materials/img.json",
+        r#"{ "passes": [ { "shader": "genericimage2", "blending": "translucent",
+             "textures": ["does_not_exist"] } ] }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 },
+                       "clearcolor": "0 0 0" },
+        "objects": [ { "name": "Img", "image": "models/img.json", "origin": "32 32 0",
+                       "size": "64 64" } ] }"#;
+    let Some((px, _)) = render_hdr_with(&t, scene, 64, true) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mid = ((32 * 64 + 32) * 4) as usize;
+    assert!(
+        px[mid..mid + 3].iter().all(|v| *v < 0.05),
+        "{:?}",
+        &px[mid..mid + 4]
+    );
+}

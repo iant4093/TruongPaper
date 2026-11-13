@@ -850,6 +850,9 @@ pub struct SceneRenderer {
     clamp_sampler: wgpu::Sampler,
     repeat_sampler: wgpu::Sampler,
     white: GpuTexture,
+    /// Fallback for textures that are named but missing or unreadable (Wallpaper Engine draws
+    /// nothing for them; white made big solid boxes, e.g. 2983846453).
+    transparent: GpuTexture,
     soft_particle: wgpu::TextureView,
     fullscreen_quad: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
@@ -1196,6 +1199,15 @@ impl SceneRenderer {
             uv_scale: [1.0, 1.0],
             tex_format: None,
         };
+        let (clear_tex, clear_view) =
+            upload_rgba(device, queue, "scene_transparent", 1, 1, &[0; 4]);
+        let transparent = GpuTexture {
+            texture: clear_tex,
+            view: clear_view,
+            resolution: Vec4::ONE,
+            uv_scale: [1.0, 1.0],
+            tex_format: None,
+        };
         const SPRITE_SIZE: u32 = 32;
         let mut sprite = Vec::with_capacity((SPRITE_SIZE * SPRITE_SIZE * 4) as usize);
         for y in 0..SPRITE_SIZE {
@@ -1274,6 +1286,7 @@ impl SceneRenderer {
             clamp_sampler,
             repeat_sampler,
             white,
+            transparent,
             soft_particle,
             fullscreen_quad,
             quad_indices,
@@ -1593,7 +1606,11 @@ impl SceneRenderer {
                 resolution: t.resolution,
                 repeat: true,
             },
-            None => self.white_binding(),
+            None => SlotBinding {
+                view: &self.transparent.view,
+                resolution: Vec4::ONE,
+                repeat: false,
+            },
         }
     }
 
@@ -1907,11 +1924,15 @@ impl SceneRenderer {
                         self.ensure_texture(device, queue, vfs, p, &mut warnings);
                     }
                     self.ensure_particle_pipeline(device, blending);
-                    let view = tex_path
-                        .as_deref()
-                        .and_then(|p| self.textures.get(p))
-                        .map(|t| &t.view)
-                        .unwrap_or(&self.soft_particle);
+                    // Missing sprite texture -> nothing drawn; no texture named -> soft dot.
+                    let view = match tex_path.as_deref() {
+                        Some(p) => self
+                            .textures
+                            .get(p)
+                            .map(|t| &t.view)
+                            .unwrap_or(&self.transparent.view),
+                        None => &self.soft_particle,
+                    };
                     let draw = Self::make_simple_draw_raw(
                         device,
                         &self.simple_layout,
@@ -2111,7 +2132,16 @@ impl SceneRenderer {
                 .and_then(|p| self.textures.get(&p));
             base_uv = tex0.map(|t| t.uv_scale).unwrap_or([1.0, 1.0]);
             let tex0_format = tex0.and_then(|t| t.tex_format);
-            let tex0_view = tex0.map(|t| &t.view).unwrap_or(&self.white.view);
+            // No base texture slot -> white (solid-style image); a named but missing one -> clear.
+            let named = texture_paths
+                .first()
+                .is_some_and(|p| p.as_deref().is_some_and(|p| !p.starts_with("_rt_")));
+            let fallback = if named {
+                &self.transparent.view
+            } else {
+                &self.white.view
+            };
+            let tex0_view = tex0.map(|t| &t.view).unwrap_or(fallback);
             if let Some(mpass) = material.as_ref().and_then(|m| m.passes.first()) {
                 match self.build_we_pass(
                     device,

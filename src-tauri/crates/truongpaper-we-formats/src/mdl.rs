@@ -13,6 +13,10 @@ const EXTENDED_MESH_MARKER: usize = 0x0180000f;
 /// Newer `MDLV0023` records (marker `0x0181000e`) carry one more word before the bone indices.
 const WIDE_MESH_MARKER: usize = 0x0181000e;
 const WIDE_VERTEX_STRIDE: usize = 84;
+/// Unskinned puppet meshes (marker `0x00000009`, no `MDLS`/`MDLA`): 20-byte records of
+/// position (`f32 x3`) and uv (`f32 x2`).
+const FLAT_MESH_MARKER: usize = 0x9;
+const FLAT_VERTEX_STRIDE: usize = 20;
 /// Bytes per triangle in the index block (`3 * u16`).
 pub const MDL_TRIANGLE_BYTES: usize = 6;
 
@@ -55,6 +59,8 @@ enum VertexLayout {
     Extended,
     /// 84-byte records: position, eight words of normal/tangent data, bones, weights, uv.
     Wide,
+    /// 20-byte records: position and uv only, no bone data (bound to bone 0, weight 1).
+    Flat,
 }
 
 impl VertexLayout {
@@ -63,6 +69,7 @@ impl VertexLayout {
             Self::Standard => STANDARD_VERTEX_STRIDE,
             Self::Padded | Self::Extended => MDL_VERTEX_STRIDE,
             Self::Wide => WIDE_VERTEX_STRIDE,
+            Self::Flat => FLAT_VERTEX_STRIDE,
         }
     }
 
@@ -70,7 +77,7 @@ impl VertexLayout {
         match self {
             Self::Extended => 40,
             Self::Wide => 44,
-            Self::Standard | Self::Padded => 12,
+            Self::Standard | Self::Padded | Self::Flat => 12,
         }
     }
 }
@@ -170,6 +177,7 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
                 STANDARD_MESH_MARKER => VertexLayout::Standard,
                 EXTENDED_MESH_MARKER => VertexLayout::Extended,
                 WIDE_MESH_MARKER => VertexLayout::Wide,
+                FLAT_MESH_MARKER => VertexLayout::Flat,
                 _ => return None,
             };
             find_block(offset, layout)
@@ -210,6 +218,16 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
         let x = read_f32(b, 0);
         let y = read_f32(b, 4);
         let z = read_f32(b, 8);
+        let uv = [read_f32(b, stride - 8), read_f32(b, stride - 4)];
+        if matches!(layout, VertexLayout::Flat) {
+            vertices.push(MdlPuppetVertex {
+                position: [half_w + x, half_h - y, z],
+                blend_indices: [0; 4],
+                blend_weights: [1.0, 0.0, 0.0, 0.0],
+                uv,
+            });
+            continue;
+        }
         vertices.push(MdlPuppetVertex {
             position: [half_w + x, half_h - y, z],
             blend_indices: [
@@ -224,7 +242,7 @@ pub fn parse_mdl(bytes: &[u8], layer_size: [f32; 2]) -> IoResult<ParsedMdlMesh> 
                 read_f32(b, bones + 24),
                 read_f32(b, bones + 28),
             ],
-            uv: [read_f32(b, stride - 8), read_f32(b, stride - 4)],
+            uv,
         });
     }
 
@@ -385,6 +403,41 @@ mod tests {
         assert_eq!(mdl.vertices[1].blend_weights, [0.5, 0.5, 0.0, 0.0]);
         assert_eq!(mdl.vertices[0].uv, [0.25, 0.75]);
         assert_eq!(mdl.indices, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn parses_flat_20_byte_records_without_skeleton() {
+        let mut b = b"MDLV0016\0".to_vec();
+        b.extend(FLAT_MESH_MARKER.to_le_bytes()[..4].iter());
+        b.extend([1u8, 0, 0, 0, 1, 0, 0, 0]);
+        b.extend(b"materials/x.json\0");
+        b.extend(0u32.to_le_bytes());
+        b.extend(FLAT_MESH_MARKER.to_le_bytes()[..4].iter());
+        b.extend((2 * 20u32).to_le_bytes());
+        for (pos, uv) in [
+            ([10.0f32, 4.0, 0.0], [0.25f32, 0.75f32]),
+            ([-10.0, -4.0, 0.0], [1.0, 0.0]),
+        ] {
+            for p in pos {
+                b.extend(f32le(p));
+            }
+            for t in uv {
+                b.extend(f32le(t));
+            }
+        }
+        b.extend(6u32.to_le_bytes());
+        for i in [0u16, 1, 0] {
+            b.extend(i.to_le_bytes());
+        }
+        b.push(0);
+        let mdl = parse_mdl(&b, [200.0, 100.0]).unwrap();
+        assert_eq!(mdl.vertices.len(), 2);
+        assert_eq!(mdl.vertices[0].position, [110.0, 46.0, 0.0]);
+        assert_eq!(mdl.vertices[0].uv, [0.25, 0.75]);
+        assert_eq!(mdl.vertices[1].blend_indices, [0; 4]);
+        assert_eq!(mdl.vertices[1].blend_weights, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(mdl.indices, vec![0, 1, 0]);
+        assert!(mdl.sections.is_empty());
     }
 
     #[test]

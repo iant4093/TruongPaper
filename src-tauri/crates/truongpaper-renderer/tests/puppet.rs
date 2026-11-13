@@ -509,3 +509,18 @@ fn puppet_combos_for_the_preprocessor() {
     assert_eq!(c.get("BONECOUNT"), Some(&12));
     assert_eq!(c.len(), 2);
 }
+
+#[test]
+fn unskinned_mesh_gets_rest_skeleton() {
+    let built = build(1, &two_bones(), &moving_root_tracks(), None);
+    let no_skeleton = &built.bytes[..built.mdls_offset];
+    let mesh = parse_mdl(no_skeleton, [0.0, 0.0]).unwrap();
+    let sk = truongpaper_renderer::parse_mdl_skeleton_or_rest(no_skeleton, &mesh).unwrap();
+    assert_eq!(sk.bones.len(), 1);
+    assert!(sk.animations.is_empty());
+    assert_eq!(sk.offsets.len(), 1);
+    // A mesh that does have MDLS still takes the strict path.
+    let mesh = parse_mdl(&built.bytes, [0.0, 0.0]).unwrap();
+    let sk = truongpaper_renderer::parse_mdl_skeleton_or_rest(&built.bytes, &mesh).unwrap();
+    assert_eq!(sk.bones.len(), 2);
+}

@@ -588,8 +588,58 @@ const gradientFiles = {};
   gradientFiles['blend_gradient.tex'] = texFile(w, h, px, CLAMP_UVS);
 }
 
+// Tileable cell patterns (materials/pattern/...), used by caustics-style effects. `voronoi`
+// is a soft glow that peaks on the cell borders; `voronoi_local` is the same network with
+// thinner, sharper lines. Both are our own procedural textures.
+const patternFiles = {};
+{
+  const size = 256;
+  const cells = 8;
+  const rand = rng(61);
+  const pts = Array.from({ length: cells * cells }, () => [rand(), rand()]);
+  const border = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x / size) * cells;
+      const v = (y / size) * cells;
+      const cx = Math.floor(u);
+      const cy = Math.floor(v);
+      let f1 = Infinity;
+      let f2 = Infinity;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const gx = cx + dx;
+          const gy = cy + dy;
+          const p = pts[(((gy % cells) + cells) % cells) * cells + (((gx % cells) + cells) % cells)];
+          const d = Math.hypot(gx + p[0] - u, gy + p[1] - v);
+          if (d < f1) {
+            f2 = f1;
+            f1 = d;
+          } else if (d < f2) {
+            f2 = d;
+          }
+        }
+      }
+      border[y * size + x] = f2 - f1;
+    }
+  }
+  const glow = border.map((d) => Math.pow(1 - smooth(0, 0.25, d), 2));
+  const lines = border.map((d) => Math.pow(1 - smooth(0, 0.08, d), 2));
+  patternFiles['voronoi.tex'] = texFile(size, size, toRgba(size, [glow, glow, glow]));
+  patternFiles['voronoi_local.tex'] = texFile(size, size, toRgba(size, [lines, lines, lines]));
+}
+
+// Uniform white noise, independent per channel (util/uniform_256).
+{
+  const size = 256;
+  const rand = rng(71);
+  const ch = () => Float32Array.from({ length: size * size }, rand);
+  files['uniform_256.tex'] = texFile(size, size, toRgba(size, [ch(), ch(), ch()]));
+}
+
 for (const [dir, entries] of [
   [join(outDir, '../gradient'), gradientFiles],
+  [join(outDir, '../pattern'), patternFiles],
   [outDir, files],
   [join(outDir, '../effects'), effectFiles],
   [join(outDir, '../particle'), particleFiles],

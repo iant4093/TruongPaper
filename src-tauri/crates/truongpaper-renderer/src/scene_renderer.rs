@@ -58,7 +58,9 @@ use crate::shader_preprocessor::{
     compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
     ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
-use crate::text::{bitmap_size, load_font, rasterize, TextCache, TextKey, TextStyle};
+use crate::text::{
+    bitmap_size, grow_text_box, load_font, rasterize, FontMetrics, TextCache, TextKey, TextStyle,
+};
 use crate::video_runtime::{tightly_packed_rows, VideoFrame, VideoPixelFormat};
 
 // ------------------------------------------------------------------------------------------
@@ -794,6 +796,8 @@ struct GpuText {
     quad: wgpu::Buffer,
     /// Size of the quad in layer units (the layer size, or the bitmap size for auto-sized text).
     quad_size: Vec2,
+    /// Offset of the quad center from the layer center (a box grown for long text).
+    quad_offset: Vec2,
     /// Inputs of the last `update_text`; an identical call is a no-op (no allocation).
     last_input: Option<(String, TextStyle, Vec2)>,
     /// Keeps the bitmap texture alive for `draw`.
@@ -2236,6 +2240,7 @@ impl SceneRenderer {
                 mapped_at_creation: false,
             }),
             quad_size: Vec2::ONE,
+            quad_offset: Vec2::ZERO,
             last_input: None,
             _texture: texture,
         }
@@ -2291,10 +2296,16 @@ impl SceneRenderer {
             }
         }
         let valid = |v: f32| v.is_finite() && v >= 1.0;
-        t.quad_size = if valid(layer_size.x) && valid(layer_size.y) {
-            layer_size
+        (t.quad_size, t.quad_offset) = if valid(layer_size.x) && valid(layer_size.y) {
+            let ((gw, gh), (dx, dy)) = grow_text_box(
+                &FontMetrics::new(&t.font, style.pointsize),
+                text,
+                style,
+                (layer_size.x, layer_size.y),
+            );
+            (Vec2::new(gw, gh), Vec2::new(dx, dy))
         } else {
-            Vec2::new(w as f32, h as f32)
+            (Vec2::new(w as f32, h as f32), Vec2::ZERO)
         };
     }
 
@@ -2612,7 +2623,8 @@ impl SceneRenderer {
                         &t.draw.uniform,
                         0,
                         bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
+                            matrices.model_view_projection
+                                * Mat4::from_translation(t.quad_offset.extend(0.0)),
                             (layer.color * layer.brightness).extend(layer.alpha),
                         )),
                     );

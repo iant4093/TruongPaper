@@ -130,14 +130,20 @@ pub fn measure_text(metrics: &impl TextMetrics, text: &str, padding: f32) -> (f3
     )
 }
 
-/// Places every line of `text` inside a `size` box according to the style's alignment/padding.
+/// Places every line of `text` inside a `size` box according to the style's alignment.
+///
+/// `padding` does not inset the box: Wallpaper Engine sizes a text layer's box to the text
+/// itself (a one-line box is one line high even with the default `padding` of 32; see
+/// 3122339805's 23-unit window headers), so insetting would push left/top/right/bottom aligned
+/// text out of its box.
 pub fn layout_text(
     metrics: &impl TextMetrics,
     text: &str,
     size: (f32, f32),
     style: &TextStyle,
 ) -> Vec<LaidOutLine> {
-    let pad = style.padding.max(0.0);
+    let pad = 0.0f32;
+    let _ = style.padding;
     let lines = lines_of(text);
     let line_h = metrics.line_height();
     let block_h = lines.len() as f32 * line_h;
@@ -168,19 +174,36 @@ pub fn layout_text(
         .collect()
 }
 
-/// [`TextMetrics`] for an `ab_glyph` font at `px` pixels per em height.
+/// Scene units per em for one text `pointsize` point. Wallpaper Engine rasterizes text at
+/// 300 DPI (`300 / 72` units per point): across the sampled Workshop scenes a one-line text
+/// box is ~4.2 x pointsize x the font's line-height ratio.
+pub const TEXT_UNITS_PER_POINT: f32 = 300.0 / 72.0;
+
+/// [`TextMetrics`] for an `ab_glyph` font at a Wallpaper Engine `pointsize`.
 pub struct FontMetrics<'a> {
     font: &'a FontVec,
     scale: PxScale,
 }
 
 impl<'a> FontMetrics<'a> {
-    pub fn new(font: &'a FontVec, px: f32) -> Self {
+    pub fn new(font: &'a FontVec, pointsize: f32) -> Self {
         Self {
             font,
-            scale: PxScale::from(px.clamp(1.0, 2048.0)),
+            scale: PxScale::from(text_px_scale(font, pointsize)),
         }
     }
+}
+
+/// `ab_glyph` scale (ascent-to-descent height in units) for `pointsize`.
+pub fn text_px_scale(font: &FontVec, pointsize: f32) -> f32 {
+    let em = pointsize * TEXT_UNITS_PER_POINT;
+    let ratio = font
+        .units_per_em()
+        .filter(|u| *u > 0.0)
+        .map(|u| font.height_unscaled() / u)
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or(1.0);
+    (em * ratio).clamp(1.0, 4096.0)
 }
 
 impl TextMetrics for FontMetrics<'_> {
@@ -225,11 +248,42 @@ impl TextBitmap {
     }
 }
 
+/// Grows a text box that is too small for `text` (scripts often write longer strings than the
+/// editor text the box was sized for; Wallpaper Engine does not clip them). The box grows away
+/// from the text alignment: left-aligned text grows to the right, top-aligned text downward,
+/// centered text on both sides. Returns `(size, center offset)` in layer units (y up).
+pub fn grow_text_box(
+    metrics: &impl TextMetrics,
+    text: &str,
+    style: &TextStyle,
+    size: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    let (mw, mh) = measure_text(metrics, text, 0.0);
+    let (w, h) = (size.0.max(mw.ceil()), size.1.max(mh.ceil()));
+    let (gw, gh) = (w - size.0, h - size.1);
+    let dx = match style.halign {
+        HAlign::Left => gw / 2.0,
+        HAlign::Center => 0.0,
+        HAlign::Right => -gw / 2.0,
+    };
+    let dy = match style.valign {
+        VAlign::Top => -gh / 2.0,
+        VAlign::Center => 0.0,
+        VAlign::Bottom => gh / 2.0,
+    };
+    ((w, h), (dx, dy))
+}
+
 /// Bitmap size for a layer: the layer size, or the measured text when the layer has none.
 pub fn bitmap_size(font: &FontVec, text: &str, style: &TextStyle, layer: (f32, f32)) -> (u32, u32) {
     let clamp = |v: f32| (v.ceil().max(1.0) as u32).min(MAX_TEXT_BITMAP_DIMENSION);
     let valid = |v: f32| v.is_finite() && v >= 1.0;
     let (mut w, mut h) = layer;
+    if valid(w) && valid(h) {
+        let ((gw, gh), _) =
+            grow_text_box(&FontMetrics::new(font, style.pointsize), text, style, layer);
+        return (clamp(gw), clamp(gh));
+    }
     if !valid(w) || !valid(h) {
         let (mw, mh) = measure_text(
             &FontMetrics::new(font, style.pointsize),
@@ -427,6 +481,35 @@ mod tests {
         }
     }
 
+    /// Regression (3122339805): script text longer than the editor box is not clipped; the box
+    /// grows away from the alignment.
+    #[test]
+    fn long_text_grows_the_box_away_from_the_alignment() {
+        let box_ = (30.0, 10.0);
+        let st = |h| style(h, VAlign::Center, 0.0);
+        assert_eq!(
+            grow_text_box(&Fixed, "abcde", &st(HAlign::Left), box_),
+            ((50.0, 10.0), (10.0, 0.0))
+        );
+        assert_eq!(
+            grow_text_box(&Fixed, "abcde", &st(HAlign::Right), box_),
+            ((50.0, 10.0), (-10.0, 0.0))
+        );
+        assert_eq!(
+            grow_text_box(
+                &Fixed,
+                "ab\ncd",
+                &style(HAlign::Center, VAlign::Top, 0.0),
+                box_
+            ),
+            ((30.0, 20.0), (0.0, -5.0))
+        );
+        assert_eq!(
+            grow_text_box(&Fixed, "ab", &st(HAlign::Left), box_),
+            (box_, (0.0, 0.0))
+        );
+    }
+
     #[test]
     fn measure_includes_padding_and_longest_line() {
         assert_eq!(measure_text(&Fixed, "ab\nabcd", 5.0), (50.0, 30.0));
@@ -456,18 +539,20 @@ mod tests {
         assert_eq!((l[0].x, l[0].baseline), (70.0, 30.0 + 8.0));
     }
 
+    /// Regression (3122339805): the default padding of 32 must not push left-aligned header
+    /// text out of a one-line box.
     #[test]
-    fn padding_shrinks_the_available_area() {
+    fn padding_does_not_inset_the_box() {
         let size = (100.0, 40.0);
-        let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 6.0));
-        assert_eq!((l[0].x, l[0].baseline), (6.0, 14.0));
+        let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 32.0));
+        assert_eq!((l[0].x, l[0].baseline), (0.0, 8.0));
         let l = layout_text(
             &Fixed,
             "abc",
             size,
-            &style(HAlign::Right, VAlign::Bottom, 6.0),
+            &style(HAlign::Right, VAlign::Bottom, 32.0),
         );
-        assert_eq!((l[0].x, l[0].baseline), (64.0, 24.0 + 8.0));
+        assert_eq!((l[0].x, l[0].baseline), (70.0, 30.0 + 8.0));
     }
 
     #[test]
@@ -557,11 +642,11 @@ mod tests {
             return; // no system font on this machine
         };
         let small = TextStyle {
-            pointsize: 20.0,
+            pointsize: 10.0,
             ..TextStyle::default()
         };
         let large = TextStyle {
-            pointsize: 80.0,
+            pointsize: 45.0,
             ..TextStyle::default()
         };
         assert_eq!(
@@ -580,5 +665,24 @@ mod tests {
                 .sum::<u64>()
         };
         assert!(ink(&large) > ink(&small) * 4);
+    }
+
+    /// Regression (3122339805): `pointsize` is in points at 300 DPI, so one line of 9 pt text
+    /// fills a ~23-unit header box (em ~37 units).
+    #[test]
+    fn pointsize_maps_to_300_dpi_em() {
+        let vfs = WeVirtualFileSystem::mount(
+            std::env::temp_dir().join("tp-no-wallpaper"),
+            std::env::temp_dir().join("tp-no-wallpaper-core"),
+        );
+        let Ok(font) = load_font(&vfs, None) else {
+            return;
+        };
+        let m = FontMetrics::new(&font, 9.0);
+        let em = 9.0 * TEXT_UNITS_PER_POINT;
+        let h = m.ascent() - m.descent();
+        let ratio = font.height_unscaled() / font.units_per_em().unwrap();
+        assert!((h - em * ratio).abs() < 0.5, "{h} vs {}", em * ratio);
+        assert!((37.0..38.0).contains(&em));
     }
 }

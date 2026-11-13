@@ -50,8 +50,9 @@ pub use scene_graph::{
     SceneLayerKind, SceneLoadError, SceneProjection, ScriptProperty,
 };
 pub use scene_math::{
-    alignment_offset, build_pass_matrices, layer_model_matrix, parallax_eye_offset,
-    scene_orthographic_projection, scene_view_matrix, LayerTransform, PassMatrices,
+    alignment_offset, build_pass_matrices, layer_model_matrix, layer_pivot_matrix,
+    parallax_eye_offset, scene_orthographic_projection, scene_view_matrix, LayerTransform,
+    PassMatrices,
 };
 pub use scene_renderer::{
     composition_capture_matrix, layer_local_projection, layer_quad_vertices, pack_uniform_block,

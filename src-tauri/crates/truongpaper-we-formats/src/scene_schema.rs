@@ -444,6 +444,9 @@ pub struct SceneObject {
     /// Text layers: `top` / `center` / `bottom`.
     #[serde(default)]
     pub verticalalign: Option<String>,
+    /// Text layers: where the text box hangs from `origin` (`none` = follow the text alignment).
+    #[serde(default)]
+    pub anchor: Option<String>,
     /// Text layers: inner margin in scene units, usually `"x y"` (like `origin`/`scale`), but
     /// some scenes store a single scalar number applied to every component.
     #[serde(default)]

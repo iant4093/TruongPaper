@@ -36,8 +36,8 @@ use crate::json::Value;
 use crate::particles::{ParticleFile, ParticleOverrides, ParticleSystemInstance};
 use crate::scene_assets::{material_texture_path, MaterialFile, ModelJsonFile};
 use crate::scene_math::{
-    build_pass_matrices, layer_model_matrix, parallax_eye_offset, scene_orthographic_projection,
-    LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
+    build_pass_matrices, layer_model_matrix, layer_pivot_matrix, parallax_eye_offset,
+    scene_orthographic_projection, LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
 };
 use crate::text::{HAlign, TextStyle, VAlign, DEFAULT_POINT_SIZE};
 use crate::timeline::Timeline;
@@ -620,12 +620,60 @@ fn resolve_transform(
             .as_ref()
             .map(|s| parse_vec2_or(&resolve_bound_value(s, props), fallback_size))
             .unwrap_or(fallback_size),
-        alignment: obj.alignment.clone().unwrap_or_else(|| "center".into()),
+        alignment: obj
+            .alignment
+            .clone()
+            .or_else(|| obj.text.as_ref().map(|_| text_box_alignment(obj)))
+            .unwrap_or_else(|| "center".into()),
+    }
+}
+
+/// Where a text layer's box hangs from its `origin`. With `anchor` `none` (or absent) the box
+/// follows the text alignment, so left-aligned text starts at the origin and top-aligned text
+/// hangs below it (3122339805's window headers sit just right of their `origin`); any other
+/// `anchor` value names the anchor directly.
+fn text_box_alignment(obj: &SceneObject) -> String {
+    let norm = |s: &Option<String>| s.as_deref().map(|v| v.trim().to_ascii_lowercase());
+    if let Some(anchor) = norm(&obj.anchor).filter(|a| !a.is_empty() && a != "none") {
+        return anchor;
+    }
+    let v = match norm(&obj.verticalalign).as_deref() {
+        Some("top") => "top",
+        Some("bottom") => "bottom",
+        _ => "",
+    };
+    let h = match norm(&obj.horizontalalign).as_deref() {
+        Some("left") => "left",
+        Some("right") => "right",
+        _ => "",
+    };
+    match (v, h) {
+        ("", "") => "center".into(),
+        (v, h) => format!("{v}{h}"),
     }
 }
 
 /// Output of [`load_layer_kind`]: the kind plus the size fallback for objects without `size`.
 type LoadedKind = (SceneLayerKind, Vec2);
+
+/// Stock white texture solid layers are drawn from when they carry effects.
+pub const SOLID_EFFECT_TEXTURE: &str = "materials/util/white.tex";
+
+/// An image layer equivalent to a solid layer: `genericimage2` over the stock white texture.
+fn solid_as_image(model_path: &str) -> SceneLayerKind {
+    let material = MaterialFile::from_json_str(
+        r#"{ "passes": [ { "shader": "genericimage2", "blending": "translucent",
+             "textures": [ "util/white" ] } ] }"#,
+    )
+    .ok();
+    SceneLayerKind::Image {
+        model_path: model_path.to_string(),
+        model: ModelJsonFile::default(),
+        material,
+        texture_paths: vec![Some(SOLID_EFFECT_TEXTURE.to_string())],
+        puppet_path: None,
+    }
+}
 
 impl SceneGraph {
     /// Loads `scene_path` (normally `"scene.json"`) through `vfs`.
@@ -893,6 +941,11 @@ impl SceneGraph {
         };
         if let Some(model_path) = obj.image.as_deref() {
             return match self.load_model_kind(vfs, model_path) {
+                // A solid layer with effects runs them on a white image (tinted by `color`,
+                // like any image layer): 3122339805's audio bars are an effect on a solid.
+                Ok((SceneLayerKind::Solid { .. }, size)) if !obj.effects.is_empty() => {
+                    Some((solid_as_image(model_path), size))
+                }
                 Ok(k) => Some(k),
                 Err(e) => {
                     self.warn(format!("layer '{label}' skipped: {e}"));
@@ -1157,6 +1210,11 @@ impl SceneGraph {
             .iter()
             .map(|n| layer_model_matrix(&n.transform))
             .collect();
+        let pivots: Vec<Mat4> = self
+            .nodes
+            .iter()
+            .map(|n| layer_pivot_matrix(&n.transform))
+            .collect();
         for i in 0..self.nodes.len() {
             let mut chain = vec![i];
             let mut cur = self.nodes[i].parent;
@@ -1167,10 +1225,10 @@ impl SceneGraph {
                 chain.push(p);
                 cur = self.nodes[p].parent;
             }
-            let world = chain
-                .iter()
-                .rev()
-                .fold(Mat4::IDENTITY, |acc, &n| acc * locals[n]);
+            // Ancestors contribute their pivot (no alignment anchor); the node itself is anchored.
+            let world = chain.iter().rev().fold(Mat4::IDENTITY, |acc, &n| {
+                acc * if n == i { locals[n] } else { pivots[n] }
+            });
             self.nodes[i].world = world;
         }
         for node in &self.nodes {

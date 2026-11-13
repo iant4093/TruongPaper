@@ -683,3 +683,46 @@ fn keyframe_animations_drive_zoom_and_layer_properties() {
     );
     assert!((g.layers[mover].world_matrix.w_axis.x - 50.0).abs() < 1e-3);
 }
+
+/// Regression (3122339805): a child's origin is relative to its parent's origin point, not to
+/// the parent's aligned quad; text boxes hang from their origin per text alignment; a solid
+/// layer with effects becomes an image layer so the effects run.
+#[test]
+fn parent_alignment_text_anchor_and_solid_effects() {
+    let t = TempDir::new("sg-pixels");
+    t.write("core/models/util/solidlayer.json", r#"{ }"#);
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+        "objects": [
+          { "id": 1, "name": "Window", "image": "models/util/solidlayer.json",
+            "origin": "100 800 0", "size": "600 30", "alignment": "topleft" },
+          { "id": 2, "name": "Child", "image": "models/util/solidlayer.json", "parent": 1,
+            "origin": "300 -400 0", "size": "10 10" },
+          { "id": 3, "name": "Header", "text": "NIGHTLIFE", "parent": 1, "origin": "7 -15 0",
+            "size": "116 23", "horizontalalign": "left", "verticalalign": "center",
+            "anchor": "none" },
+          { "id": 4, "name": "Bars", "image": "models/util/solidlayer.json",
+            "origin": "500 500 0", "size": "500 100",
+            "effects": [ { "file": "effects/tint/effect.json", "id": 5 } ] } ] }"#;
+    let g = load(&t, scene, None);
+    let child = &g.layers[g.find_layer("Child").unwrap()];
+    let c = child.world_matrix.w_axis;
+    assert!(
+        (c.x - 400.0).abs() < 1e-3 && (c.y - 400.0).abs() < 1e-3,
+        "{c:?}"
+    );
+    let header = &g.layers[g.find_layer("Header").unwrap()];
+    assert_eq!(header.transform.alignment, "left");
+    let h = header.world_matrix.w_axis;
+    // Left edge at the origin: center = 100 + 7 + 116 / 2.
+    assert!(
+        (h.x - 165.0).abs() < 1e-3 && (h.y - 785.0).abs() < 1e-3,
+        "{h:?}"
+    );
+    let bars = &g.layers[g.find_layer("Bars").unwrap()];
+    assert!(
+        matches!(&bars.kind, SceneLayerKind::Image { texture_paths, .. }
+            if texture_paths[0].as_deref() == Some("materials/util/white.tex")),
+        "{:?}",
+        bars.kind.name()
+    );
+}

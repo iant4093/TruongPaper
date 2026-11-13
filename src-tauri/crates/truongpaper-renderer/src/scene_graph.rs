@@ -1561,6 +1561,15 @@ impl SceneGraph {
             // Scripted effect constants (`constantshadervalues`): run so their `init`/`update`
             // side effects (shared state) happen, as in Wallpaper Engine.
             for (ei, effect) in obj.effects.iter().enumerate() {
+                // Effect `visible` scripts mostly drive the layer (`thisLayer.visible = ...`)
+                // from media events; their return value is the effect flag, applied by the
+                // renderer's plan, so only the side effects matter here.
+                push(
+                    &format!("effectvisible.{ei}"),
+                    effect.visible.script(),
+                    effect.visible.script_properties(),
+                    effect.visible.default_value().to_string(),
+                );
                 for (pi, pass) in effect.passes.iter().enumerate() {
                     let mut names: Vec<&String> = pass.constantshadervalues.keys().collect();
                     names.sort();

@@ -295,6 +295,13 @@ impl SceneRuntime {
                 rt.pull_layers()?;
             }
         }
+        // Nothing plays in a wallpaper host without media integration: tell scripts so.
+        if !rt.registered_slots.is_empty() {
+            if let Err(err) = rt.engine.dispatch_media_idle() {
+                tracing::warn!("scene {scene_path}: media idle events: {err}");
+            }
+            rt.pull_layers()?;
+        }
         rt.settle_scripts();
         Ok(rt)
     }
@@ -795,6 +802,27 @@ mod tests {
         assert_eq!(initial_value_expr(None, "x"), r#""x""#);
         assert_eq!(initial_value_expr(None, "0.3"), "0.3");
         assert_eq!(initial_value_expr(None, "0.5 0 1"), "new Vec3(0.5, 0, 1)");
+    }
+
+    #[test]
+    fn effect_visible_script_hides_album_art_without_media() {
+        let t = scene_dir("mediaidle");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Art", "image": "models/solid.json",
+                "effects": [ { "file": "effects/tint/effect.json",
+                  "visible": { "script": "export function mediaThumbnailChanged(e) { thisObject.visible = e.hasThumbnail; }", "value": false },
+                  "passes": [] } ] },
+              { "name": "Plain", "image": "models/solid.json" }
+            ]
+        }"#,
+        );
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        assert!(!layer(&rt, "Art").visible);
+        assert!(layer(&rt, "Plain").visible);
     }
 
     #[test]

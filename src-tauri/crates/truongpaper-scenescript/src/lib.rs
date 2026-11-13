@@ -918,6 +918,33 @@ impl SceneScriptEngine {
         })
     }
 
+    /// Tells every script that no media is playing, as Wallpaper Engine does at load when
+    /// nothing is playing: `mediaStatusChanged`, `mediaPlaybackChanged`,
+    /// `mediaPropertiesChanged`, `mediaThumbnailChanged` (`hasThumbnail: false`, black colors)
+    /// and `mediaTimelineChanged`. Scripts use these to hide album-art layers.
+    pub fn dispatch_media_idle(&self) -> anyhow::Result<()> {
+        self.guarded(INIT_BUDGET, |ctx| {
+            eval_js::<()>(
+                ctx,
+                "(function() {
+                    const black = () => new Vec3(0, 0, 0);
+                    __callAll('mediaStatusChanged', { enabled: false });
+                    __callAll('mediaPlaybackChanged', { state: 0 });
+                    __callAll('mediaPropertiesChanged', {
+                        title: '', artist: '', subTitle: '', albumTitle: '',
+                        albumArtist: '', genres: '', contentType: 0,
+                    });
+                    __callAll('mediaThumbnailChanged', {
+                        hasThumbnail: false, primaryColor: black(), secondaryColor: black(),
+                        tertiaryColor: black(), textColor: black(), highContrastColor: black(),
+                    });
+                    __callAll('mediaTimelineChanged', { position: 0, duration: 0 });
+                })()"
+                    .to_string(),
+            )
+        })
+    }
+
     /// Calls `applyUserProperties(changedProps)` on every script and merges the values into
     /// `engine.userProperties`. `changed_props_json` is a JSON object of changed properties.
     pub fn apply_user_properties(&self, changed_props_json: &str) -> anyhow::Result<()> {

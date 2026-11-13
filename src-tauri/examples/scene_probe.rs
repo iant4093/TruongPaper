@@ -117,7 +117,7 @@ async fn render() -> anyhow::Result<()> {
                 l.key(),
                 l.visible,
                 l.alpha,
-                &k[..k.len().min(24)]
+                k.chars().take(24).collect::<String>()
             );
             eprintln!("    {:?}", l.transform);
         }

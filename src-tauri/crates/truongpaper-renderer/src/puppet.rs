@@ -355,8 +355,10 @@ fn parse_mdla(
             bone_frames.push(frames);
         }
         let tracks_end = r.pos;
-        if a + 1 < anim_num {
-            let standard = skip_mdla_trailer(&mut r, version, extended_layout);
+        let standard = skip_mdla_trailer(&mut r, version, extended_layout);
+        if a + 1 == anim_num {
+            standard?;
+        } else {
             if standard.is_err() || !plausible_header(bytes, r.pos) {
                 // Newer exports append extra per-clip blocks (e.g. float tracks); resync on the
                 // next valid clip header instead of trusting a fixed trailer size.

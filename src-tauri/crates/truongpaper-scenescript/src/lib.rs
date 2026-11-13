@@ -1459,6 +1459,8 @@ mod tests {
     #[test]
     fn engine_screensaver_and_animation_frame_count_exist() {
         let e = engine();
+        e.register_layer("L", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
         e.register_property_script(
             "a",
             "L",

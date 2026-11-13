@@ -35,6 +35,7 @@ use crate::diagnostics::DiagnosticsLog;
 use crate::json::Value;
 use crate::particles::{ParticleFile, ParticleOverrides, ParticleSystemInstance};
 use crate::scene_assets::{material_texture_path, MaterialFile, ModelJsonFile};
+use crate::scene_camera::{active_camera, collect_camera_objects, CameraObjectRef};
 use crate::scene_math::{
     build_pass_matrices, layer_model_matrix, layer_pivot_matrix, parallax_eye_offset,
     scene_orthographic_projection, LayerTransform, PassMatrices, DEFAULT_SCENE_SIZE,
@@ -456,6 +457,8 @@ pub struct SceneGraph {
     zoom_timeline: Option<Timeline>,
     /// Live values of script-driven effect constants, keyed by `(layer, effect, pass)`.
     effect_overrides: HashMap<(usize, usize, usize), HashMap<String, Value>>,
+    /// Camera assets (perspective scenes); the bottom-most visible one sets the view.
+    camera_objects: Vec<CameraObjectRef>,
 }
 
 impl std::fmt::Debug for SceneGraph {
@@ -799,6 +802,7 @@ impl SceneGraph {
             animations: Vec::new(),
             zoom_timeline: None,
             effect_overrides: HashMap::new(),
+            camera_objects: raw.as_ref().map(collect_camera_objects).unwrap_or_default(),
         };
         let perspective = raw.is_some()
             && graph
@@ -862,14 +866,21 @@ impl SceneGraph {
 
         let projection = if perspective {
             let cam = &self.scene.camera;
+            let asset = active_camera(&self.camera_objects, &self.scene.objects, props);
             SceneProjection::Perspective {
-                fov_degrees: raw_number(raw, "fov").unwrap_or(DEFAULT_PERSPECTIVE_FOV_DEGREES),
+                fov_degrees: asset
+                    .and_then(|a| a.fov_degrees)
+                    .or_else(|| raw_number(raw, "fov"))
+                    .unwrap_or(DEFAULT_PERSPECTIVE_FOV_DEGREES),
                 aspect: self.scene_size.x / self.scene_size.y.max(1.0),
                 nearz: raw_number(raw, "nearz").unwrap_or(DEFAULT_PERSPECTIVE_NEARZ),
                 farz: raw_number(raw, "farz").unwrap_or(DEFAULT_PERSPECTIVE_FARZ),
-                eye: parse_vec3_or(&cam.eye, Vec3::new(0.0, 0.0, 1.0)),
-                center: parse_vec3_or(&cam.center, Vec3::ZERO),
-                up: parse_vec3_or(&cam.up, Vec3::Y),
+                eye: asset.map_or_else(
+                    || parse_vec3_or(&cam.eye, Vec3::new(0.0, 0.0, 1.0)),
+                    |a| a.eye,
+                ),
+                center: asset.map_or_else(|| parse_vec3_or(&cam.center, Vec3::ZERO), |a| a.center),
+                up: asset.map_or_else(|| parse_vec3_or(&cam.up, Vec3::Y), |a| a.up),
             }
         } else {
             SceneProjection::Orthographic {

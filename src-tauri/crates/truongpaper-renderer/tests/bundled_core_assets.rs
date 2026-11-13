@@ -257,11 +257,41 @@ fn bundled_rain_sprites_are_hairline_streaks() {
         let (w, h) = (mip.width as usize, mip.height as usize);
         let mid = h * 3 / 5;
         let row = &rgba[mid * w * 4..(mid + 1) * w * 4];
-        let covered = row.chunks(4).filter(|p| p[3] > 64).count();
+        let covered = row.chunks(4).filter(|p| p[3] > 32).count();
+        let peak = rgba.chunks(4).map(|p| p[3]).max().unwrap();
+        assert!(peak <= 140, "rain{n}: peak alpha {peak} too strong");
         assert!(covered >= 1, "rain{n}: streak vanished");
         assert!(
-            covered * 100 <= w * 12,
+            covered * 100 <= w * 6,
             "rain{n}: {covered}/{w} texels opaque, wider than a hairline"
+        );
+    }
+}
+
+/// Regression (1851524277, 2282120494, 1959836574, 2269193950, 2887099508): stock light-shaft
+/// presets spawn up to 16 huge (350-1000 px) additive sprites. Their texture must stay a faint
+/// veil (peak alpha <= ~45 %) or overlapping shafts saturate into glare.
+#[test]
+fn bundled_light_shafts_are_faint_veils() {
+    let t = TempDir::new("bundled-shafts");
+    let vfs = vfs(&t);
+    for n in 0..=8 {
+        let bytes = vfs
+            .read_bytes(&format!("materials/particle/light/light_shafts_{n}.tex"))
+            .unwrap();
+        let tex = truongpaper_we_formats::parse_tex(&bytes).unwrap();
+        let mip = &tex.images[0][0];
+        let rgba = truongpaper_we_formats::decode_tex_mipmap_to_rgba8(
+            tex.header.format,
+            tex.free_image_format,
+            mip,
+        )
+        .unwrap();
+        let peak = rgba.chunks(4).map(|p| p[3]).max().unwrap();
+        assert!(peak > 40, "light_shafts_{n}: vanished (peak {peak})");
+        assert!(
+            peak <= 115,
+            "light_shafts_{n}: peak alpha {peak} too strong"
         );
     }
 }

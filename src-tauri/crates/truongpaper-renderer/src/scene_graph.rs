@@ -449,6 +449,8 @@ pub struct SceneGraph {
     animations: Vec<(usize, ScriptProperty, Timeline)>,
     /// Keyframe animation on `general.zoom`.
     zoom_timeline: Option<Timeline>,
+    /// Live values of script-driven effect constants, keyed by `(layer, effect, pass)`.
+    effect_overrides: HashMap<(usize, usize, usize), HashMap<String, Value>>,
 }
 
 impl std::fmt::Debug for SceneGraph {
@@ -591,6 +593,24 @@ fn fmt_vec2(v: Vec2) -> String {
 
 /// Parses a stringified JS value into vector components: `"x y z"`, `"x,y,z"`, a JSON array, or
 /// a JSON object with `x`/`y`/`z` keys (what `JSON.stringify(Vec3)` produces).
+/// A SceneScript return value as a shader-constant JSON value: numbers, `"x y z"` strings,
+/// arrays and `{x,y,z,w}` / `{r,g,b}` objects become numbers / component arrays.
+fn script_value_to_json(value: &str) -> Option<Value> {
+    let t = value.trim();
+    let parsed = Value::parse(t).unwrap_or_else(|_| Value::String(t.to_string()));
+    match parsed {
+        Value::Object(_) => {
+            let comps: Vec<Value> = [["x", "r"], ["y", "g"], ["z", "b"], ["w", "a"]]
+                .iter()
+                .map_while(|keys| keys.iter().find_map(|k| parsed.get(k)).cloned())
+                .collect();
+            (!comps.is_empty()).then_some(Value::Array(comps))
+        }
+        Value::Null => None,
+        other => Some(other),
+    }
+}
+
 fn parse_script_components(raw: &str) -> Vec<f32> {
     let t = raw.trim();
     if t.starts_with('{') || t.starts_with('[') {
@@ -773,6 +793,7 @@ impl SceneGraph {
             render_epoch: 0,
             animations: Vec::new(),
             zoom_timeline: None,
+            effect_overrides: HashMap::new(),
         };
         let perspective = raw.is_some()
             && graph
@@ -1589,6 +1610,9 @@ impl SceneGraph {
         let Some((layer_key, prop_name)) = slot_key.rsplit_once('/') else {
             return false;
         };
+        if prop_name.starts_with("effect.") {
+            return self.apply_effect_constant_output(layer_key, prop_name, value);
+        }
         let Some(prop) = ScriptProperty::parse(prop_name) else {
             return false;
         };
@@ -1605,6 +1629,61 @@ impl SceneGraph {
             self.recompute_world();
         }
         ok
+    }
+
+    /// Stores a script's value for the effect constant named by `prop_name`
+    /// (`effect.<effect>.<pass>.<constant>`); the renderer reads it every frame.
+    fn apply_effect_constant_output(
+        &mut self,
+        layer_key: &str,
+        prop_name: &str,
+        value: &str,
+    ) -> bool {
+        let mut parts = prop_name.splitn(4, '.');
+        parts.next();
+        let (Some(ei), Some(pi), Some(name)) = (
+            parts.next().and_then(|s| s.parse::<usize>().ok()),
+            parts.next().and_then(|s| s.parse::<usize>().ok()),
+            parts.next(),
+        ) else {
+            return false;
+        };
+        let Some(li) = self.find_layer(layer_key) else {
+            return false;
+        };
+        let Some(pass) = self.layers[li]
+            .effects
+            .get(ei)
+            .and_then(|e| e.passes.get(pi))
+        else {
+            return false;
+        };
+        let Some(constant) = pass
+            .constantshadervalues
+            .keys()
+            .find(|k| k.replace('/', "_") == name)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(v) = script_value_to_json(value) else {
+            return false;
+        };
+        self.effect_overrides
+            .entry((li, ei, pi))
+            .or_default()
+            .insert(constant, v);
+        true
+    }
+
+    /// Script-driven constants of one effect pass (`None` when no script drives it).
+    pub fn effect_constant_overrides(
+        &self,
+        layer: usize,
+        effect: usize,
+        pass: usize,
+    ) -> Option<&HashMap<String, Value>> {
+        self.effect_overrides.get(&(layer, effect, pass))
     }
 
     /// Applies a stringified value to property `prop` of layer `li`. Returns

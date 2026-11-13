@@ -496,7 +496,7 @@ fn load_script_module<'js>(
     source: &str,
 ) -> anyhow::Result<rquickjs::Object<'js>> {
     let full = format!(
-        "const thisObject = globalThis.__cur.thisLayer, thisLayer = thisObject, createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
+        "let thisObject = globalThis.__cur.thisLayer, thisLayer = thisObject;\nconst createScriptProperties = globalThis.__cur.createScriptProperties;\n{source}"
     );
     let module = Module::declare(ctx.clone(), format!("__slot{unique}"), full)
         .map_err(|e| js_err(ctx, e))?;
@@ -1126,6 +1126,24 @@ mod tests {
         r[4] = 0.25;
         let out = e.step_frame(0.016, 0.0, [0.0; 3], &l, &r).unwrap();
         assert_eq!(out["a"], "0.5,0.25,0.375,0.5,16");
+    }
+
+    #[test]
+    fn this_layer_can_be_reassigned_like_a_sloppy_global() {
+        let e = engine();
+        e.register_layer("hero", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_layer("bg", [0.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_property_script(
+            "s",
+            "hero",
+            "thisLayer = thisScene.getLayer('bg');\nexport function update(v) { thisLayer.visible = false; return thisLayer.name; }",
+            "0",
+        )
+        .unwrap();
+        assert_eq!(step(&e)["s"], "bg");
+        assert!(!e.layer_state("bg").unwrap().unwrap().visible);
     }
 
     #[test]

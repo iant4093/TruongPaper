@@ -798,6 +798,33 @@ mod tests {
     }
 
     #[test]
+    fn effect_constant_script_output_reaches_the_graph() {
+        let t = scene_dir("effectconstlive");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Bg", "image": "models/solid.json",
+                "effects": [ { "file": "effects/tint/effect.json", "passes": [ { "constantshadervalues": {
+                  "color": { "script": "export function update(v) { return new Vec3(0.5, 0.25, 1); }",
+                             "value": "0.25 0.5 1" },
+                  "alpha": { "script": "export function update(v) { return 0.75; }", "value": 1 } } } ] } ] }
+            ]
+        }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        step(&mut rt);
+        let live = rt
+            .graph()
+            .effect_constant_overrides(0, 0, 0)
+            .expect("scripted constants are live");
+        let floats = |k: &str| truongpaper_renderer::scene_renderer::json_value_floats(&live[k]);
+        assert_eq!(floats("color"), Some(vec![0.5, 0.25, 1.0]));
+        assert_eq!(floats("alpha"), Some(vec![0.75]));
+    }
+
+    #[test]
     fn effect_constant_scripts_run_and_share_state() {
         let t = scene_dir("effectconst");
         t.write(

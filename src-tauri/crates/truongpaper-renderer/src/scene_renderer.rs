@@ -772,8 +772,14 @@ struct GpuPass {
     uniform_fields: Vec<ReflectedUniformField>,
     uniform_size: usize,
     constants: HashMap<String, Vec<f32>>,
+    /// Reflected uniform metadata and the unmapped material constants, kept so scripted
+    /// `constantshadervalues` can re-map a live value each frame.
+    metadata: Vec<UniformCommentMetadata>,
+    raw_constants: HashMap<String, Value>,
     resolutions: [Vec4; 8],
     target: RenderTargetId,
+    effect_index: usize,
+    pass_index: usize,
 }
 
 enum GpuStep {
@@ -1718,6 +1724,7 @@ impl SceneRenderer {
         })??;
         let slots = reflect_texture_slots(&[&vert, &frag]);
         let metadata = parse_uniform_comment_metadata(&format!("{vert}\n{frag}"));
+        let raw_constants = constants.clone();
         let constants = map_material_constants(&metadata, constants);
         let attrs = layer_vertex_attributes(&vertex_attribute_locations(&vert));
 
@@ -1806,8 +1813,12 @@ impl SceneRenderer {
             uniform_fields: compiled.uniform_fields,
             uniform_size,
             constants,
+            metadata,
+            raw_constants,
             resolutions,
             target,
+            effect_index: 0,
+            pass_index: 0,
         })
     }
 
@@ -2344,7 +2355,11 @@ impl SceneRenderer {
                             fmt,
                             p.blending,
                         ) {
-                            Ok(pass) => GpuStep::Pass(Some(Box::new(pass))),
+                            Ok(mut pass) => {
+                                pass.effect_index = p.effect_index;
+                                pass.pass_index = p.pass_index;
+                                GpuStep::Pass(Some(Box::new(pass)))
+                            }
                             Err(e) => {
                                 let msg = format!(
                                     "layer '{}' effect {} pass {}: {e}; pass skipped",
@@ -2683,10 +2698,23 @@ impl SceneRenderer {
         }
     }
 
-    fn write_we_uniforms(queue: &wgpu::Queue, pass: &GpuPass, base: &UniformValues) {
+    fn write_we_uniforms(
+        queue: &wgpu::Queue,
+        pass: &GpuPass,
+        base: &UniformValues,
+        live: Option<&HashMap<String, Value>>,
+    ) {
         let mut values = base.clone();
         values.texture_resolutions = pass.resolutions;
-        values.constants = pass.constants.clone();
+        values.constants = match live {
+            // Script-driven `constantshadervalues` replace the baked value every frame.
+            Some(live) if !live.is_empty() => {
+                let mut raw = pass.raw_constants.clone();
+                raw.extend(live.iter().map(|(k, v)| (k.clone(), v.clone())));
+                map_material_constants(&pass.metadata, &raw)
+            }
+            _ => pass.constants.clone(),
+        };
         let bytes = pack_uniform_block(&pass.uniform_fields, pass.uniform_size, &values);
         queue.write_buffer(&pass.uniform_buffer, 0, &bytes);
     }
@@ -3202,7 +3230,7 @@ impl SceneRenderer {
                         continue;
                     };
                     if let Some(base) = &fx.base {
-                        Self::write_we_uniforms(queue, base, &local_values);
+                        Self::write_we_uniforms(queue, base, &local_values, None);
                         run_pass(encoder, "scene_layer_base", view, transparent, |rp| {
                             rp.set_pipeline(&base.pipeline);
                             rp.set_bind_group(0, &base.uniform_bind_group, &[]);
@@ -3280,7 +3308,12 @@ impl SceneRenderer {
                     let Some(view) = target_view(&pass.target) else {
                         continue;
                     };
-                    Self::write_we_uniforms(queue, pass, &effect_values);
+                    Self::write_we_uniforms(
+                        queue,
+                        pass,
+                        &effect_values,
+                        graph.effect_constant_overrides(li, pass.effect_index, pass.pass_index),
+                    );
                     run_pass(encoder, "scene_effect_pass", view, transparent, |rp| {
                         rp.set_pipeline(&pass.pipeline);
                         rp.set_bind_group(0, &pass.uniform_bind_group, &[]);

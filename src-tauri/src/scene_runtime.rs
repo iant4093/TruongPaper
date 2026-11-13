@@ -40,8 +40,8 @@ fn finite_cursor(c: [f32; 2]) -> [f32; 2] {
     [f(c[0]), f(c[1])]
 }
 
-/// Local time of day in `[0, 1)` from UTC (no timezone database is available here); hosts that
-/// know the local offset call [`SceneRuntime::set_time_of_day`].
+/// Fallback time of day in `[0, 1)` from UTC, used only if the script runtime's local clock
+/// is unavailable; hosts that know the local offset call [`SceneRuntime::set_time_of_day`].
 fn utc_time_of_day() -> f32 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -242,6 +242,7 @@ impl SceneRuntime {
         }
 
         let mut init_outputs = Vec::new();
+        let mut pre_visible: HashMap<String, bool> = HashMap::new();
         for slot in rt.graph.property_scripts() {
             let layer_key = slot
                 .slot_key
@@ -258,6 +259,11 @@ impl SceneRuntime {
             } else {
                 slot.initial_value.clone()
             };
+            if prop == Some(ScriptProperty::Visible) {
+                if let Ok(Some(st)) = rt.engine.layer_state(&layer_key) {
+                    pre_visible.insert(slot.slot_key.clone(), st.visible);
+                }
+            }
             match rt.engine.register_property_script_with_props(
                 &slot.slot_key,
                 &layer_key,
@@ -282,7 +288,21 @@ impl SceneRuntime {
         if !rt.registered_slots.is_empty() {
             rt.pull_layers()?;
         }
-        for (slot, value) in init_outputs {
+        for (slot, mut value) in init_outputs {
+            // `init` assigning `thisLayer.visible` writes the bound property itself; `update`
+            // then receives that value, so it must not be overwritten by the stale initial one.
+            if slot.ends_with("/visible") {
+                if let Some(layer_key) = slot.rsplit_once('/').map(|(k, _)| k) {
+                    if let Ok(Some(st)) = rt.engine.layer_state(layer_key) {
+                        if pre_visible.get(&slot).is_some_and(|b| *b != st.visible) {
+                            value = st.visible.to_string();
+                            if let Err(err) = rt.engine.set_slot_bool(&slot, st.visible) {
+                                tracing::warn!("scene {scene_path}: {slot}: {err}");
+                            }
+                        }
+                    }
+                }
+            }
             rt.graph.apply_script_output(&slot, &value);
         }
         // Scripts only exist now: give each its `applyUserProperties(all values)` call, as
@@ -436,7 +456,13 @@ impl SceneRuntime {
     ) -> anyhow::Result<()> {
         self.push_layers()?;
         let screen = cursor_screen_position(cursor_norm, self.graph.monitor_size.to_array());
-        let tod = self.time_of_day.unwrap_or_else(utc_time_of_day);
+        let tod = match self.time_of_day {
+            Some(t) => t,
+            None => self
+                .engine
+                .local_time_of_day()
+                .unwrap_or_else(|_| utc_time_of_day()),
+        };
         self.engine.set_input_state(screen, left_down, tod)?;
         let outputs = self
             .engine
@@ -802,6 +828,29 @@ mod tests {
         assert_eq!(initial_value_expr(None, "x"), r#""x""#);
         assert_eq!(initial_value_expr(None, "0.3"), "0.3");
         assert_eq!(initial_value_expr(None, "0.5 0 1"), "new Vec3(0.5, 0, 1)");
+    }
+
+    #[test]
+    fn init_assigning_this_layer_visible_survives_update_returning_value() {
+        let t = scene_dir("initvisible");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Viz", "image": "models/solid.json",
+                "visible": { "script": "export function init() { thisLayer.visible = false; }\nexport function update(v) { return v; }", "value": true } },
+              { "name": "Ret", "image": "models/solid.json",
+                "visible": { "script": "export function init(v) { return false; }\nexport function update(v) { return v; }", "value": true } }
+            ]
+        }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        for _ in 0..3 {
+            rt.step(0.016, [0.5, 0.5], false, &[0.0; 64], &[0.0; 64]);
+        }
+        assert!(!layer(&rt, "Viz").visible);
+        assert!(!layer(&rt, "Ret").visible);
     }
 
     #[test]

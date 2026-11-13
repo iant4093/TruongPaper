@@ -427,7 +427,8 @@ mod tests {
         assert_eq!(f.children[0].origin, Vec3::new(60.0, 0.0, 0.0));
         assert_eq!(f.children[0].scale, Vec3::splat(2.0));
         assert_eq!(f.children[0].maxcount, 3);
-        assert_eq!(f.children[1].kind, ParticleChildKind::EventFollow);
+        // An omitted `type` is WE's default kind: a single static instance.
+        assert_eq!(f.children[1].kind, ParticleChildKind::Static);
         assert_eq!(f.children[1].maxcount, 10);
     }
 

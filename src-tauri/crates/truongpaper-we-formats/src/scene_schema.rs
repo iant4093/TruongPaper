@@ -442,6 +442,9 @@ pub struct SceneObject {
     // Layer kind payloads
     #[serde(default, deserialize_with = "unbound")]
     pub image: Option<String>,
+    /// 3D model objects: VFS path of a static `.mdl` mesh.
+    #[serde(default, deserialize_with = "unbound")]
+    pub model: Option<String>,
     #[serde(default, deserialize_with = "unbound")]
     pub particle: Option<String>,
     #[serde(default)]

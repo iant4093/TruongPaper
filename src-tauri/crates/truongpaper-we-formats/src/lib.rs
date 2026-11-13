@@ -4,6 +4,7 @@
 
 pub mod binary;
 pub mod mdl;
+pub mod mdl_static;
 pub mod scene_schema;
 pub mod vfs;
 
@@ -15,6 +16,7 @@ pub use binary::{
 pub use mdl::{
     parse_mdl, MdlPuppetVertex, MdlSection, ParsedMdlMesh, MDL_TRIANGLE_BYTES, MDL_VERTEX_STRIDE,
 };
+pub use mdl_static::{parse_static_mdl, StaticMdl, StaticMdlVertex};
 pub use scene_schema::{
     condition_matches, parse_scene_json, parse_user_properties, parse_vec2_or, parse_vec3_or,
     parse_vec4_or, parse_vec_components, resolve_bound_bool, resolve_bound_value,

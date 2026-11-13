@@ -211,6 +211,12 @@ fn bundled_particle_sprites_resolve_and_have_shaped_alpha() {
         "debris/debris5",
         "normal_ring",
         "normal_ring_smooth",
+        "normal_splash",
+        "normal_pinch_rotate",
+        "drop_normal",
+        "bubbles/bubble1normal",
+        "bubbles/bubble4normal",
+        "star",
         "ring",
         "smoke/smoke2light",
         "star1",
@@ -321,4 +327,44 @@ fn bundled_gradient_mask_resolves() {
         .unwrap();
     let parsed = truongpaper_we_formats::parse_tex(&bytes).unwrap();
     assert_eq!(parsed.header.texture_height, 256);
+}
+
+/// Refraction normal maps are read as `xy * 2 - 1` by particle_refract.wgsl: they must be
+/// neutral (128, 128) where the sprite is flat and bend the sample somewhere else.
+#[test]
+fn bundled_particle_normal_maps_are_tangent_space() {
+    let t = TempDir::new("bundled-normals");
+    let vfs = vfs(&t);
+    for tex in [
+        "normal_splash",
+        "normal_pinch_rotate",
+        "drop_normal",
+        "bubbles/bubble1normal",
+        "bubbles/bubble2normal",
+        "bubbles/bubble3normal",
+        "bubbles/bubble4normal",
+    ] {
+        let bytes = vfs
+            .read_bytes(&format!("materials/particle/{tex}.tex"))
+            .unwrap_or_else(|e| panic!("{tex}: {e}"));
+        let parsed = truongpaper_we_formats::parse_tex(&bytes).unwrap();
+        let mip = &parsed.images[0][0];
+        let rgba = truongpaper_we_formats::decode_tex_mipmap_to_rgba8(
+            parsed.header.format,
+            parsed.free_image_format,
+            mip,
+        )
+        .unwrap();
+        let bent = rgba
+            .chunks(4)
+            .filter(|p| p[3] > 128 && (p[0].abs_diff(128) > 12 || p[1].abs_diff(128) > 12))
+            .count();
+        assert!(bent > 50, "{tex}: normals never leave flat ({bent})");
+        assert!(
+            rgba.chunks(4).all(|p| p[2] >= 128),
+            "{tex}: z must point up"
+        );
+        let corner = &rgba[0..4];
+        assert_eq!(corner[3], 0, "{tex}: corner must be transparent");
+    }
 }

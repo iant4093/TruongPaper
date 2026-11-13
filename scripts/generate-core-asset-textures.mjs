@@ -209,15 +209,15 @@ function sprite(w, h, alphaAt, flags = CLAMP_UVS) {
 
 // halo family: soft glows of rising sharpness, halo_N with a faint ring.
 particleFiles['halo.tex'] = sprite(128, 128, (u, v) => Math.pow(1 - smooth(0, 1, Math.hypot(u, v)), 2));
+// No rim: stock halos are plain glows, and a ring at r=0.7 shows up as a hard circle once
+// scenes scale the sprite to 1000+ px (Pac-Man glow children, rain bokeh).
 for (let n = 1; n <= 8; n++) {
-  const ring = 0.05 + 0.03 * n;
   const core = 0.1 * n;
   particleFiles[`halo_${n}.tex`] = sprite(128, 128, (u, v) => {
     const r = Math.hypot(u, v);
     const glow = Math.pow(1 - smooth(0, 1, r), 1.5) * (0.6 - 0.04 * n);
-    const rim = Math.exp(-(((r - 0.7) / 0.08) ** 2)) * ring * 2;
     const disk = 1 - smooth(core * 0.5, core * 0.5 + 0.25, r);
-    return Math.max(glow + rim, disk * (n > 4 ? 0.9 : 0.5));
+    return Math.max(glow, disk * (n > 4 ? 0.9 : 0.5));
   });
 }
 // Raindrop / water drop: teardrop with a bright centre.
@@ -235,7 +235,7 @@ particleFiles['misc/wave.tex'] = sprite(128, 128, (u, v) => {
 // Dot with a slight chromatic fringe look: bright core and soft halo.
 particleFiles['chromaticdot.tex'] = sprite(64, 64, (u, v) => {
   const r = Math.hypot(u, v);
-  return Math.max(1 - smooth(0.15, 0.45, r), Math.pow(1 - smooth(0, 1, r), 3) * 0.6);
+  return Math.pow(1 - smooth(0, 1, r), 2.5) * 0.35;
 });
 // Light shafts: tall soft beams with different widths.
 for (let n = 0; n < 5; n++) {
@@ -262,13 +262,14 @@ for (let n = 1; n <= 3; n++) {
     return m * smooth(0.25, 0.8, noise[y * 128 + x]);
   });
 }
-// Bubbles: transparent body, bright rim, small highlight.
+// Bubbles: soft translucent discs (bokeh-like) with a faint rim and highlight. Scenes scale them
+// to 50-200 px and stack hundreds additively, so the rim must stay far below the body+glow.
 for (let n = 1; n <= 4; n++) {
   particleFiles[`bubbles/bubble${n}.tex`] = sprite(64, 64, (u, v) => {
     const r = Math.hypot(u, v);
-    const rim = Math.exp(-(((r - 0.88) / 0.07) ** 2));
-    const body = (1 - smooth(0.0, 0.9, r)) * 0.12;
-    const hl = Math.exp(-((((u + 0.35) ** 2 + (v + 0.35) ** 2) / 0.02))) * 0.8;
+    const rim = Math.exp(-(((r - 0.85) / 0.1) ** 2)) * 0.08;
+    const body = (1 - smooth(0.5, 1, r)) * 0.2;
+    const hl = Math.exp(-((((u + 0.35) ** 2 + (v + 0.35) ** 2) / 0.03))) * 0.15;
     return (rim + body + hl) * (1 - smooth(0.95, 1, r));
   });
 }
@@ -416,6 +417,58 @@ function normalRing(profile) {
 const bump = (r, c, wd) => Math.exp(-(((r - c) / wd) ** 2));
 particleFiles['normal_ring.tex'] = normalRing((r) => -2 * ((r - 0.7) / 0.1 ** 2) * bump(r, 0.7, 0.1) * 0.12);
 particleFiles['normal_ring_smooth.tex'] = normalRing((r) => -2 * ((r - 0.6) / 0.25 ** 2) * bump(r, 0.6, 0.25) * 0.1);
+/** Tangent-space normal sprite (xy encode the slope, y up in sprite space) on a w x h grid. */
+function normalSprite(w, h, field, flags = CLAMP_UVS) {
+  const px = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = ((x + 0.5) / w) * 2 - 1;
+      const v = ((y + 0.5) / h) * 2 - 1;
+      const [nx, ny, a] = field(u, v);
+      const len = Math.hypot(nx, ny, 1);
+      px.set([Math.round((0.5 + nx / len / 2) * 255), Math.round((0.5 + ny / len / 2) * 255), Math.round((0.5 + 1 / len / 2) * 255), Math.round(Math.min(1, Math.max(0, a)) * 255)], (y * w + x) * 4);
+    }
+  }
+  return texFile(w, h, px, flags);
+}
+// Splash: a bright crest ring with a weaker trailing ring inside it (water impact).
+particleFiles['normal_splash.tex'] = normalSprite(128, 128, (u, v) => {
+  const r = Math.hypot(u, v) || 1e-6;
+  const slope = -2 * ((r - 0.72) / 0.09 ** 2) * bump(r, 0.72, 0.09) * 0.1 - 2 * ((r - 0.45) / 0.12 ** 2) * bump(r, 0.45, 0.12) * 0.05;
+  return [(-slope * u) / r, (-slope * v) / r, 1 - smooth(0.92, 1, r)];
+});
+// Pinch / rotate: a swirl (tangential push) around a pinched centre (radial pull).
+particleFiles['normal_pinch_rotate.tex'] = normalSprite(128, 128, (u, v) => {
+  const r = Math.hypot(u, v) || 1e-6;
+  const fall = (1 - smooth(0, 1, r)) * smooth(0, 0.15, r);
+  const swirl = 0.7 * fall;
+  const pinch = -0.5 * fall;
+  return [(-v / r) * swirl + (u / r) * pinch, (u / r) * swirl + (v / r) * pinch, 1 - smooth(0.92, 1, r)];
+});
+// Droplet normal: dome over the teardrop silhouette of drop.tex, steep at the outline.
+particleFiles['drop_normal.tex'] = normalSprite(64, 128, (u, v) => {
+  const y = v * 0.5 + 0.5;
+  const wdt = 0.1 + 0.8 * Math.pow(y, 1.6) * (1 - smooth(0.7, 1, y) * 0.9);
+  const e = Math.min(1, Math.abs(u) / (wdt || 1e-6));
+  const lens = Math.pow(e, 3) * 0.9;
+  const ey = Math.pow(Math.abs(v), 4) * 0.5;
+  const body = 1 - smooth(wdt * 0.55, wdt, Math.abs(u));
+  return [Math.sign(u) * lens, Math.sign(v) * ey, body * smooth(0, 0.08, y) * (1 - smooth(0.93, 1, y))];
+});
+// Bubble normals: a spherical shell, flat in the middle and bending hard towards the rim.
+for (let n = 1; n <= 4; n++) {
+  particleFiles[`bubbles/bubble${n}normal.tex`] = normalSprite(64, 64, (u, v) => {
+    const r = Math.hypot(u, v) || 1e-6;
+    const k = Math.pow(Math.min(1, r / 0.9), 2 + n * 0.5) * (0.7 + 0.15 * n);
+    return [(u / r) * k, (v / r) * k, 1 - smooth(0.92, 1, r)];
+  });
+}
+// Generic 4-point star sprite (particle/star): bright core, thin spikes.
+particleFiles['star.tex'] = sprite(64, 64, (u, v) => {
+  const r = Math.hypot(u, v);
+  const spike = Math.pow(Math.abs(Math.cos(Math.atan2(v, u) * 2)), 24) * Math.pow(1 - smooth(0, 1, r), 1.8);
+  return Math.max(spike, glowDot(r, 3) * 0.8);
+});
 // Smoke variant for lit smoke: softer and more transparent than smoke2.
 {
   const noise = fractal(128, 4, 3, 2101);

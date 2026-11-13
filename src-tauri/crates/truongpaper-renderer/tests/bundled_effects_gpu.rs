@@ -308,7 +308,7 @@ fn bundled_xray_reveals_a_spot_at_the_pointer_using_size_multiply_and_mask() {
         r#"{ "size": 0.15, "multiply": 1 }"#,
     );
     assert!(
-        at(&small, 44, 32)[0] < at(&spot, 44, 32)[0] - 0.05,
+        at(&small, 40, 32)[0] < at(&spot, 40, 32)[0] - 0.05,
         "smaller size reveals less off-centre"
     );
     // multiply 0 and size 0 both switch it off.

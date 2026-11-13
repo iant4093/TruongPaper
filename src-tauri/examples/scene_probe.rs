@@ -158,6 +158,9 @@ async fn render() -> anyhow::Result<()> {
             });
         }
     }
+    if std::env::var("PROBE_NOBLOOM").is_ok() {
+        runtime.graph_mut().scene.general.bloom = None;
+    }
     if std::env::var("PROBE_NOFX").is_ok() {
         for l in runtime.graph_mut().layers.iter_mut() {
             l.effects.clear();

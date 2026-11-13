@@ -1243,6 +1243,11 @@ impl SceneGraph {
         self.nodes.get(object_index).map(|n| n.world)
     }
 
+    /// Resolved parent (`scene.objects` index) of any `scene.objects` entry.
+    pub fn object_parent(&self, object_index: usize) -> Option<usize> {
+        self.nodes.get(object_index).and_then(|n| n.parent)
+    }
+
     /// Index of the first layer whose name (or id string) equals `key`.
     pub fn find_layer(&self, key: &str) -> Option<usize> {
         self.layers

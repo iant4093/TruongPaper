@@ -27,9 +27,25 @@ fn f16_to_f32(bits: u16) -> f32 {
 
 /// Renders `scene` once into a `size`x`size` Rgba16Float target and returns RGBA f32 pixels.
 fn render_hdr(t: &TempDir, scene: &str, size: u32) -> Option<(Vec<f32>, Vec<String>)> {
+    render_hdr_with(t, scene, size, false)
+}
+
+/// [`render_hdr`], optionally with the bundled stock assets (effects, `util/white`) mounted.
+fn render_hdr_with(
+    t: &TempDir,
+    scene: &str,
+    size: u32,
+    bundled: bool,
+) -> Option<(Vec<f32>, Vec<String>)> {
     let (device, queue) = device()?;
     t.write("scene.json", scene);
-    let vfs = WeVirtualFileSystem::mount(t.path().to_path_buf(), t.path().join("core"));
+    let mut vfs = WeVirtualFileSystem::mount(t.path().to_path_buf(), t.path().join("core"));
+    if bundled {
+        vfs = vfs.with_bundled_assets_dir(Some(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../resources/core-assets/assets"),
+        ));
+    }
     let graph = SceneGraph::load(&vfs, "scene.json", None, Vec2::splat(size as f32)).unwrap();
     let mut renderer = SceneRenderer::new(&device, &queue, HDR_FORMAT, graph.scene_size);
     renderer.load(&device, &queue, &vfs, &graph);
@@ -170,4 +186,42 @@ fn effectless_composition_layer_leaves_the_scene_unchanged() {
             &px[i..i + 4]
         );
     }
+}
+
+/// Regression (2370927443): a composition layer renders its child layers into itself, so its
+/// effects apply to the children; `copybackground: false` starts the group transparent.
+#[test]
+fn composition_layer_renders_its_children_through_its_effects() {
+    let t = TempDir::new("gpu-compose-group");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 8, "height": 8 }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 },
+                       "clearcolor": "0 0 0" },
+        "objects": [
+          { "id": 1, "name": "Group", "image": "models/util/composelayer.json",
+            "origin": "48 32 0", "size": "32 64", "copybackground": false,
+            "effects": [ { "file": "effects/tint/effect.json", "passes": [
+                { "constantshadervalues": { "color": "1 0 0", "alpha": 1.0 } } ] } ] },
+          { "id": 2, "name": "Child", "image": "models/solid.json", "parent": 1,
+            "origin": "0 0 0", "size": "8 8", "color": "1 1 1" } ] }"#;
+    let Some((px, _)) = render_hdr_with(&t, scene, 64, true) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let at = |x: u32, y: u32| {
+        let i = ((y * 64 + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let c = at(48, 32);
+    assert!(
+        c[0] > 0.9 && c[1] < 0.1 && c[2] < 0.1,
+        "child tinted red, got {c:?}"
+    );
+    let bg = at(40, 8);
+    assert!(
+        bg.iter().all(|v| *v < 0.05),
+        "group outside child is clear, got {bg:?}"
+    );
 }

@@ -404,6 +404,10 @@ pub struct SceneObject {
     pub size: Option<UserBoundValue<String>>,
     #[serde(default)]
     pub alignment: Option<String>,
+    /// Composition layers: start from the scene behind the layer (`true`, the default) or
+    /// from transparent (only the child layers are captured).
+    #[serde(default)]
+    pub copybackground: Option<bool>,
     #[serde(default = "default_alpha")]
     pub alpha: UserBoundValue<f32>,
     #[serde(default = "default_brightness")]

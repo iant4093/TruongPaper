@@ -778,6 +778,21 @@ struct GpuEffectLayer {
     is_composition: bool,
     samples_scene: bool,
     fullscreen: bool,
+    /// Composition layers with child layers: the children render into this group target
+    /// (layer-local space) instead of the scene, and it is the layer's base image.
+    group: Option<GpuGroup>,
+}
+
+/// Render group of a composition layer (Wallpaper Engine composition layers render their
+/// children into themselves, so the layer's effects apply to the whole group).
+struct GpuGroup {
+    target: GpuTarget,
+    /// Draws the group target as the layer's base image.
+    base: SimpleDraw,
+    /// `copybackground`: draws the scene behind the layer into the group before the children.
+    backdrop: Option<SimpleDraw>,
+    /// Layer indices of the group's direct members, in draw order.
+    members: Vec<usize>,
 }
 
 struct GpuParticles {
@@ -842,6 +857,8 @@ pub struct SceneRenderer {
     /// Embedded MP4 `.tex` paths -> placeholder texture size.
     video_textures: HashMap<String, (u32, u32)>,
     layers: Vec<Option<GpuLayer>>,
+    /// Composition layer whose group each layer draws into (`None` = the scene).
+    group_owner: Vec<Option<usize>>,
     layer_outputs: HashMap<i32, GpuTarget>,
     bloom: Option<GpuBloom>,
     blit: SimpleDraw,
@@ -1263,6 +1280,7 @@ impl SceneRenderer {
             textures: HashMap::new(),
             video_textures: HashMap::new(),
             layers: Vec::new(),
+            group_owner: Vec::new(),
             layer_outputs: HashMap::new(),
             bloom: None,
             last_pointer: Vec2::splat(0.5),
@@ -1926,6 +1944,7 @@ impl SceneRenderer {
             };
             self.layers.push(gpu);
         }
+        self.build_groups(device, graph);
 
         let bloom =
             BloomPlan::from_general(&graph.scene.general, &graph.user_props, graph.scene_size);
@@ -1933,6 +1952,69 @@ impl SceneRenderer {
             self.bloom = Some(self.build_bloom(device, bloom));
         }
         warnings
+    }
+
+    /// Assigns every layer to the nearest ancestor composition layer that is drawn, and gives
+    /// those compositions a group target.
+    fn build_groups(&mut self, device: &wgpu::Device, graph: &SceneGraph) {
+        let n = graph.layers.len().min(self.layers.len());
+        let by_object: HashMap<usize, usize> = graph.layers[..n]
+            .iter()
+            .enumerate()
+            .map(|(li, l)| (l.object_index, li))
+            .collect();
+        let is_group = |li: usize| {
+            matches!(graph.layers[li].kind, SceneLayerKind::Composition { .. })
+                && matches!(self.layers[li], Some(GpuLayer::Effects(_)))
+        };
+        let mut owner = vec![None; n];
+        for (li, slot) in owner.iter_mut().enumerate() {
+            let mut cur = graph.layers[li].parent_object;
+            let mut hops = 0;
+            while let (Some(obj), true) = (cur, hops <= n) {
+                hops += 1;
+                match by_object.get(&obj) {
+                    Some(&pi) if is_group(pi) => {
+                        *slot = Some(pi);
+                        break;
+                    }
+                    Some(&pi) => cur = graph.layers[pi].parent_object,
+                    // Transform-only parent node: keep walking through the scene objects.
+                    None => cur = graph.object_parent(obj),
+                }
+            }
+        }
+        for gi in 0..n {
+            let members: Vec<usize> = (0..n).filter(|&li| owner[li] == Some(gi)).collect();
+            if members.is_empty() {
+                continue;
+            }
+            let copy_bg = graph.scene.objects[graph.layers[gi].object_index]
+                .copybackground
+                .unwrap_or(true);
+            let Some(GpuLayer::Effects(fx)) = self.layers[gi].as_ref() else {
+                continue;
+            };
+            let target = create_target(
+                device,
+                "scene_group",
+                fx.plan.width,
+                fx.plan.height,
+                HDR_FORMAT,
+            );
+            let base = self.make_simple_draw(device, &target.view);
+            let backdrop = copy_bg.then(|| self.make_simple_draw(device, &self.full_frame.view));
+            if let Some(GpuLayer::Effects(fx)) = self.layers[gi].as_mut() {
+                fx.samples_scene = false;
+                fx.group = Some(GpuGroup {
+                    target,
+                    base,
+                    backdrop,
+                    members,
+                });
+            }
+        }
+        self.group_owner = owner;
     }
 
     fn load_effect_layer(
@@ -2219,6 +2301,7 @@ impl SceneRenderer {
             is_composition,
             samples_scene,
             fullscreen,
+            group: None,
         })
     }
 
@@ -2519,7 +2602,6 @@ impl SceneRenderer {
             {
                 continue;
             }
-            let matrices = graph.layer_pass_matrices(li, camera);
             if let (SceneLayerKind::Text { text, style }, Some(GpuLayer::Text(t))) =
                 (&layer.kind, self.layers[li].as_mut())
             {
@@ -2608,91 +2690,21 @@ impl SceneRenderer {
                 }
                 _ => {}
             }
-            let Some(gpu) = self.layers[li].as_ref() else {
-                continue;
-            };
-            match gpu {
-                GpuLayer::Effects(fx) => {
-                    self.render_effect_layer(queue, encoder, fx, layer, &matrices, &base_values);
-                }
-                GpuLayer::Text(t) => {
-                    if !layer.visible {
-                        continue;
-                    }
-                    queue.write_buffer(
-                        &t.draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection
-                                * Mat4::from_translation(t.quad_offset.extend(0.0)),
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
-                    queue.write_buffer(
-                        &t.quad,
-                        0,
-                        bytemuck::cast_slice(&layer_quad_vertices(t.quad_size, [1.0, 1.0])),
-                    );
-                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
-                    run_pass(encoder, "scene_text", &self.scene.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &t.draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, t.quad.slice(..));
-                        rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..6, 0, 0..1);
-                    });
-                }
-                GpuLayer::Solid(draw) => {
-                    queue.write_buffer(
-                        &draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
-                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
-                    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("scene_solid_quad"),
-                        contents: bytemuck::cast_slice(&layer_quad_vertices(
-                            layer.transform.size,
-                            [1.0, 1.0],
-                        )),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                    run_pass(encoder, "scene_solid", &self.scene.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, vb.slice(..));
-                        rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..6, 0, 0..1);
-                    });
-                }
-                GpuLayer::Particles(ps) => {
-                    let count = graph
-                        .particle_system(li)
-                        .map(|s| s.particles.len().min(ps.capacity))
-                        .unwrap_or(0);
-                    if count == 0 {
-                        continue;
-                    }
-                    queue.write_buffer(
-                        &ps.draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
-                    let pipeline = &self.particle_pipelines[&ps.blending];
-                    run_pass(encoder, "scene_particles", &self.scene.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &ps.draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, ps.vertex_buffer.slice(..));
-                        rp.set_index_buffer(ps.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..(count * 6) as u32, 0, 0..1);
-                    });
-                }
+        }
+
+        for li in 0..layer_count {
+            if self.group_owner.get(li).copied().flatten().is_none() {
+                self.draw_layer(
+                    device,
+                    queue,
+                    encoder,
+                    graph,
+                    camera,
+                    &base_values,
+                    li,
+                    &self.scene,
+                    Mat4::IDENTITY,
+                );
             }
         }
 
@@ -2729,17 +2741,155 @@ impl SceneRenderer {
         );
     }
 
-    fn render_effect_layer(
+    /// Draws layer `li` into `dest` (the scene, or a composition group target). `pre` maps the
+    /// scene's clip space into `dest` (identity for the scene).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_layer(
         &self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        fx: &GpuEffectLayer,
-        layer: &SceneLayer,
-        matrices: &PassMatrices,
+        graph: &SceneGraph,
+        camera: &CameraState,
         base_values: &UniformValues,
+        li: usize,
+        dest: &GpuTarget,
+        pre: Mat4,
     ) {
-        let color_blend = matches!(layer.color_blend_mode, 7 | 12) && layer.visible;
-        if fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend {
+        let layer = &graph.layers[li];
+        if !layer.visible
+            && layer
+                .id
+                .is_none_or(|id| !self.layer_outputs.contains_key(&id))
+        {
+            return;
+        }
+        let mut matrices = graph.layer_pass_matrices(li, camera);
+        if pre != Mat4::IDENTITY {
+            matrices.model_view_projection = pre * matrices.model_view_projection;
+            matrices.model_view_projection_inverse = matrices.model_view_projection.inverse();
+            matrices.view_projection = pre * matrices.view_projection;
+        }
+        let Some(gpu) = self.layers[li].as_ref() else {
+            return;
+        };
+        match gpu {
+            GpuLayer::Effects(fx) => {
+                self.render_effect_layer(
+                    device,
+                    queue,
+                    encoder,
+                    graph,
+                    camera,
+                    base_values,
+                    li,
+                    fx,
+                    &matrices,
+                    dest,
+                );
+            }
+            GpuLayer::Text(t) => {
+                if !layer.visible {
+                    return;
+                }
+                queue.write_buffer(
+                    &t.draw.uniform,
+                    0,
+                    bytemuck::bytes_of(&SimpleUniforms::new(
+                        matrices.model_view_projection
+                            * Mat4::from_translation(t.quad_offset.extend(0.0)),
+                        (layer.color * layer.brightness).extend(layer.alpha),
+                    )),
+                );
+                queue.write_buffer(
+                    &t.quad,
+                    0,
+                    bytemuck::cast_slice(&layer_quad_vertices(t.quad_size, [1.0, 1.0])),
+                );
+                let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
+                run_pass(encoder, "scene_text", &dest.view, None, |rp| {
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &t.draw.bind_group, &[]);
+                    rp.set_vertex_buffer(0, t.quad.slice(..));
+                    rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                    rp.draw_indexed(0..6, 0, 0..1);
+                });
+            }
+            GpuLayer::Solid(draw) => {
+                queue.write_buffer(
+                    &draw.uniform,
+                    0,
+                    bytemuck::bytes_of(&SimpleUniforms::new(
+                        matrices.model_view_projection,
+                        (layer.color * layer.brightness).extend(layer.alpha),
+                    )),
+                );
+                let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
+                let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_solid_quad"),
+                    contents: bytemuck::cast_slice(&layer_quad_vertices(
+                        layer.transform.size,
+                        [1.0, 1.0],
+                    )),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                run_pass(encoder, "scene_solid", &dest.view, None, |rp| {
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &draw.bind_group, &[]);
+                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                    rp.draw_indexed(0..6, 0, 0..1);
+                });
+            }
+            GpuLayer::Particles(ps) => {
+                let count = graph
+                    .particle_system(li)
+                    .map(|s| s.particles.len().min(ps.capacity))
+                    .unwrap_or(0);
+                if count == 0 {
+                    return;
+                }
+                queue.write_buffer(
+                    &ps.draw.uniform,
+                    0,
+                    bytemuck::bytes_of(&SimpleUniforms::new(
+                        matrices.model_view_projection,
+                        (layer.color * layer.brightness).extend(layer.alpha),
+                    )),
+                );
+                let pipeline = &self.particle_pipelines[&ps.blending];
+                run_pass(encoder, "scene_particles", &dest.view, None, |rp| {
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &ps.draw.bind_group, &[]);
+                    rp.set_vertex_buffer(0, ps.vertex_buffer.slice(..));
+                    rp.set_index_buffer(ps.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    rp.draw_indexed(0..(count * 6) as u32, 0, 0..1);
+                });
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_effect_layer(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &SceneGraph,
+        camera: &CameraState,
+        base_values: &UniformValues,
+        li: usize,
+        fx: &GpuEffectLayer,
+        matrices: &PassMatrices,
+        dest: &GpuTarget,
+    ) {
+        let layer = &graph.layers[li];
+        let into_scene = std::ptr::eq(dest, &self.scene);
+        let color_blend = matches!(layer.color_blend_mode, 7 | 12) && layer.visible && into_scene;
+        let backdrop = fx.group.as_ref().is_some_and(|g| g.backdrop.is_some());
+        if into_scene
+            && (fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend || backdrop)
+        {
             encoder.copy_texture_to_texture(
                 self.scene.texture.as_image_copy(),
                 self.full_frame.texture.as_image_copy(),
@@ -2752,6 +2902,59 @@ impl SceneRenderer {
         }
         let layer_size = Vec2::new(fx.plan.width as f32, fx.plan.height as f32);
         let local = layer_local_projection(layer_size);
+        if let Some(group) = &fx.group {
+            if layer.visible {
+                let capture = composition_capture_matrix(
+                    fx.fullscreen,
+                    local,
+                    matrices.model_view_projection,
+                );
+                run_pass(
+                    encoder,
+                    "scene_group_clear",
+                    &group.target.view,
+                    Some(wgpu::Color::TRANSPARENT),
+                    |_| {},
+                );
+                if let (Some(draw), true) = (&group.backdrop, into_scene) {
+                    queue.write_buffer(
+                        &draw.uniform,
+                        0,
+                        bytemuck::bytes_of(&SimpleUniforms::new(capture, Vec4::ONE)),
+                    );
+                    let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Normal)];
+                    run_pass(
+                        encoder,
+                        "scene_group_backdrop",
+                        &group.target.view,
+                        None,
+                        |rp| {
+                            rp.set_pipeline(pipeline);
+                            rp.set_bind_group(0, &draw.bind_group, &[]);
+                            rp.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
+                            rp.set_index_buffer(
+                                self.quad_indices.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            rp.draw_indexed(0..6, 0, 0..1);
+                        },
+                    );
+                }
+                for &child in &group.members {
+                    self.draw_layer(
+                        device,
+                        queue,
+                        encoder,
+                        graph,
+                        camera,
+                        base_values,
+                        child,
+                        &group.target,
+                        capture,
+                    );
+                }
+            }
+        }
         let local_values = UniformValues {
             matrices: PassMatrices {
                 model_view_projection: local,
@@ -2781,7 +2984,7 @@ impl SceneRenderer {
         };
         let target_view = |id: &RenderTargetId| -> Option<&wgpu::TextureView> {
             match id {
-                RenderTargetId::Scene => Some(&self.scene.view),
+                RenderTargetId::Scene => Some(&dest.view),
                 RenderTargetId::FullFrame => None,
                 other => fx.targets.get(other).map(|t| &t.view),
             }
@@ -2809,6 +3012,24 @@ impl SceneRenderer {
                             rp.set_bind_group(0, &base.uniform_bind_group, &[]);
                             rp.set_bind_group(1, &base.texture_bind_group, &[]);
                             rp.set_vertex_buffer(0, fx.base_quad.slice(..));
+                            rp.set_index_buffer(
+                                self.quad_indices.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            rp.draw_indexed(0..6, 0, 0..1);
+                        });
+                    } else if let Some(group) = &fx.group {
+                        let draw = &group.base;
+                        queue.write_buffer(
+                            &draw.uniform,
+                            0,
+                            bytemuck::bytes_of(&SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE)),
+                        );
+                        let pipeline = &self.composite_pipelines[&(FBO_FORMAT, BlendMode::Normal)];
+                        run_pass(encoder, "scene_layer_group_base", view, transparent, |rp| {
+                            rp.set_pipeline(pipeline);
+                            rp.set_bind_group(0, &draw.bind_group, &[]);
+                            rp.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
                             rp.set_index_buffer(
                                 self.quad_indices.slice(..),
                                 wgpu::IndexFormat::Uint16,
@@ -2940,33 +3161,25 @@ impl SceneRenderer {
                     } else {
                         &self.composite_pipelines[&(HDR_FORMAT, blend)]
                     };
-                    run_pass(
-                        encoder,
-                        "scene_layer_composite",
-                        &self.scene.view,
-                        None,
-                        |rp| {
-                            rp.set_pipeline(pipeline);
-                            rp.set_bind_group(0, &draw.bind_group, &[]);
-                            if color_blend {
-                                rp.set_bind_group(1, &self.color_blend_backdrop, &[]);
+                    run_pass(encoder, "scene_layer_composite", &dest.view, None, |rp| {
+                        rp.set_pipeline(pipeline);
+                        rp.set_bind_group(0, &draw.bind_group, &[]);
+                        if color_blend {
+                            rp.set_bind_group(1, &self.color_blend_backdrop, &[]);
+                        }
+                        // Effects operate on the source image. Warp the finished image
+                        // when drawing into the scene, where bones can move past the quad.
+                        let (vb, ib, count) = match &fx.puppet {
+                            Some(p) if p.index_count > 0 => {
+                                (&p.vertex_buffer, &p.index_buffer, p.index_count)
                             }
-                            // Effects operate on the source image. Warp the finished image
-                            // when drawing into the scene, where bones can move past the quad.
-                            let (vb, ib, count) = match &fx.puppet {
-                                Some(p) if p.index_count > 0 => {
-                                    (&p.vertex_buffer, &p.index_buffer, p.index_count)
-                                }
-                                _ if fx.fullscreen => {
-                                    (&self.fullscreen_quad, &self.quad_indices, 6)
-                                }
-                                _ => (&fx.effect_quad, &self.quad_indices, 6),
-                            };
-                            rp.set_vertex_buffer(0, vb.slice(..));
-                            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
-                            rp.draw_indexed(0..count, 0, 0..1);
-                        },
-                    );
+                            _ if fx.fullscreen => (&self.fullscreen_quad, &self.quad_indices, 6),
+                            _ => (&fx.effect_quad, &self.quad_indices, 6),
+                        };
+                        rp.set_vertex_buffer(0, vb.slice(..));
+                        rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+                        rp.draw_indexed(0..count, 0, 0..1);
+                    });
                 }
             }
         }

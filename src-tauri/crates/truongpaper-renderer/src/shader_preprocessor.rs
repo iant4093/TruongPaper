@@ -166,7 +166,8 @@ fn prepare_shader_stage(
 ) -> IoResult<String> {
     // Recursively expand #include "..." directives via 4-layer VFS
     let hoisted = hoist_sampler_declarations(raw_source);
-    let expanded_body = expand_includes_recursive(vfs, &hoisted, 0)?;
+    let expanded_body =
+        crate::shader_compat::fixup_hlsl_source(&expand_includes_recursive(vfs, &hoisted, 0)?);
 
     let mut out = String::with_capacity(expanded_body.len() + 2048);
     out.push_str(WE_GLSL_PREAMBLE);
@@ -481,6 +482,10 @@ fn convert_scalar_decl(line: &str) -> Option<String> {
         return None;
     }
     let init = init.trim().strip_suffix(';')?.trim();
+    // Several statements on one line (`float d = f(x); d = pow(d, .1);`).
+    if init.contains(';') {
+        return None;
+    }
     if init.split("//").nth(1).is_some() || init.is_empty() {
         return None;
     }
@@ -611,6 +616,41 @@ pub fn translate_we_shader_pair(
     raw_vert_preprocessed: &str,
     raw_frag_preprocessed: &str,
 ) -> Result<TranslatedWeShaderPair, String> {
+    let first =
+        match translate_we_shader_pair_strict(label, raw_vert_preprocessed, raw_frag_preprocessed)
+        {
+            Ok(translated) => return Ok(translated),
+            Err(first) => first,
+        };
+    // Retry with HLSL-style lax builtin overloads (mixed vector widths).
+    let add = |src: &str| {
+        let overloads = crate::shader_compat::lax_builtin_overloads(src);
+        let marker = "#define sample we_sample\n";
+        match src.find(marker) {
+            Some(at) if !overloads.is_empty() => {
+                let at = at + marker.len();
+                Some(format!("{}{}{}", &src[..at], overloads, &src[at..]))
+            }
+            _ => None,
+        }
+    };
+    let (vert, frag) = (add(raw_vert_preprocessed), add(raw_frag_preprocessed));
+    if vert.is_none() && frag.is_none() {
+        return Err(first);
+    }
+    translate_we_shader_pair_strict(
+        label,
+        vert.as_deref().unwrap_or(raw_vert_preprocessed),
+        frag.as_deref().unwrap_or(raw_frag_preprocessed),
+    )
+    .map_err(|retry| format!("{first} [lax-overload retry: {retry}]"))
+}
+
+fn translate_we_shader_pair_strict(
+    label: &str,
+    raw_vert_preprocessed: &str,
+    raw_frag_preprocessed: &str,
+) -> Result<TranslatedWeShaderPair, String> {
     let linked_vert =
         apply_linked_varying_compatibility(raw_vert_preprocessed, raw_frag_preprocessed);
     let linked_frag = apply_fragment_texcoord_compatibility(raw_frag_preprocessed);
@@ -629,7 +669,12 @@ pub fn translate_we_shader_pair(
             &naga::front::glsl::Options::from(naga::ShaderStage::Vertex),
             &vert_450,
         )
-        .map_err(|errs| format!("Vertex GLSL parse error in {label}: {errs:?}"))?;
+        .map_err(|errs| {
+            format!(
+                "Vertex GLSL parse error in {label}: {}",
+                describe_parse_errors(&vert_450, &errs)
+            )
+        })?;
 
     let frag_450 = drop_unwritten_fragment_inputs(&frag_450, &vert_naga);
     let frag_naga = frontend
@@ -637,7 +682,12 @@ pub fn translate_we_shader_pair(
             &naga::front::glsl::Options::from(naga::ShaderStage::Fragment),
             &frag_450,
         )
-        .map_err(|errs| format!("Fragment GLSL parse error in {label}: {errs:?}"))?;
+        .map_err(|errs| {
+            format!(
+                "Fragment GLSL parse error in {label}: {}",
+                describe_parse_errors(&frag_450, &errs)
+            )
+        })?;
 
     let vertex_wgsl = naga_module_to_wgsl(&vert_naga)
         .map_err(|e| format!("Vertex shader validation error in {label}: {e}"))?;
@@ -654,6 +704,21 @@ pub fn translate_we_shader_pair(
         uniform_fields,
         uniform_buffer_size: ubo_size.max(16),
     })
+}
+
+/// Each parse error's kind plus the offending source line, so logs show what failed.
+fn describe_parse_errors(src: &str, errs: &naga::front::glsl::ParseErrors) -> String {
+    let mut out = String::new();
+    for e in &errs.errors {
+        let line = e
+            .meta
+            .to_range()
+            .and_then(|r| src.get(..r.start).map(|head| head.matches('\n').count()))
+            .and_then(|n| src.lines().nth(n))
+            .unwrap_or("");
+        out.push_str(&format!("{:?} at `{}`; ", e.kind, line.trim()));
+    }
+    out
 }
 
 /// Stock shaders leave fragment varyings behind that the vertex stage does not write (unused
@@ -727,7 +792,25 @@ pub fn compile_we_shader_pair(
     raw_vert_preprocessed: &str,
     raw_frag_preprocessed: &str,
 ) -> Result<CompiledWeShaderPair, String> {
-    let translated = translate_we_shader_pair(label, raw_vert_preprocessed, raw_frag_preprocessed)?;
+    let translated = translate_we_shader_pair(label, raw_vert_preprocessed, raw_frag_preprocessed)
+        .inspect_err(|e| {
+            // Debug aid: `TRUONGPAPER_DUMP_FAILED_SHADERS=<dir>` keeps the preprocessed sources
+            // of every shader that failed to translate.
+            if let Ok(dir) = std::env::var("TRUONGPAPER_DUMP_FAILED_SHADERS") {
+                let stem: String = label
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let base = std::path::Path::new(&dir).join(format!(
+                    "{stem}-{:08x}",
+                    raw_frag_preprocessed.len() ^ (raw_vert_preprocessed.len() << 12)
+                ));
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(base.with_extension("vert"), raw_vert_preprocessed);
+                let _ = std::fs::write(base.with_extension("frag"), raw_frag_preprocessed);
+                let _ = std::fs::write(base.with_extension("err"), e);
+            }
+        })?;
 
     let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}_vert")),

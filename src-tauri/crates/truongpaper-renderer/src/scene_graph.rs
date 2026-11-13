@@ -59,6 +59,8 @@ const COMPOSITION_MODEL_PATHS: [&str; 3] = [
     "models/util/projectlayer.json",
 ];
 const SOLID_MODEL_PATH: &str = "models/util/solidlayer.json";
+/// Solid layer with depth testing enabled; rendered like a plain solid colour layer.
+const SOLID_DEPTHTEST_MODEL_PATH: &str = "models/util/solidlayer_depthtest.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SceneLoadError {
@@ -1040,8 +1042,8 @@ impl SceneGraph {
         model_path: &str,
     ) -> Result<LoadedKind, String> {
         let norm = normalize_path(model_path);
-        let stock_utility =
-            norm == SOLID_MODEL_PATH || COMPOSITION_MODEL_PATHS.contains(&norm.as_str());
+        let is_solid_model = norm == SOLID_MODEL_PATH || norm == SOLID_DEPTHTEST_MODEL_PATH;
+        let stock_utility = is_solid_model || COMPOSITION_MODEL_PATHS.contains(&norm.as_str());
         let model = match vfs.read_string(model_path) {
             Ok(text) => ModelJsonFile::from_json_str(&text)
                 .map_err(|e| format!("invalid model {model_path}: {e}"))?,
@@ -1055,7 +1057,7 @@ impl SceneGraph {
             _ => None,
         };
 
-        if model.solidlayer == Some(true) || norm.ends_with(SOLID_MODEL_PATH) {
+        if model.solidlayer == Some(true) || is_solid_model || norm.ends_with(SOLID_MODEL_PATH) {
             return Ok((
                 SceneLayerKind::Solid { color: Vec3::ONE },
                 model_size.unwrap_or(self.scene_size),

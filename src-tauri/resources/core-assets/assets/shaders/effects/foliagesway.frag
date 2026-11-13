@@ -14,7 +14,7 @@ uniform float g_Direction; // {"material":"direction","label":"ui_editor_propert
 // Gusts of wind: neighbouring leaves swing with slightly different timing (noise phase).
 void main() {
 	float mask = texSample2D(g_Texture1, v_TexCoord).r;
-	float phase = valueNoise(v_TexCoord * g_Scale) * M_PI_2;
+	float phase = tpValueNoise(v_TexCoord * g_Scale) * M_PI_2;
 	float t = g_Time * g_Speed;
 	float sway = sin(t + phase) * 0.7 + sin(t * 2.3 + phase * 1.7) * 0.3;
 	vec2 dir = rotateVec2(vec2(0.0, 1.0), g_Direction);

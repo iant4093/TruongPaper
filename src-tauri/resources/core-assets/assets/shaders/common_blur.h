@@ -34,4 +34,30 @@ vec3 blur7(vec2 uv, vec2 step)  { return blur7a(uv, step).rgb; }
 vec3 blur9(vec2 uv, vec2 step)  { return blur9a(uv, step).rgb; }
 vec3 blur13(vec2 uv, vec2 step) { return blur13a(uv, step).rgb; }
 
+// Radial blur of g_Texture0 toward/away from `center`: taps run along the line through `uv` and
+// `center`, spread by `scale`.
+vec4 tpRadialBlur(vec2 uv, vec2 center, float scale, int radius, float sigma) {
+    vec2 dir = (uv - center) * scale;
+    vec4 sum = vec4(0.0);
+    float total = 0.0;
+    float denom = 2.0 * sigma * sigma;
+    for (int i = -12; i <= 12; ++i) {
+        if (i < -radius || i > radius) {
+            continue;
+        }
+        float fi = float(i);
+        float w = exp(-(fi * fi) / denom);
+        sum += texSample2D(g_Texture0, uv + dir * (fi / float(radius))) * w;
+        total += w;
+    }
+    return sum / total;
+}
+
+vec4 blurRadial3a(vec2 uv, vec2 center, float scale)  { return tpRadialBlur(uv, center, scale, 1, 0.85); }
+vec4 blurRadial7a(vec2 uv, vec2 center, float scale)  { return tpRadialBlur(uv, center, scale, 3, 1.6); }
+vec4 blurRadial13a(vec2 uv, vec2 center, float scale) { return tpRadialBlur(uv, center, scale, 6, 3.0); }
+vec3 blurRadial3(vec2 uv, vec2 center, float scale)   { return blurRadial3a(uv, center, scale).rgb; }
+vec3 blurRadial7(vec2 uv, vec2 center, float scale)   { return blurRadial7a(uv, center, scale).rgb; }
+vec3 blurRadial13(vec2 uv, vec2 center, float scale)  { return blurRadial13a(uv, center, scale).rgb; }
+
 #endif

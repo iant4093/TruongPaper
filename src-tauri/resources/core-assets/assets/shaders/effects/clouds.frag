@@ -18,7 +18,7 @@ void main() {
 	vec4 color = texSample2D(g_Texture0, v_TexCoord);
 	float aspect = g_Texture0Resolution.z / max(g_Texture0Resolution.w, 1.0);
 	vec2 p = v_TexCoord * vec2(aspect, 1.0) * g_Scale + vec2(g_Time * g_Speed, 0.0);
-	float n = fbmNoise(p) * 0.6 + fbmNoise(p * 2.3 - vec2(g_Time * g_Speed * 0.5, 0.0)) * 0.4;
+	float n = tpFbmNoise(p) * 0.6 + tpFbmNoise(p * 2.3 - vec2(g_Time * g_Speed * 0.5, 0.0)) * 0.4;
 	float cover = smoothstep(1.0 - g_Density, 1.0 - g_Density + 0.35, n);
 	float amount = cover * g_CloudAlpha * texSample2D(g_Texture1, v_TexCoord).r;
 	color.rgb = mix(color.rgb, g_CloudColor, amount);

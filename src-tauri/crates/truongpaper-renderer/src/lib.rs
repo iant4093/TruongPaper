@@ -13,6 +13,7 @@ pub mod scene_assets;
 pub mod scene_graph;
 pub mod scene_math;
 pub mod scene_renderer;
+pub mod shader_compat;
 pub mod shader_preprocessor;
 pub mod text;
 pub mod timeline;

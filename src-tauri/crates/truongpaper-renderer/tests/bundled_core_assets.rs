@@ -222,6 +222,9 @@ fn bundled_particle_sprites_resolve_and_have_shaped_alpha() {
         "nature/snow0",
         "nature/snow5",
         "fire1",
+        "fire/fire1",
+        "fire/fire3",
+        "sickle",
         "ember2",
         "glow3",
     ] {
@@ -308,4 +311,14 @@ fn blend_mode_30_tint_multiplies_instead_of_replacing() {
     );
     let fallback = include_str!("../../truongpaper-we-formats/src/shader_fallbacks/blending.glsl");
     assert!(fallback.contains("mode == 30) result = base * layer"));
+}
+
+#[test]
+fn bundled_gradient_mask_resolves() {
+    let t = TempDir::new("bundled-gradient");
+    let bytes = vfs(&t)
+        .read_bytes("materials/gradient/blend_gradient.tex")
+        .unwrap();
+    let parsed = truongpaper_we_formats::parse_tex(&bytes).unwrap();
+    assert_eq!(parsed.header.texture_height, 256);
 }

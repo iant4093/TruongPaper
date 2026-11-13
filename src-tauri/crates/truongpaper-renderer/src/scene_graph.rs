@@ -1337,6 +1337,16 @@ impl SceneGraph {
             })
     }
 
+    /// Layer index a `text` script targets: the first text layer called `key`. Wallpapers often
+    /// reuse one name for a picture and its clock (scene 2187171045), so a plain name lookup
+    /// would hand the clock string to the picture.
+    pub fn find_text_layer(&self, key: &str) -> Option<usize> {
+        self.layers
+            .iter()
+            .position(|l| matches!(l.kind, SceneLayerKind::Text { .. }) && l.key() == key)
+            .or_else(|| self.find_layer(key))
+    }
+
     /// View-projection for an eye offset in scene units.
     pub fn view_projection(&self, eye_offset: Vec2) -> Mat4 {
         match self.camera.projection {
@@ -1515,8 +1525,15 @@ impl SceneGraph {
         let Some((layer_key, prop_name)) = slot_key.rsplit_once('/') else {
             return false;
         };
-        let (Some(li), Some(prop)) = (self.find_layer(layer_key), ScriptProperty::parse(prop_name))
-        else {
+        let Some(prop) = ScriptProperty::parse(prop_name) else {
+            return false;
+        };
+        let li = if prop == ScriptProperty::Text {
+            self.find_text_layer(layer_key)
+        } else {
+            self.find_layer(layer_key)
+        };
+        let Some(li) = li else {
             return false;
         };
         let (ok, transform_changed) = self.apply_property_value(li, prop, value);
@@ -1640,7 +1657,7 @@ impl SceneGraph {
     /// `thisLayer.text` write-back from SceneScript. Returns `true` when the layer is a text
     /// layer and the string changed.
     pub fn apply_layer_text(&mut self, name: &str, new_text: &str) -> bool {
-        let Some(li) = self.find_layer(name) else {
+        let Some(li) = self.find_text_layer(name) else {
             return false;
         };
         match &mut self.layers[li].kind {

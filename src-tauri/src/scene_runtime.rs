@@ -902,6 +902,30 @@ mod tests {
     }
 
     #[test]
+    fn text_script_reaches_text_layer_sharing_a_name_with_a_picture() {
+        let t = TempDir::new("text-dup");
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } }, "objects": [
+                { "name": "Same", "image": "models/pic.json", "size": "100 100" },
+                { "name": "Same", "size": "100 20",
+                  "text": { "script": "export function update(v) { return '12:34'; }", "value": "<Clock>" } }
+            ] }"#,
+        );
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
+        let texts: Vec<_> = rt
+            .graph()
+            .layers
+            .iter()
+            .filter_map(|l| match &l.kind {
+                truongpaper_renderer::SceneLayerKind::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["12:34".to_string()]);
+    }
+
+    #[test]
     fn diagnostics_report_skipped_content_and_merge_external_notes() {
         let t = scene_dir("diag");
         let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();

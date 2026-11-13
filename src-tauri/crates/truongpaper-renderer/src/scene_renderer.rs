@@ -60,7 +60,7 @@ use crate::shader_preprocessor::{
     compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
     ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
-use crate::sprite::SpriteSheet;
+use crate::sprite::{pack_sprite_atlases, sprite_atlas_count, SpriteSheet};
 use crate::text::{
     bitmap_size, grow_text_box, load_font, rasterize, FontMetrics, TextCache, TextKey, TextStyle,
 };
@@ -1166,41 +1166,64 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
             resolution: Vec4::new(width as f32, height as f32, width as f32, height as f32),
         });
     }
-    let mip = tex
-        .images
-        .first()
-        .and_then(|i| i.first())
-        .ok_or("texture has no mipmaps")?;
-    let (rgba, w, h) = if tex.free_image_format != FIF_UNKNOWN {
-        let img = image::load_from_memory(&mip.raw_bytes)
-            .map_err(|e| e.to_string())?
-            .to_rgba8();
-        let (w, h) = img.dimensions();
-        (img.into_raw(), w, h)
-    } else {
-        let rgba = decode_tex_mipmap_to_rgba8(tex.header.format, tex.free_image_format, mip)
-            .map_err(|e| e.to_string())?;
-        (rgba, mip.width.max(1) as u32, mip.height.max(1) as u32)
+    let decode_image = |index: usize| -> Result<(Vec<u8>, u32, u32), String> {
+        let mip = tex
+            .images
+            .get(index)
+            .and_then(|i| i.first())
+            .ok_or("texture has no mipmaps")?;
+        if tex.free_image_format != FIF_UNKNOWN {
+            let img = image::load_from_memory(&mip.raw_bytes)
+                .map_err(|e| e.to_string())?
+                .to_rgba8();
+            let (w, h) = img.dimensions();
+            Ok((img.into_raw(), w, h))
+        } else {
+            let rgba = decode_tex_mipmap_to_rgba8(tex.header.format, tex.free_image_format, mip)
+                .map_err(|e| e.to_string())?;
+            Ok((rgba, mip.width.max(1) as u32, mip.height.max(1) as u32))
+        }
     };
+    let (mut rgba, mut w, mut h) = decode_image(0)?;
+    let mut sheet_frames = tex.sprite_frames.as_ref().map(|(_, _, f)| f.clone());
+    // Frames spread over several atlas images (`image_id`) are packed into one texture.
+    let mut stacked = false;
+    if let Some(frames) = sheet_frames.as_mut() {
+        let wanted = sprite_atlas_count(frames).min(tex.images.len());
+        if wanted > 1 {
+            let mut parts = vec![(std::mem::take(&mut rgba), w, h)];
+            for i in 1..wanted {
+                parts.push(decode_image(i)?);
+            }
+            match pack_sprite_atlases(&parts, frames) {
+                Some(packed) => {
+                    (rgba, w, h) = (packed.rgba, packed.width, packed.height);
+                    stacked = true;
+                }
+                None => rgba = parts.swap_remove(0).0,
+            }
+        }
+    }
     if rgba.len() < (w as usize) * (h as usize) * 4 {
         return Err("decoded texture is smaller than its dimensions".into());
     }
     let h_ = &tex.header;
-    let sprite = tex
-        .sprite_frames
+    let sprite = sheet_frames
         .as_ref()
-        .and_then(|(_, _, frames)| SpriteSheet::new(frames, w, h))
+        .and_then(|frames| SpriteSheet::new(frames, w, h))
         .map(std::sync::Arc::new);
     // The header describes the original storage allocation. A decoded mip may already
     // be trimmed to the image dimensions, so UVs must follow the uploaded texture.
     let visible_width = u32::try_from(h_.image_width)
         .ok()
         .filter(|v| *v > 0)
+        .filter(|_| !stacked)
         .unwrap_or(w)
         .min(w);
     let visible_height = u32::try_from(h_.image_height)
         .ok()
         .filter(|v| *v > 0)
+        .filter(|_| !stacked)
         .unwrap_or(h)
         .min(h);
     let resolution = Vec4::new(

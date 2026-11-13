@@ -318,10 +318,11 @@ async fn render() -> anyhow::Result<()> {
                 .any(|f| !f.is_empty() && l.name.contains(f))
             {
                 eprintln!(
-                    "T L{i} {} vis={} eff={} o={:?} s={:?} wpos={:?} wscale=({:.3},{:.3},{:.3})",
+                    "T L{i} {} vis={} eff={} a={:.3} o={:?} s={:?} wpos={:?} wscale=({:.3},{:.3},{:.3})",
                     l.key(),
                     l.visible,
                     g.effective_visible(i),
+                    l.alpha,
                     l.transform.origin,
                     l.transform.scale,
                     l.world_matrix.w_axis.truncate(),

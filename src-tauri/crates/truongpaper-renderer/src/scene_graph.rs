@@ -425,6 +425,8 @@ struct SceneNode {
     world: Mat4,
     layer: Option<usize>,
     fallback_size: Vec2,
+    /// Parent puppet attachment point this node's origin is measured from (parent-local).
+    attachment: Vec3,
 }
 
 /// Loaded scene graph.
@@ -811,6 +813,9 @@ impl SceneGraph {
                 .is_none_or(Value::is_null);
         graph.resolve_general(perspective);
         graph.build_nodes(vfs);
+        if let Some(raw) = &raw {
+            graph.apply_attachments(vfs, raw);
+        }
         if gif_scene && !perspective && graph.scene.general.orthogonalprojection.auto {
             graph.fit_gif_scene();
         }
@@ -983,6 +988,7 @@ impl SceneGraph {
                 world: Mat4::IDENTITY,
                 layer: None,
                 fallback_size,
+                attachment: Vec3::ZERO,
             };
             if let Some((kind, _)) = loaded {
                 let layer_index = self.layers.len();
@@ -1027,6 +1033,56 @@ impl SceneGraph {
             self.resolve_layer_values(li);
         }
         self.recompute_world();
+    }
+
+    /// Places objects that name a parent puppet's attachment point (`"attachment": "head"`)
+    /// relative to that point's bind pose (see [`crate::scene_attachment`]).
+    fn apply_attachments(&mut self, vfs: &WeVirtualFileSystem, raw: &Value) {
+        let Some(objects) = raw.get("objects").and_then(Value::as_array) else {
+            return;
+        };
+        let mut cache: HashMap<String, Option<(Vec<crate::puppet::PuppetBone>, Vec<_>)>> =
+            HashMap::new();
+        let mut changed = false;
+        for (i, obj) in objects.iter().enumerate().take(self.nodes.len()) {
+            let Some(name) = obj.get("attachment").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(parent) = self.nodes[i].parent else {
+                continue;
+            };
+            let Some(path) = self.nodes[parent]
+                .layer
+                .and_then(|li| match &self.layers[li].kind {
+                    SceneLayerKind::Image {
+                        puppet_path: Some(path),
+                        ..
+                    } => Some(path.clone()),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let rig = cache.entry(path.clone()).or_insert_with(|| {
+                let bytes = vfs.read_bytes(&path).ok()?;
+                let mesh = truongpaper_we_formats::parse_mdl(&bytes, [0.0, 0.0]).ok()?;
+                let skeleton = crate::puppet::parse_mdl_skeleton(&bytes, &mesh).ok()?;
+                Some((
+                    skeleton.bones,
+                    crate::scene_attachment::parse_attachments(&bytes),
+                ))
+            });
+            let point = rig.as_ref().and_then(|(bones, attachments)| {
+                crate::scene_attachment::attachment_point(bones, attachments, name)
+            });
+            if let Some(point) = point {
+                self.nodes[i].attachment = point;
+                changed = true;
+            }
+        }
+        if changed {
+            self.recompute_world();
+        }
     }
 
     fn load_layer_kind(
@@ -1350,7 +1406,12 @@ impl SceneGraph {
             }
             // Ancestors contribute their pivot (no alignment anchor); the node itself is anchored.
             let world = chain.iter().rev().fold(Mat4::IDENTITY, |acc, &n| {
-                acc * if n == i { locals[n] } else { pivots[n] }
+                let own = if n == i { locals[n] } else { pivots[n] };
+                if self.nodes[n].attachment == Vec3::ZERO {
+                    acc * own
+                } else {
+                    acc * Mat4::from_translation(self.nodes[n].attachment) * own
+                }
             });
             self.nodes[i].world = world;
         }

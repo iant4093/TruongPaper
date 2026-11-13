@@ -174,6 +174,14 @@ pub fn layer_local_projection(size: Vec2) -> Mat4 {
     Mat4::orthographic_rh(-hw, hw, -hh, hh, -1.0, 1.0)
 }
 
+/// `colorBlendMode` values composited with the backdrop-reading blend shader (Wallpaper
+/// Engine's blend list: 1 darken, 2 multiply, 3 colour burn, 4 linear burn, 5 darker colour,
+/// 6 lighten, 7 screen, 8 colour dodge, 9 linear dodge / add, 10 lighter colour, 11 overlay,
+/// 12 soft light, 13 hard light, 18 difference, 19 exclusion, 20 subtract). 0 is normal.
+pub fn is_color_blend_mode(mode: i32) -> bool {
+    matches!(mode, 1..=13 | 18..=20)
+}
+
 /// Matrix for drawing the clip-space full-frame quad into a composition layer's own FBO.
 ///
 /// A composition layer (`copybackground`) captures the part of the screen *behind its own
@@ -599,12 +607,31 @@ fn fs_layer_color(in: VsOut) -> @location(0) vec4<f32> {
     let src = textureSample(src_tex, src_sampler, in.uv);
     let dst = textureLoad(scene_backdrop, vec2<i32>(in.position.xy), 0);
     let alpha = clamp(src.a, 0.0, 1.0);
-    let screen = src.rgb + dst.rgb - src.rgb * dst.rgb;
-    let low = dst.rgb - (1.0 - 2.0 * src.rgb) * dst.rgb * (1.0 - dst.rgb);
-    let high = dst.rgb + (2.0 * src.rgb - 1.0) * (sqrt(max(dst.rgb, vec3(0.0))) - dst.rgb);
-    let soft_light = mix(low, high, step(vec3(0.5), src.rgb));
-    let rgb = select(screen, soft_light, u.color.x == 12.0);
-    return vec4(mix(dst.rgb, rgb, alpha), alpha + dst.a * (1.0 - alpha));
+    let b = dst.rgb;
+    let l = src.rgb;
+    let mode = i32(u.color.x + 0.5);
+    var rgb = l;
+    switch mode {
+        case 1, 5: { rgb = min(b, l); }
+        case 2: { rgb = b * l; }
+        case 3: { rgb = 1.0 - min(vec3(1.0), (1.0 - b) / max(l, vec3(1e-4))); }
+        case 4, 20: { rgb = max(b + l - 1.0, vec3(0.0)); }
+        case 6, 10: { rgb = max(b, l); }
+        case 7: { rgb = b + l - b * l; }
+        case 8: { rgb = min(vec3(1.0), b / max(1.0 - l, vec3(1e-4))); }
+        case 9: { rgb = b + l; }
+        case 11: { rgb = mix(2.0 * b * l, 1.0 - 2.0 * (1.0 - b) * (1.0 - l), step(vec3(0.5), b)); }
+        case 12: {
+            let low = b - (1.0 - 2.0 * l) * b * (1.0 - b);
+            let high = b + (2.0 * l - 1.0) * (sqrt(max(b, vec3(0.0))) - b);
+            rgb = mix(low, high, step(vec3(0.5), l));
+        }
+        case 13: { rgb = mix(2.0 * b * l, 1.0 - 2.0 * (1.0 - b) * (1.0 - l), step(vec3(0.5), l)); }
+        case 18: { rgb = abs(b - l); }
+        case 19: { rgb = b + l - 2.0 * b * l; }
+        default: {}
+    }
+    return vec4(mix(b, rgb, alpha), dst.a);
 }
 "#;
 
@@ -2625,7 +2652,7 @@ impl SceneRenderer {
         let layer_count = graph.layers.len().min(self.layers.len());
         for li in 0..layer_count {
             let layer = &graph.layers[li];
-            if !layer.visible
+            if !graph.effective_visible(li)
                 && layer
                     .id
                     .is_none_or(|id| !self.layer_outputs.contains_key(&id))
@@ -2787,7 +2814,7 @@ impl SceneRenderer {
         pre: Mat4,
     ) {
         let layer = &graph.layers[li];
-        if !layer.visible
+        if !graph.effective_visible(li)
             && layer
                 .id
                 .is_none_or(|id| !self.layer_outputs.contains_key(&id))
@@ -2819,7 +2846,7 @@ impl SceneRenderer {
                 );
             }
             GpuLayer::Text(t) => {
-                if !layer.visible {
+                if !graph.effective_visible(li) {
                     return;
                 }
                 queue.write_buffer(
@@ -2915,7 +2942,9 @@ impl SceneRenderer {
     ) {
         let layer = &graph.layers[li];
         let into_scene = std::ptr::eq(dest, &self.scene);
-        let color_blend = matches!(layer.color_blend_mode, 7 | 12) && layer.visible && into_scene;
+        let color_blend = is_color_blend_mode(layer.color_blend_mode)
+            && graph.effective_visible(li)
+            && into_scene;
         let backdrop = fx.group.as_ref().is_some_and(|g| g.backdrop.is_some());
         if into_scene
             && (fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend || backdrop)
@@ -2933,7 +2962,7 @@ impl SceneRenderer {
         let layer_size = Vec2::new(fx.plan.width as f32, fx.plan.height as f32);
         let local = layer_local_projection(layer_size);
         if let Some(group) = &fx.group {
-            if layer.visible {
+            if graph.effective_visible(li) {
                 let capture = composition_capture_matrix(
                     fx.fullscreen,
                     local,
@@ -3162,7 +3191,7 @@ impl SceneRenderer {
                             );
                         }
                     }
-                    if !layer.visible {
+                    if !graph.effective_visible(li) {
                         continue;
                     }
                     queue.write_buffer(

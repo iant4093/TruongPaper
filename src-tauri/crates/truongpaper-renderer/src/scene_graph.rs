@@ -1273,6 +1273,43 @@ impl SceneGraph {
         self.nodes.get(object_index).map(|n| n.world)
     }
 
+    /// Whether layer `li` is drawn: its own `visible` and that of every ancestor object (a
+    /// hidden parent hides its children, as in Wallpaper Engine; 3299228616 hides per-language
+    /// copies of the whole scene through their parent). Transform-only ancestors use their
+    /// resolved `visible` binding.
+    pub fn effective_visible(&self, li: usize) -> bool {
+        let Some(layer) = self.layers.get(li) else {
+            return false;
+        };
+        if !layer.visible {
+            return false;
+        }
+        let mut cur = layer.parent_object;
+        let mut hops = 0;
+        while let Some(obj) = cur {
+            hops += 1;
+            if hops > self.nodes.len() {
+                break;
+            }
+            let Some(node) = self.nodes.get(obj) else {
+                break;
+            };
+            let visible = match node.layer {
+                Some(pl) => self.layers[pl].visible,
+                None => self
+                    .scene
+                    .objects
+                    .get(obj)
+                    .is_none_or(|o| resolve_bound_bool(&o.visible, &self.user_props)),
+            };
+            if !visible {
+                return false;
+            }
+            cur = node.parent;
+        }
+        true
+    }
+
     /// Resolved parent (`scene.objects` index) of any `scene.objects` entry.
     pub fn object_parent(&self, object_index: usize) -> Option<usize> {
         self.nodes.get(object_index).and_then(|n| n.parent)

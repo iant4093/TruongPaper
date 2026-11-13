@@ -741,3 +741,24 @@ fn gif_scene_packages_load_gifscene_json() {
     let g = SceneGraph::load(&mount(&t), "scene.json", None, MONITOR).expect("gifscene loads");
     assert_eq!(g.scene_size, Vec2::new(480.0, 300.0));
 }
+
+/// Regression (3299228616): a hidden parent (layer or transform-only node) hides its children.
+#[test]
+fn hidden_parents_hide_their_children() {
+    let t = TempDir::new("sg-hidden-parent");
+    t.write("core/models/util/solidlayer.json", r#"{ }"#);
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } },
+        "objects": [
+          { "id": 1, "name": "Hidden", "image": "models/util/solidlayer.json",
+            "visible": { "user": "lang", "value": false } },
+          { "id": 2, "name": "Child", "image": "models/util/solidlayer.json", "parent": 1 },
+          { "id": 3, "name": "Group", "visible": false },
+          { "id": 4, "name": "Grandchild", "image": "models/util/solidlayer.json", "parent": 3 },
+          { "id": 5, "name": "Shown", "image": "models/util/solidlayer.json", "parent": 2 } ] }"#;
+    let g = load(&t, scene, None);
+    let vis = |n: &str| g.effective_visible(g.find_layer(n).unwrap());
+    assert!(!vis("Child") && !vis("Grandchild") && !vis("Shown"));
+    let g = load(&t, scene, Some(r#"{ "lang": true }"#));
+    let vis = |n: &str| g.effective_visible(g.find_layer(n).unwrap());
+    assert!(vis("Child") && vis("Shown") && !vis("Grandchild"));
+}

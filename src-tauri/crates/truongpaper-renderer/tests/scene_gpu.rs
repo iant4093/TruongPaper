@@ -254,3 +254,33 @@ fn missing_texture_falls_back_to_transparent() {
         &px[mid..mid + 4]
     );
 }
+
+/// Regression (3299228616): `colorBlendMode` 9 (linear dodge) adds the layer to the scene, so a
+/// mostly black ripple layer no longer paints a black box over the water.
+#[test]
+fn color_blend_mode_linear_dodge_adds() {
+    let t = TempDir::new("gpu-blend-add");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 64, "height": 64 }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 },
+                       "clearcolor": "0 0 0" },
+        "objects": [
+          { "name": "Bg", "image": "models/solid.json", "origin": "32 32 0", "size": "64 64",
+            "color": "0 0.5 0" },
+          { "name": "Add", "image": "models/solid.json", "origin": "32 32 0", "size": "64 64",
+            "color": "0.25 0 0", "colorBlendMode": 9,
+            "effects": [ { "file": "effects/tint/effect.json", "passes": [
+                { "constantshadervalues": { "color": "0.25 0 0", "alpha": 0.0 } } ] } ] } ] }"#;
+    let Some((px, _)) = render_hdr_with(&t, scene, 64, true) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let i = ((32 * 64 + 32) * 4) as usize;
+    let c = &px[i..i + 3];
+    assert!(
+        (c[0] - 0.25).abs() < 0.05 && (c[1] - 0.5).abs() < 0.05,
+        "expected 0.25 0.5 0, got {c:?}"
+    );
+}

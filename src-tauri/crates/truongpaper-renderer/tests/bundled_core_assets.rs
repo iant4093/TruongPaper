@@ -234,3 +234,48 @@ fn bundled_particle_sprites_resolve_and_have_shaped_alpha() {
         assert!(parsed.header.texture_height >= 32, "{tex}");
     }
 }
+
+/// Regression (1444077782, 1823900922): scenes draw one rain sprite 800-1600 px tall, so the
+/// bundled streak has to stay a hairline. The old 32 px wide, ~13 %-wide streak turned the
+/// additive rain layers into wide white light bars that blew out the whole frame.
+#[test]
+fn bundled_rain_sprites_are_hairline_streaks() {
+    let t = TempDir::new("bundled-rain");
+    let vfs = vfs(&t);
+    for n in 0..=5 {
+        let bytes = vfs
+            .read_bytes(&format!("materials/particle/nature/rain{n}.tex"))
+            .unwrap();
+        let tex = truongpaper_we_formats::parse_tex(&bytes).unwrap();
+        let mip = &tex.images[0][0];
+        let rgba = truongpaper_we_formats::decode_tex_mipmap_to_rgba8(
+            tex.header.format,
+            tex.free_image_format,
+            mip,
+        )
+        .unwrap();
+        let (w, h) = (mip.width as usize, mip.height as usize);
+        let mid = h * 3 / 5;
+        let row = &rgba[mid * w * 4..(mid + 1) * w * 4];
+        let covered = row.chunks(4).filter(|p| p[3] > 64).count();
+        assert!(covered >= 1, "rain{n}: streak vanished");
+        assert!(
+            covered * 100 <= w * 12,
+            "rain{n}: {covered}/{w} texels opaque, wider than a hairline"
+        );
+    }
+}
+
+/// Regression (2250930375): the stock `tint` effect leaves BLENDMODE at its default 30. That
+/// mode must multiply (white tint = unchanged); falling through to "replace" painted the
+/// whole layer in the tint colour.
+#[test]
+fn blend_mode_30_tint_multiplies_instead_of_replacing() {
+    let src = std::fs::read_to_string(bundled_dir().join("shaders/common_blending.h")).unwrap();
+    assert!(
+        src.contains("mode == 30) result = base * layer"),
+        "common_blending.h lacks the tint blend mode"
+    );
+    let fallback = include_str!("../../truongpaper-we-formats/src/shader_fallbacks/blending.glsl");
+    assert!(fallback.contains("mode == 30) result = base * layer"));
+}

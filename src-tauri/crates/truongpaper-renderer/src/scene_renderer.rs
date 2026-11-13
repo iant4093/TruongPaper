@@ -3210,7 +3210,10 @@ impl SceneRenderer {
                             },
                         )),
                     );
-                    let blend = if fx.is_composition && !fx.samples_scene {
+                    // A passthrough composition's output is the scene behind it plus its effects;
+                    // an effect that lowers alpha (an opacity mask) must reveal the scene, so it
+                    // is always alpha-blended, never written over the scene.
+                    let blend = if fx.is_composition {
                         BlendMode::Translucent
                     } else {
                         *blending

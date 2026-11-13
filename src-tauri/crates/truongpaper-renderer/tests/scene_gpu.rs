@@ -284,3 +284,37 @@ fn color_blend_mode_linear_dodge_adds() {
         "expected 0.25 0.5 0, got {c:?}"
     );
 }
+
+/// Regression (2902406982, 1444077782-style clipping/opacity masks): a passthrough composition
+/// whose chain ends with alpha 0 (a missing opacity mask) reveals the scene behind it; it used
+/// to be written over the scene, leaving the effect colour as a solid white/coloured box.
+#[test]
+fn passthrough_composition_with_zero_alpha_output_keeps_the_scene() {
+    let t = TempDir::new("gpu-compose-alpha0");
+    t.write(
+        "models/solid.json",
+        r#"{ "solidlayer": true, "width": 32, "height": 64 }"#,
+    );
+    let scene = r#"{ "general": { "orthogonalprojection": { "width": 64, "height": 64 },
+                       "clearcolor": "0 0 0" },
+        "objects": [
+          { "name": "Blue", "image": "models/solid.json", "origin": "32 32 0", "size": "64 64",
+            "color": "0 0 1" },
+          { "name": "Glass", "image": "models/util/composelayer.json", "origin": "32 32 0",
+            "size": "64 64", "copybackground": true,
+            "effects": [
+              { "file": "effects/tint/effect.json", "passes": [
+                { "constantshadervalues": { "color": "1 0 0", "alpha": 1.0 } } ] },
+              { "file": "effects/opacity/effect.json", "passes": [
+                { "constantshadervalues": { "opacity": 0.0 } } ] } ] } ] }"#;
+    let Some((px, _)) = render_hdr_with(&t, scene, 64, true) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let i = ((32 * 64 + 32) * 4) as usize;
+    assert!(
+        px[i] < 0.1 && px[i + 2] > 0.9,
+        "expected the blue scene to stay, got {:?}",
+        &px[i..i + 4]
+    );
+}

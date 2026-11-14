@@ -25,6 +25,7 @@ import type {
   WorkshopPreview,
   WorkshopDownloadSource,
 } from '../types/ipc';
+import { toast } from './feedback';
 import { adjustmentWriteKey, propertyWriteKey, wallpaperWrites } from '../lib/writeQueue';
 
 export interface SteamDownloadProgress {
@@ -466,6 +467,10 @@ export const useAppStore = create<AppState>((set, get) => {
           set((state) => state.wallpaperErrors[payload.monitorId]
             ? { wallpaperErrors: Object.fromEntries(Object.entries(state.wallpaperErrors).filter(([id]) => id !== payload.monitorId)) }
             : state);
+        }),
+        // Web, video and application wallpapers cannot span; the backend says so once per load.
+        listen<{ monitorId: string; wallpaperId: string | null; message: string }>('wallpaper://span-unsupported', () => {
+          toast.info("This wallpaper type can't span displays, so it stays on one display.");
         }),
         // Every load reports its own list, so it replaces the previous one (an empty list clears it).
         listen<WallpaperDiagnosticsPayload>('wallpaper://diagnostics', ({ payload }) => {

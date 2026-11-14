@@ -22,6 +22,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import { legacyAlbumsToMigrate, mergeNewWallpapers, useAppStore } from '../src/store/useAppStore';
+import { useFeedback } from '../src/store/feedback';
 import { IPC_COMMANDS } from '../src/types/ipc';
 
 const status = { filterMode: 'all', featuredOnly: false, unusedQueue: [], favoritePhotos: [], currentPhotoByMonitor: {}, cachedBytes: 0, maxCacheBytes: 1, historyCount: 0, blacklistCount: 0, isRefilling: false, rateLimitRemaining: 100 };
@@ -272,6 +273,7 @@ describe('store → listen() event wiring', () => {
         'wallpaper://diagnostics',
         'wallpaper://error',
         'wallpaper://loaded',
+        'wallpaper://span-unsupported',
       ].sort()
     );
 
@@ -287,6 +289,9 @@ describe('store → listen() event wiring', () => {
 
     listeners.get('settings://changed')!({ payload: { skipMismatchedOrientation: false } });
     expect(useAppStore.getState().settings?.skipMismatchedOrientation).toBe(false);
+
+    listeners.get('wallpaper://span-unsupported')!({ payload: { monitorId: 'M1', wallpaperId: 'workshop:1', message: 'x' } });
+    expect(useFeedback.getState().toasts.at(-1)).toMatchObject({ tone: 'info', message: expect.stringContaining("can't span") });
 
     listeners.get('system-power')!({ payload: { kind: 'pause', reason: 'lock' } });
     expect(useAppStore.getState().monitors[0].userPaused).toBe(false);

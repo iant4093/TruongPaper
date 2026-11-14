@@ -869,6 +869,28 @@ struct UniformUpload {
     last: Vec<u8>,
     bytes: Vec<u8>,
     floats: Vec<f32>,
+    /// Script-driven constants last mapped, and what they were mapped from.
+    live_src: HashMap<String, Value>,
+    live_mapped: HashMap<String, Vec<f32>>,
+}
+
+/// Remaps script-driven constants into `mapped` when `live` differs from `src`. Returns
+/// whether it remapped (so an unchanged frame allocates nothing).
+fn refresh_live_constants(
+    src: &mut HashMap<String, Value>,
+    mapped: &mut HashMap<String, Vec<f32>>,
+    base: &HashMap<String, Value>,
+    metadata: &[UniformCommentMetadata],
+    live: &HashMap<String, Value>,
+) -> bool {
+    if src == live {
+        return false;
+    }
+    let mut raw = base.clone();
+    raw.extend(live.iter().map(|(k, v)| (k.clone(), v.clone())));
+    *mapped = map_material_constants(metadata, &raw);
+    *src = live.clone();
+    true
 }
 
 struct GpuPass {
@@ -892,6 +914,8 @@ struct GpuPass {
     /// The vertex shader forwards `a_Position` to a varying and projects it with
     /// `g_ModelViewProjectionMatrix`, so it expects layer-space pixel positions.
     pixel_space: bool,
+    /// Logical / allocated size of the pass's target; not 1 when `budget_fbo` shrank it.
+    texel_scale: Vec2,
 }
 
 enum GpuStep {
@@ -1131,6 +1155,19 @@ fn fit_extent(w: u32, h: u32, max_dim: u32, max_pixels: u64) -> (u32, u32) {
     (fw, fh)
 }
 
+/// Factor by which texels of an FBO allocated at `actual` are larger than at `logical` size.
+fn shrink_ratio(logical: (u32, u32), actual: (u32, u32)) -> Vec2 {
+    Vec2::new(
+        logical.0.max(1) as f32 / actual.0.max(1) as f32,
+        logical.1.max(1) as f32 / actual.1.max(1) as f32,
+    )
+}
+
+/// Bytes per pixel of the scene and full-frame targets.
+fn scene_target_bpp() -> u64 {
+    u64::from(HDR_FORMAT.block_copy_size(None).unwrap_or(8))
+}
+
 /// Scene size in pixels, clamped to what the device and the pixel budget allow.
 fn clamp_scene_size(device: &wgpu::Device, size: Vec2) -> (u32, u32) {
     let px = |v: f32| {
@@ -1328,6 +1365,9 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
             // One part at a time: the peak is the packed sheet plus the part being added.
             if let Some(mut packer) = AtlasPacker::new(w, h, wanted) {
                 let mut ok = packer.add(0, &rgba, w, h);
+                // Part 0 is in the packer now; free it before the next part is decoded.
+                let part0 = std::mem::take(&mut rgba);
+                drop(part0);
                 for i in 1..wanted {
                     if !ok {
                         break;
@@ -1339,6 +1379,9 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
                     let packed = packer.finish(frames);
                     (rgba, w, h) = (packed.rgba, packed.width, packed.height);
                     stacked = true;
+                } else {
+                    // Packing failed: fall back to the unpacked first atlas.
+                    (rgba, w, h) = decode_image(0)?;
                 }
             }
         }
@@ -2195,6 +2238,7 @@ impl SceneRenderer {
         });
         Ok(GpuPass {
             pixel_space: vertex_wants_pixel_positions(&vert),
+            texel_scale: Vec2::ONE,
             pipeline,
             uniform_buffer,
             upload: std::sync::Mutex::new(UniformUpload::default()),
@@ -2235,6 +2279,10 @@ impl SceneRenderer {
         self.textures.clear();
         self.video_textures.clear();
         self.fbo_bytes_left = MAX_FBO_BYTES;
+        // The scene and full-frame targets count against the render-target budget too.
+        self.fbo_bytes_left = self
+            .fbo_bytes_left
+            .saturating_sub(2 * u64::from(w) * u64::from(h) * scene_target_bpp());
         if (self.scene.width, self.scene.height) != (w, h) {
             self.scene = create_target(device, "scene_target", w, h, HDR_FORMAT);
             self.full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, HDR_FORMAT);
@@ -2901,6 +2949,13 @@ impl SceneRenderer {
                             Ok(mut pass) => {
                                 pass.effect_index = p.effect_index;
                                 pass.pass_index = p.pass_index;
+                                if let (Some(d), Some(t)) = (
+                                    plan.all_fbos().find(|f| f.id == p.target),
+                                    targets.get(&p.target),
+                                ) {
+                                    pass.texel_scale =
+                                        shrink_ratio((d.width, d.height), (t.width, t.height));
+                                }
                                 GpuStep::Pass(Some(Box::new(pass)))
                             }
                             Err(e) => {
@@ -3281,23 +3336,29 @@ impl SceneRenderer {
             values.texture0_rotation = rot;
             values.texture0_translation = tr;
         }
-        let live_constants;
-        let constants = match live {
-            // Script-driven `constantshadervalues` replace the baked value every frame.
-            Some(live) if !live.is_empty() => {
-                let mut raw = pass.raw_constants.clone();
-                raw.extend(live.iter().map(|(k, v)| (k.clone(), v.clone())));
-                live_constants = map_material_constants(&pass.metadata, &raw);
-                &live_constants
-            }
-            _ => &pass.constants,
-        };
         let mut up = pass.upload.lock().unwrap_or_else(|e| e.into_inner());
         let UniformUpload {
             last,
             bytes,
             floats,
+            live_src,
+            live_mapped,
         } = &mut *up;
+        let constants = match live {
+            // Script-driven `constantshadervalues` replace the baked value; remap only when
+            // the script's values changed since the last frame.
+            Some(live) if !live.is_empty() => {
+                refresh_live_constants(
+                    live_src,
+                    live_mapped,
+                    &pass.raw_constants,
+                    &pass.metadata,
+                    live,
+                );
+                &*live_mapped
+            }
+            _ => &pass.constants,
+        };
         pack_uniform_block_into(
             &pass.uniform_fields,
             pass.uniform_size,
@@ -3507,6 +3568,11 @@ impl SceneRenderer {
                                     );
                                 }
                             }
+                        }
+                    } else {
+                        // The system is gone: do not redraw last frame's quads.
+                        for set in ps.sets.iter_mut() {
+                            set.index_count = 0;
                         }
                     }
                 }
@@ -3979,10 +4045,21 @@ impl SceneRenderer {
                         },
                         ..effect_values.clone()
                     });
+                    // A shrunk FBO has coarser texels than its logical size says.
+                    let shrunk = (pass.texel_scale != Vec2::ONE).then(|| {
+                        let mut v = pixel_values
+                            .clone()
+                            .unwrap_or_else(|| effect_values.clone());
+                        v.texel_size *= pass.texel_scale;
+                        v
+                    });
                     Self::write_we_uniforms(
                         queue,
                         pass,
-                        pixel_values.as_ref().unwrap_or(&effect_values),
+                        shrunk
+                            .as_ref()
+                            .or(pixel_values.as_ref())
+                            .unwrap_or(&effect_values),
                         graph.effect_constant_overrides(li, pass.effect_index, pass.pass_index),
                     );
                     if matches!(pass.target, RenderTargetId::Scene) {
@@ -4193,6 +4270,49 @@ mod refract_tests {
 #[cfg(test)]
 mod hostile_size_tests {
     use super::*;
+
+    #[test]
+    fn live_constants_remap_only_when_changed() {
+        let base = HashMap::new();
+        let mut src = HashMap::new();
+        let mut mapped = HashMap::new();
+        let mut live = HashMap::new();
+        live.insert("a".to_string(), Value::Number(1.0));
+        assert!(refresh_live_constants(
+            &mut src,
+            &mut mapped,
+            &base,
+            &[],
+            &live
+        ));
+        assert!(!refresh_live_constants(
+            &mut src,
+            &mut mapped,
+            &base,
+            &[],
+            &live
+        ));
+        live.insert("a".to_string(), Value::Number(2.0));
+        assert!(refresh_live_constants(
+            &mut src,
+            &mut mapped,
+            &base,
+            &[],
+            &live
+        ));
+    }
+
+    #[test]
+    fn shrink_ratio_is_one_for_unshrunk_targets() {
+        assert_eq!(shrink_ratio((640, 360), (640, 360)), Vec2::ONE);
+        assert_eq!(shrink_ratio((800, 400), (400, 200)), Vec2::new(2.0, 2.0));
+        assert_eq!(shrink_ratio((0, 0), (1, 1)), Vec2::ONE);
+    }
+
+    #[test]
+    fn scene_targets_are_two_hdr_buffers() {
+        assert_eq!(scene_target_bpp(), 8);
+    }
 
     #[test]
     fn fit_extent_keeps_small_sizes() {

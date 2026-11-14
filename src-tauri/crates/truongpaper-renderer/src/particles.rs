@@ -401,6 +401,8 @@ pub struct ParticleSystemInstance {
     /// Elapsed time after which emission stops (burst children).
     pub emit_until: Option<f32>,
     pub(crate) next_id: u64,
+    /// Distinguishes instances of one particle file (mixed into `randomframe`).
+    pub(crate) instance_seed: u64,
     /// Layer-space positions of particles spawned / dead during the last step.
     pub(crate) spawn_events: Vec<Vec3>,
     pub(crate) death_events: Vec<Vec3>,
@@ -442,6 +444,7 @@ impl ParticleSystemInstance {
             emitting: true,
             emit_until: None,
             next_id: 0,
+            instance_seed: 0,
             spawn_events: Vec::new(),
             death_events: Vec::new(),
             groups: Vec::new(),

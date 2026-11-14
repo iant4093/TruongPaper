@@ -200,6 +200,17 @@ impl AtlasPacker {
         let (col, row) = (i as u32 % self.cols, i as u32 / self.cols);
         let (dw, dh) = (pw as usize / step, ph as usize / step);
         let area = (step * step) as u32;
+        if step == 1 {
+            // No downscale: copy whole rows.
+            for y in 0..dh {
+                let dst = (((row * self.sh) as usize + y) * self.out_w as usize
+                    + (col * self.sw) as usize)
+                    * 4;
+                let from = y * pw as usize * 4;
+                self.rgba[dst..dst + dw * 4].copy_from_slice(&src[from..from + dw * 4]);
+            }
+            return true;
+        }
         for y in 0..dh {
             for x in 0..dw {
                 let mut acc = [0u32; 4];
@@ -430,5 +441,25 @@ mod tests {
         }
         assert_eq!(packer.finish(&mut f2), batch);
         assert_eq!(f1[0].x, f2[0].x);
+    }
+
+    #[test]
+    fn row_copy_fast_path_places_pixels_in_their_slots() {
+        let a: Vec<u8> = (0..16u8).collect(); // 2x2
+        let b: Vec<u8> = (100..116u8).collect();
+        let mut packer = AtlasPacker::new(2, 2, 2).unwrap();
+        assert!(packer.add(0, &a, 2, 2));
+        assert!(packer.add(1, &b, 2, 2));
+        let mut frames = [atlas_frame(1, 0.0, 0.0)];
+        let out = packer.finish(&mut frames);
+        let (fx, fy) = (frames[0].x as usize, frames[0].y as usize);
+        let px = |x: usize, y: usize| {
+            let o = (y * out.width as usize + x) * 4;
+            out.rgba[o..o + 4].to_vec()
+        };
+        assert_eq!(px(0, 0), a[0..4]);
+        assert_eq!(px(1, 1), a[12..16]);
+        assert_eq!(px(fx, fy), b[0..4]);
+        assert_eq!(px(fx + 1, fy + 1), b[12..16]);
     }
 }

@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use rquickjs::loader::{Loader, Resolver};
 use rquickjs::module::Declared;
 use rquickjs::{CaughtError, Context, Ctx, Function, Module, Runtime};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,8 +19,27 @@ use std::time::{Duration, Instant};
 pub const MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Wall-clock budget for one `init`/event/`applyUserProperties` host call.
 pub const INIT_BUDGET: Duration = Duration::from_secs(2);
-/// Wall-clock budget for one `step_frame` (all slots).
-pub const FRAME_BUDGET: Duration = Duration::from_millis(250);
+/// Wall-clock budget for one per-frame step (all slots). About one 30 fps frame: a script that
+/// needs more would stall the shared render thread, so it is interrupted instead.
+pub const FRAME_BUDGET: Duration = Duration::from_millis(33);
+/// Total wall-clock budget for compiling and initializing every property script at load (see
+/// [`SceneScriptEngine::begin_load`]). Scripts that would start after it ran out are skipped.
+pub const LOAD_BUDGET: Duration = Duration::from_secs(3);
+/// Consecutive frames in which one slot may overrun [`FRAME_BUDGET`] before it is disabled.
+pub const OVERRUN_STRIKES: u32 = 3;
+/// QuickJS native stack ceiling. Well below the render thread's own stack.
+pub const MAX_STACK_BYTES: usize = 512 * 1024;
+/// Allocation volume between QuickJS garbage collections (the library default is 256 KiB).
+pub const GC_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
+/// Longest script log message kept, in characters.
+pub const LOG_MAX_CHARS: usize = 512;
+/// Script log lines let through per [`LOG_WINDOW`].
+pub const LOG_MAX_PER_WINDOW: u32 = 20;
+/// Rate-limit window for script logging.
+pub const LOG_WINDOW: Duration = Duration::from_secs(1);
+/// Numbers per layer in the packed layer arrays shared with the script runtime
+/// (origin, scale, angles, size, color, alpha, visible).
+const LAYER_STRIDE: usize = 16;
 
 pub const SCENESCRIPT_BOOTSTRAP_JS: &str = r#"
 class Vec2 {
@@ -396,6 +416,338 @@ globalThis.__callAll = function (fname, arg) {
 };
 "#;
 
+/// Host entry points compiled once after [`SCENESCRIPT_BOOTSTRAP_JS`]: the per-frame step, the
+/// packed layer sync/diff helpers and the cursor dispatcher. They take typed arguments (packed
+/// number and string arrays), so no source text is built or parsed per frame. Host internals are
+/// then made non-writable so one script cannot spoof state for the others.
+pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
+(function () {
+    const g = globalThis;
+    const f = (n) => { n = Number(n); return Number.isFinite(n) ? n : 0; };
+    // Layer state last exchanged with the host (sent or received), keyed by layer name.
+    const snaps = new Map();
+    const tmp = new Array(16).fill(0);
+    const readLayer = (l, a) => {
+        const o = l.origin, s = l.scale, r = l.angles, z = l.size, c = l.color;
+        a[0] = f(o?.x); a[1] = f(o?.y); a[2] = f(o?.z);
+        a[3] = f(s?.x); a[4] = f(s?.y); a[5] = f(s?.z);
+        a[6] = f(r?.x); a[7] = f(r?.y); a[8] = f(r?.z);
+        a[9] = f(z?.x); a[10] = f(z?.y);
+        a[11] = f(c?.x); a[12] = f(c?.y); a[13] = f(c?.z);
+        a[14] = f(l.alpha); a[15] = l.visible ? 1 : 0;
+    };
+    const textOf = (l) => (l.text == null ? '' : String(l.text));
+    const remember = (name, l) => {
+        readLayer(l, tmp);
+        let sn = snaps.get(name);
+        if (sn === undefined) { sn = { a: new Array(16).fill(0), text: '' }; snaps.set(name, sn); }
+        for (let i = 0; i < 16; i++) sn.a[i] = tmp[i];
+        sn.text = textOf(l);
+    };
+    // Appends every layer whose state differs from the last exchanged one.
+    const collect = (nums, strs) => {
+        for (const k in g.__layers) {
+            const l = g.__layers[k];
+            const name = String(l.name);
+            readLayer(l, tmp);
+            const text = textOf(l);
+            let sn = snaps.get(name);
+            if (sn !== undefined && sn.text === text) {
+                let same = true;
+                for (let i = 0; i < 16; i++) if (sn.a[i] !== tmp[i]) { same = false; break; }
+                if (same) continue;
+            }
+            if (sn === undefined) { sn = { a: new Array(16).fill(0), text: '' }; snaps.set(name, sn); }
+            for (let i = 0; i < 16; i++) { sn.a[i] = tmp[i]; nums.push(tmp[i]); }
+            sn.text = text;
+            strs.push(name, text);
+        }
+    };
+    g.__collectLayers = function () { const nums = [], strs = []; collect(nums, strs); return [nums, strs]; };
+    // Host -> script: writes packed layer states into the existing layer objects.
+    g.__sync = function (nums, strs) {
+        for (let i = 0, n = strs.length / 2; i < n; i++) {
+            const l = g.__layers[strs[2 * i]];
+            if (!l) continue;
+            const b = i * 16;
+            l.origin = new Vec3(nums[b], nums[b + 1], nums[b + 2]);
+            l.scale = new Vec3(nums[b + 3], nums[b + 4], nums[b + 5]);
+            l.angles = new Vec3(nums[b + 6], nums[b + 7], nums[b + 8]);
+            l.color = new Vec3(nums[b + 11], nums[b + 12], nums[b + 13]);
+            l.size = new Vec2(nums[b + 9], nums[b + 10]);
+            l.alpha = nums[b + 14];
+            l.visible = nums[b + 15] !== 0;
+            l.text = strs[2 * i + 1];
+            remember(strs[2 * i], l);
+        }
+    };
+    // Creates layer objects from packed states.
+    g.__register = function (nums, strs) {
+        for (let i = 0, n = strs.length / 2; i < n; i++) {
+            const b = i * 16, name = strs[2 * i];
+            g.__layers[name] = {
+                name,
+                origin: new Vec3(nums[b], nums[b + 1], nums[b + 2]),
+                scale: new Vec3(nums[b + 3], nums[b + 4], nums[b + 5]),
+                angles: new Vec3(nums[b + 6], nums[b + 7], nums[b + 8]),
+                size: new Vec2(nums[b + 9], nums[b + 10]),
+                color: new Vec3(nums[b + 11], nums[b + 12], nums[b + 13]),
+                alpha: nums[b + 14],
+                visible: nums[b + 15] !== 0,
+                text: strs[2 * i + 1],
+                getEffect() { return { visible: true }; },
+                ...g.__layerStubs(),
+            };
+            remember(name, g.__layers[name]);
+        }
+    };
+    const LAST = new Map();
+    const RES = [16, 32, 64];
+    // p = [dt, runtime, cursorWorldX, cursorWorldY, hasInput, screenX, screenY, leftDown,
+    //      timeOfDay (<0: local clock), ...left64, ...right64]
+    g.__step = function (p) {
+        const e = g.engine, inp = g.input;
+        e.frametime = p[0]; e.runtime = p[1];
+        if (p[4] !== 0) {
+            const sp = inp.cursorScreenPosition; sp.x = p[5]; sp.y = p[6];
+            inp.cursorLeftDown = p[7] !== 0;
+            let t = p[8];
+            if (t < 0) {
+                const d = new Date();
+                t = (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) / 86400;
+            }
+            e.timeOfDay = t;
+        }
+        g.__fireTimers();
+        const w = inp.cursorWorldPosition; w.x = p[2]; w.y = p[3];
+        for (const res of RES) {
+            const stride = 64 / res, buf = g.__audioBuffers[res];
+            for (let i = 0; i < res; i++) {
+                const l = p[9 + i * stride] || 0, r = p[73 + i * stride] || 0;
+                buf.left[i] = l; buf.right[i] = r; buf.average[i] = (l + r) * 0.5;
+            }
+        }
+        const out = [];
+        for (const k in g.__scripts) {
+            const slot = g.__scripts[k];
+            g.__curSlot = k;
+            if (typeof slot.exports.update === 'function') {
+                try {
+                    const next = slot.exports.update(slot.currentValue);
+                    if (next !== undefined) slot.currentValue = next;
+                } catch (err) {
+                    __log('error', `[${k}] update: ${err}`);
+                }
+            }
+            const str = String(slot.currentValue);
+            if (LAST.get(k) !== str) { LAST.set(k, str); out.push(k, str); }
+        }
+        g.__curSlot = undefined;
+        const nums = [], strs = [];
+        collect(nums, strs);
+        return [out, nums, strs];
+    };
+    g.__disable = function (k) { delete g.__scripts[k]; LAST.delete(k); };
+    g.__hasHandler = function (name) {
+        for (const k in g.__scripts) if (typeof g.__scripts[k].exports[name] === 'function') return true;
+        return false;
+    };
+    // mode: 0 keep the button state, 1 pressed, 2 released.
+    g.__cursor = function (cb, x, y, mode, call) {
+        const w = g.input.cursorWorldPosition; w.x = x; w.y = y;
+        if (mode === 1) g.input.cursorLeftDown = true; else if (mode === 2) g.input.cursorLeftDown = false;
+        if (call) g.__callAll(cb, { x, y, worldPosition: new Vec3(x, y, 0) });
+    };
+    // Lock the host internals. The objects stay mutable where scripts legitimately write to them
+    // (`shared`, `engine.*`, layer objects); only the bindings and pure helpers are fixed.
+    for (const n of ['Vec2', 'Vec3', 'Vec4', 'Mat4', 'engine', 'input', 'thisScene', 'console', 'shared',
+        '__log', '__callAll', '__fireTimers', '__step', '__sync', '__register', '__collectLayers',
+        '__disable', '__hasHandler', '__cursor', '__layerStubs', '__animStub', '__videoStub',
+        '__localMatrix', '__WEMath', '__WEColor', '__layers', '__scripts', '__parents', '__audioBuffers']) {
+        const d = Object.getOwnPropertyDescriptor(g, n);
+        if (d) Object.defineProperty(g, n, { value: d.value, writable: false, configurable: false, enumerable: d.enumerable });
+    }
+    Object.freeze(g.__WEMath);
+    Object.freeze(g.__WEColor);
+})();
+"#;
+
+/// Rate limiter for script log output: at most [`LOG_MAX_PER_WINDOW`] lines per [`LOG_WINDOW`].
+#[derive(Debug, Default)]
+pub struct LogLimiter {
+    window_start: Option<Instant>,
+    emitted: u32,
+    dropped: u32,
+}
+
+impl LogLimiter {
+    /// `Some(n)` when a line at `now` may be written (`n` lines were dropped in the previous
+    /// window, `0` normally); `None` when it must be dropped.
+    pub fn admit(&mut self, now: Instant) -> Option<u32> {
+        match self.window_start {
+            Some(start) if now.saturating_duration_since(start) < LOG_WINDOW => {
+                if self.emitted < LOG_MAX_PER_WINDOW {
+                    self.emitted += 1;
+                    Some(0)
+                } else {
+                    self.dropped = self.dropped.saturating_add(1);
+                    None
+                }
+            }
+            _ => {
+                let previously_dropped = std::mem::take(&mut self.dropped);
+                self.window_start = Some(now);
+                self.emitted = 1;
+                Some(previously_dropped)
+            }
+        }
+    }
+}
+
+/// Makes an untrusted script log message safe to write: control characters (newlines
+/// especially) are escaped and the text is cut to [`LOG_MAX_CHARS`] characters.
+pub fn sanitize_log_message(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len().min(LOG_MAX_CHARS + 32));
+    for (chars, c) in msg.chars().enumerate() {
+        if chars >= LOG_MAX_CHARS {
+            let rest = msg.chars().count() - LOG_MAX_CHARS;
+            out.push_str(&format!("...[{rest} more chars]"));
+            break;
+        }
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push(' '),
+            c if c.is_control() => out.push('?'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Counts consecutive frame-budget overruns per slot and decides when to disable one.
+#[derive(Debug, Default)]
+struct Breaker {
+    strikes: HashMap<String, u32>,
+    disabled: Vec<String>,
+}
+
+impl Breaker {
+    /// Records an overrun by `slot`; returns `true` when it just reached [`OVERRUN_STRIKES`].
+    fn overrun(&mut self, slot: &str) -> bool {
+        let n = self.strikes.entry(slot.to_string()).or_insert(0);
+        *n += 1;
+        if *n >= OVERRUN_STRIKES {
+            self.strikes.remove(slot);
+            self.disabled.push(slot.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A frame finished within budget: the strikes were not consecutive.
+    fn frame_ok(&mut self) {
+        if !self.strikes.is_empty() {
+            self.strikes.clear();
+        }
+    }
+}
+
+/// Per-frame inputs of [`SceneScriptEngine::step_frame_diff`].
+#[derive(Debug, Clone, Copy)]
+pub struct FrameInput<'a> {
+    pub dt: f32,
+    pub runtime: f32,
+    /// `input.cursorWorldPosition` (x, y used).
+    pub cursor_world: [f32; 3],
+    /// Cursor screen position, button state and `engine.timeOfDay` (`time_of_day: None` uses
+    /// the script runtime's local clock). `None` here leaves those inputs untouched.
+    pub input: Option<InputState>,
+    pub left_64: &'a [f32; 64],
+    pub right_64: &'a [f32; 64],
+}
+
+/// Cursor/clock inputs set at the start of a frame.
+#[derive(Debug, Clone, Copy)]
+pub struct InputState {
+    pub cursor_screen: [f32; 2],
+    pub left_down: bool,
+    pub time_of_day: Option<f32>,
+}
+
+/// What one script frame changed.
+#[derive(Debug, Default)]
+pub struct FrameOutput {
+    /// `(slot key, new stringified value)` for slots whose value differs from the last frame
+    /// (every slot on its first frame).
+    pub slots: Vec<(String, String)>,
+    /// Layers whose script-side state differs from the last state exchanged with the host.
+    pub layers: Vec<LayerState>,
+}
+
+/// Layers, groups and hierarchy registered in one script call at load.
+#[derive(Debug, Default)]
+pub struct SceneLayers<'a> {
+    /// Real layers (full state), then transform-only groups (`group_keys` lists the latter).
+    pub layers: &'a [LayerState],
+    pub parents: &'a [(String, String)],
+    pub group_keys: &'a [String],
+    pub ids: &'a [(String, i32)],
+}
+
+/// Shortest decimal of an `f32` read back as `f64` (what a JS source literal would produce);
+/// non-finite values become `0`.
+fn num(v: f32) -> f64 {
+    if v.is_finite() {
+        format!("{v}").parse().unwrap_or(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn pack_layers(states: &[LayerState]) -> (Vec<f64>, Vec<String>) {
+    let mut nums = Vec::with_capacity(states.len() * LAYER_STRIDE);
+    let mut strs = Vec::with_capacity(states.len() * 2);
+    for s in states {
+        for v in s
+            .origin
+            .iter()
+            .chain(&s.scale)
+            .chain(&s.angles)
+            .chain(&s.size)
+            .chain(&s.color)
+            .chain(std::iter::once(&s.alpha))
+        {
+            nums.push(num(*v));
+        }
+        nums.push(if s.visible { 1.0 } else { 0.0 });
+        strs.push(s.name.clone());
+        strs.push(s.text.clone());
+    }
+    (nums, strs)
+}
+
+fn unpack_layers(nums: &[f64], strs: Vec<String>) -> Vec<LayerState> {
+    let mut names = strs.into_iter();
+    nums.chunks_exact(LAYER_STRIDE)
+        .map(|c| {
+            let n = |i: usize| c[i] as f32;
+            LayerState {
+                name: names.next().unwrap_or_default(),
+                origin: [n(0), n(1), n(2)],
+                scale: [n(3), n(4), n(5)],
+                angles: [n(6), n(7), n(8)],
+                size: [n(9), n(10)],
+                color: [n(11), n(12), n(13)],
+                alpha: n(14),
+                visible: c[15] != 0.0,
+                text: names.next().unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
 /// Desktop cursor events forwarded to `cursorMove/Down/Up/Click`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorEventKind {
@@ -435,6 +787,8 @@ pub struct LayerState {
 pub fn create_sandboxed_runtime() -> rquickjs::Result<(Runtime, Context)> {
     let rt = Runtime::new()?;
     rt.set_memory_limit(MEMORY_LIMIT_BYTES);
+    rt.set_max_stack_size(MAX_STACK_BYTES);
+    rt.set_gc_threshold(GC_THRESHOLD_BYTES);
     rt.set_loader(WeModuleResolver, WeModuleLoader);
     let ctx = Context::full(&rt)?;
     Ok((rt, ctx))
@@ -536,6 +890,14 @@ pub struct SceneScriptEngine {
     context: Context,
     /// Deadline read by the QuickJS interrupt handler; `None` while no host call is running.
     deadline: Arc<Mutex<Option<Instant>>>,
+    frame_budget: Cell<Duration>,
+    /// End of the total script-load budget while one is running ([`Self::begin_load`]).
+    load_deadline: Cell<Option<Instant>>,
+    breaker: RefCell<Breaker>,
+    /// Per cursor event kind: does any script define the callback? (`None`: not computed.)
+    handlers: Cell<[Option<bool>; 4]>,
+    /// Last value of every slot, for the all-slots view of [`Self::step_frame`].
+    slot_values: RefCell<HashMap<String, String>>,
 }
 
 impl SceneScriptEngine {
@@ -548,7 +910,15 @@ impl SceneScriptEngine {
         )));
 
         context.with(|ctx| -> anyhow::Result<()> {
-            let log = Function::new(ctx.clone(), |level: String, msg: String| {
+            let limiter = Mutex::new(LogLimiter::default());
+            let log = Function::new(ctx.clone(), move |level: String, msg: String| {
+                let Some(dropped) = limiter.lock().admit(Instant::now()) else {
+                    return;
+                };
+                if dropped > 0 {
+                    tracing::warn!(target: "scenescript", "{dropped} script log lines dropped (rate limit)");
+                }
+                let msg = sanitize_log_message(&msg);
                 match level.as_str() {
                     "error" => tracing::error!(target: "scenescript", "{msg}"),
                     "warn" => tracing::warn!(target: "scenescript", "{msg}"),
@@ -571,6 +941,7 @@ impl SceneScriptEngine {
                     js_num(monitor_h)
                 ),
             )?;
+            eval_js::<()>(&ctx, SCENESCRIPT_RUNTIME_JS)?;
             Ok(())
         })?;
 
@@ -578,7 +949,34 @@ impl SceneScriptEngine {
             _runtime: runtime,
             context,
             deadline,
+            frame_budget: Cell::new(FRAME_BUDGET),
+            load_deadline: Cell::new(None),
+            breaker: RefCell::new(Breaker::default()),
+            handlers: Cell::new([None; 4]),
+            slot_values: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Overrides the per-frame budget (tests; the default is [`FRAME_BUDGET`]).
+    pub fn set_frame_budget(&self, budget: Duration) {
+        self.frame_budget.set(budget);
+    }
+
+    /// Starts a total budget for [`Self::register_property_script_with_props`] calls: once it
+    /// is spent, further scripts fail fast instead of each running up to [`INIT_BUDGET`].
+    pub fn begin_load(&self, budget: Duration) {
+        self.load_deadline.set(Some(Instant::now() + budget));
+    }
+
+    /// Ends the budget started by [`Self::begin_load`].
+    pub fn end_load(&self) {
+        self.load_deadline.set(None);
+    }
+
+    /// Slots disabled since the last call because they overran the frame budget
+    /// [`OVERRUN_STRIKES`] frames in a row.
+    pub fn take_disabled_slots(&self) -> Vec<String> {
+        std::mem::take(&mut self.breaker.borrow_mut().disabled)
     }
 
     /// Runs `f` inside the context with a wall-clock budget enforced by the interrupt handler.
@@ -613,7 +1011,47 @@ impl SceneScriptEngine {
             eval_js::<()>(
                 ctx,
                 format!(
-                    "globalThis.__parents = {map_json};
+                    "(function() {{
+                        const P = globalThis.__parents;
+                        for (const k of Object.keys(P)) delete P[k];
+                        Object.assign(P, {map_json});
+                     }})();
+                     for (const [k, id] of {ids_json}) if (globalThis.__layers[k]) globalThis.__layers[k].id = id;
+                     for (const g of {groups_json}) if (globalThis.__layers[g]) globalThis.__layers[g].__group = true;"
+                ),
+            )
+        })
+    }
+
+    /// Registers layers (full state: size, color and text included) in one script call, plus
+    /// the transform-only groups and the parent/child hierarchy. Used at load instead of one
+    /// call per layer.
+    pub fn register_scene_layers(&self, scene: &SceneLayers<'_>) -> anyhow::Result<()> {
+        let (nums, strs) = pack_layers(scene.layers);
+        let ids_json = serde_json::to_string(scene.ids)?;
+        let map: std::collections::BTreeMap<&str, &str> = scene
+            .parents
+            .iter()
+            .map(|(c, p)| (c.as_str(), p.as_str()))
+            .collect();
+        let map_json = serde_json::to_string(&map)?;
+        let groups_json = serde_json::to_string(scene.group_keys)?;
+        self.guarded(INIT_BUDGET, |ctx| {
+            let register: Function = ctx
+                .globals()
+                .get("__register")
+                .map_err(|e| js_err(ctx, e))?;
+            register
+                .call::<_, ()>((nums, strs))
+                .map_err(|e| js_err(ctx, e))?;
+            eval_js::<()>(
+                ctx,
+                format!(
+                    "(function() {{
+                        const P = globalThis.__parents;
+                        for (const k of Object.keys(P)) delete P[k];
+                        Object.assign(P, {map_json});
+                     }})();
                      for (const [k, id] of {ids_json}) if (globalThis.__layers[k]) globalThis.__layers[k].id = id;
                      for (const g of {groups_json}) if (globalThis.__layers[g]) globalThis.__layers[g].__group = true;"
                 ),
@@ -685,6 +1123,22 @@ impl SceneScriptEngine {
         })
     }
 
+    /// Layers whose script-side state differs from the last state exchanged with the host
+    /// (sent by [`Self::sync_layer_states`] / registration, or returned by an earlier call or
+    /// step). Only these cross the boundary.
+    pub fn changed_layers(&self) -> anyhow::Result<Vec<LayerState>> {
+        self.guarded(self.frame_budget.get(), |ctx| {
+            let f: Function = ctx
+                .globals()
+                .get("__collectLayers")
+                .map_err(|e| js_err(ctx, e))?;
+            let arr: rquickjs::Array = f.call(()).map_err(|e| js_err(ctx, e))?;
+            let nums: Vec<f64> = arr.get(0).map_err(|e| js_err(ctx, e))?;
+            let strs: Vec<String> = arr.get(1).map_err(|e| js_err(ctx, e))?;
+            Ok(unpack_layers(&nums, strs))
+        })
+    }
+
     /// Reads every registered layer's state in one call (registration order).
     pub fn layer_states(&self) -> anyhow::Result<Vec<LayerState>> {
         self.guarded(FRAME_BUDGET, |ctx| {
@@ -714,44 +1168,10 @@ impl SceneScriptEngine {
         if states.is_empty() {
             return Ok(());
         }
-        let v3 = |v: [f32; 3]| format!("[{},{},{}]", js_num(v[0]), js_num(v[1]), js_num(v[2]));
-        let rows: Vec<String> = states
-            .iter()
-            .map(|s| {
-                format!(
-                    "[{},{},{},{},[{},{}],{},{},{},{}]",
-                    js_str(&s.name),
-                    v3(s.origin),
-                    v3(s.scale),
-                    v3(s.angles),
-                    js_num(s.size[0]),
-                    js_num(s.size[1]),
-                    v3(s.color),
-                    js_num(s.alpha),
-                    s.visible,
-                    js_str(&s.text)
-                )
-            })
-            .collect();
-        self.guarded(FRAME_BUDGET, |ctx| {
-            eval_js::<()>(
-                ctx,
-                format!(
-                    "(function() {{
-                        const v3 = (a) => new Vec3(a[0], a[1], a[2]);
-                        for (const [name, o, s, a, sz, c, alpha, vis, text] of [{rows}]) {{
-                            const l = globalThis.__layers[name];
-                            if (!l) continue;
-                            l.origin = v3(o); l.scale = v3(s); l.angles = v3(a); l.color = v3(c);
-                            l.size = new Vec2(sz[0], sz[1]);
-                            l.alpha = alpha;
-                            l.visible = vis;
-                            l.text = text;
-                        }}
-                    }})()",
-                    rows = rows.join(","),
-                ),
-            )
+        let (nums, strs) = pack_layers(states);
+        self.guarded(self.frame_budget.get(), |ctx| {
+            let f: Function = ctx.globals().get("__sync").map_err(|e| js_err(ctx, e))?;
+            f.call::<_, ()>((nums, strs)).map_err(|e| js_err(ctx, e))
         })
     }
 
@@ -788,7 +1208,18 @@ impl SceneScriptEngine {
         static NEXT_MODULE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let unique = NEXT_MODULE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        self.guarded(INIT_BUDGET, |ctx| {
+        let budget = match self.load_deadline.get() {
+            Some(end) => {
+                let left = end.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    anyhow::bail!("script load budget exhausted");
+                }
+                left.min(INIT_BUDGET)
+            }
+            None => INIT_BUDGET,
+        };
+        self.handlers.set([None; 4]);
+        self.guarded(budget, |ctx| {
             eval_js::<()>(
                 ctx,
                 format!(
@@ -918,6 +1349,28 @@ impl SceneScriptEngine {
         })
     }
 
+    /// Whether any script defines the callback of this cursor event kind (cached).
+    pub fn has_cursor_handler(&self, kind: CursorEventKind) -> bool {
+        let idx = kind as usize;
+        let mut cache = self.handlers.get();
+        if let Some(v) = cache[idx] {
+            return v;
+        }
+        let found = self
+            .guarded(INIT_BUDGET, |ctx| {
+                let f: Function = ctx
+                    .globals()
+                    .get("__hasHandler")
+                    .map_err(|e| js_err(ctx, e))?;
+                f.call::<_, bool>((kind.callback(),))
+                    .map_err(|e| js_err(ctx, e))
+            })
+            .unwrap_or(false);
+        cache[idx] = Some(found);
+        self.handlers.set(cache);
+        found
+    }
+
     /// Forwards a desktop cursor event (`cursorMove/Down/Up/Click`) to all scripts.
     /// `world_x`/`world_y` are scene coordinates (see `input.cursorWorldPosition`).
     pub fn dispatch_cursor_event(
@@ -926,23 +1379,16 @@ impl SceneScriptEngine {
         world_x: f32,
         world_y: f32,
     ) -> anyhow::Result<()> {
-        let left_down_update = match kind {
-            CursorEventKind::Down => "input.cursorLeftDown = true;",
-            CursorEventKind::Up => "input.cursorLeftDown = false;",
-            _ => "",
+        let mode = match kind {
+            CursorEventKind::Down => 1,
+            CursorEventKind::Up => 2,
+            _ => 0,
         };
+        let call = self.has_cursor_handler(kind);
         self.guarded(INIT_BUDGET, |ctx| {
-            eval_js::<()>(
-                ctx,
-                format!(
-                    "input.cursorWorldPosition.x = {x}; input.cursorWorldPosition.y = {y};
-                     {left_down_update}
-                     __callAll('{cb}', {{ x: {x}, y: {y}, worldPosition: new Vec3({x}, {y}, 0) }});",
-                    x = js_num(world_x),
-                    y = js_num(world_y),
-                    cb = kind.callback(),
-                ),
-            )
+            let f: Function = ctx.globals().get("__cursor").map_err(|e| js_err(ctx, e))?;
+            f.call::<_, ()>((kind.callback(), num(world_x), num(world_y), mode, call))
+                .map_err(|e| js_err(ctx, e))
         })
     }
 
@@ -992,6 +1438,101 @@ impl SceneScriptEngine {
         })
     }
 
+    /// One script frame: sets the inputs, fires timers, runs every slot's `update` and returns
+    /// only what changed (slot values that differ from last frame, layers whose state differs
+    /// from the last exchanged one). A frame that overruns the budget counts a strike against
+    /// the slot that was running; see [`Self::take_disabled_slots`].
+    pub fn step_frame_diff(&self, input: &FrameInput<'_>) -> anyhow::Result<FrameOutput> {
+        let audio = |v: f32| {
+            if v.is_finite() {
+                (f64::from(v) * 1e4).round() / 1e4
+            } else {
+                0.0
+            }
+        };
+        let mut p: Vec<f64> = Vec::with_capacity(9 + 128);
+        let (has_input, screen, down, tod) = match input.input {
+            Some(i) => (
+                1.0,
+                i.cursor_screen,
+                f64::from(i.left_down),
+                i.time_of_day.map_or(-1.0, num),
+            ),
+            None => (0.0, [0.0; 2], 0.0, -1.0),
+        };
+        p.extend([
+            num(input.dt),
+            num(input.runtime),
+            num(input.cursor_world[0]),
+            num(input.cursor_world[1]),
+            has_input,
+            num(screen[0]),
+            num(screen[1]),
+            down,
+            tod,
+        ]);
+        p.extend(input.left_64.iter().map(|v| audio(*v)));
+        p.extend(input.right_64.iter().map(|v| audio(*v)));
+
+        let budget = self.frame_budget.get();
+        let started = Instant::now();
+        let res = self.guarded(budget, |ctx| {
+            let f: Function = ctx.globals().get("__step").map_err(|e| js_err(ctx, e))?;
+            let arr: rquickjs::Array = f.call((p,)).map_err(|e| js_err(ctx, e))?;
+            let slots: Vec<String> = arr.get(0).map_err(|e| js_err(ctx, e))?;
+            let nums: Vec<f64> = arr.get(1).map_err(|e| js_err(ctx, e))?;
+            let strs: Vec<String> = arr.get(2).map_err(|e| js_err(ctx, e))?;
+            Ok((slots, nums, strs))
+        });
+        match res {
+            Ok((slots, nums, strs)) => {
+                self.breaker.borrow_mut().frame_ok();
+                let mut it = slots.into_iter();
+                let mut changed = Vec::new();
+                while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    changed.push((k, v));
+                }
+                Ok(FrameOutput {
+                    slots: changed,
+                    layers: unpack_layers(&nums, strs),
+                })
+            }
+            Err(err) => {
+                if started.elapsed() >= budget {
+                    self.record_overrun();
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Blames the slot that was running when the frame budget ran out.
+    fn record_overrun(&self) {
+        let slot: Option<String> = self
+            .guarded(INIT_BUDGET, |ctx| {
+                eval_js::<Option<String>>(ctx, "globalThis.__curSlot")
+            })
+            .ok()
+            .flatten();
+        let Some(slot) = slot else { return };
+        if self.breaker.borrow_mut().overrun(&slot) {
+            tracing::warn!(
+                target: "scenescript",
+                "script '{slot}' overran the frame budget {OVERRUN_STRIKES} frames in a row; disabled"
+            );
+            let _ = self.guarded(INIT_BUDGET, |ctx| {
+                let f: Function = ctx.globals().get("__disable").map_err(|e| js_err(ctx, e))?;
+                f.call::<_, ()>((slot.as_str(),))
+                    .map_err(|e| js_err(ctx, e))
+            });
+            self.slot_values.borrow_mut().remove(&slot);
+            self.handlers.set([None; 4]);
+        }
+    }
+
+    /// Like [`Self::step_frame_diff`] but returns the current value of every slot and leaves
+    /// the cursor screen position, button and time of day alone. Layer changes found by the
+    /// step are not reported (use [`Self::layer_states`]).
     pub fn step_frame(
         &self,
         dt: f32,
@@ -1000,57 +1541,19 @@ impl SceneScriptEngine {
         left_64: &[f32; 64],
         right_64: &[f32; 64],
     ) -> anyhow::Result<HashMap<String, String>> {
-        let csv = |a: &[f32; 64]| {
-            a.iter()
-                .map(|v| format!("{:.4}", if v.is_finite() { *v } else { 0.0 }))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let left_csv = csv(left_64);
-        let right_csv = csv(right_64);
-        self.guarded(FRAME_BUDGET, |ctx| {
-            let step_js = format!(
-                "(function() {{
-                    engine.frametime = {dt};
-                    engine.runtime = {runtime};
-                    globalThis.__fireTimers();
-                    input.cursorWorldPosition.x = {cx};
-                    input.cursorWorldPosition.y = {cy};
-                    const L = [{left_csv}];
-                    const R = [{right_csv}];
-                    for (const res of [16, 32, 64]) {{
-                        const stride = 64 / res;
-                        const buf = globalThis.__audioBuffers[res];
-                        for (let i = 0; i < res; i++) {{
-                            const l = L[i * stride] || 0;
-                            const r = R[i * stride] || 0;
-                            buf.left[i] = l;
-                            buf.right[i] = r;
-                            buf.average[i] = (l + r) * 0.5;
-                        }}
-                    }}
-                    const updated = {{}};
-                    for (const [k, slot] of Object.entries(globalThis.__scripts)) {{
-                        if (typeof slot.exports.update === 'function') {{
-                            try {{
-                                const next = slot.exports.update(slot.currentValue);
-                                if (next !== undefined) slot.currentValue = next;
-                            }} catch (e) {{
-                                __log('error', `[${{k}}] update: ${{e}}`);
-                            }}
-                        }}
-                        updated[k] = String(slot.currentValue);
-                    }}
-                    return JSON.stringify(updated);
-                }})()",
-                dt = js_num(dt),
-                runtime = js_num(runtime),
-                cx = js_num(cursor_world[0]),
-                cy = js_num(cursor_world[1]),
-            );
-            let json_out: String = eval_js(ctx, step_js)?;
-            Ok(serde_json::from_str::<HashMap<String, String>>(&json_out)?)
-        })
+        let out = self.step_frame_diff(&FrameInput {
+            dt,
+            runtime,
+            cursor_world,
+            input: None,
+            left_64,
+            right_64,
+        })?;
+        let mut values = self.slot_values.borrow_mut();
+        for (k, v) in out.slots {
+            values.insert(k, v);
+        }
+        Ok(values.clone())
     }
 }
 
@@ -1555,5 +2058,255 @@ mod tests {
              return b.transformPoint(new Vec3(1, 1, 1)).toString() + '|' + b.scale().x; }",
         );
         assert_eq!(out, "3 4 5|2");
+    }
+
+    fn frame<'a>(left: &'a [f32; 64], right: &'a [f32; 64], t: f32) -> FrameInput<'a> {
+        FrameInput {
+            dt: 0.016,
+            runtime: t,
+            cursor_world: [0.0; 3],
+            input: Some(InputState {
+                cursor_screen: [1.0, 2.0],
+                left_down: false,
+                time_of_day: Some(0.25),
+            }),
+            left_64: left,
+            right_64: right,
+        }
+    }
+
+    #[test]
+    fn step_returns_only_changed_slots() {
+        let e = engine();
+        e.register_property_script("c", "L", "export function update(v) { return 5; }", "0")
+            .unwrap();
+        e.register_property_script("n", "L", "export function update(v) { return v + 1; }", "0")
+            .unwrap();
+        let first = e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        assert_eq!(first.slots.len(), 2, "every slot on its first frame");
+        let second = e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
+        assert_eq!(second.slots, [("n".to_string(), "2".to_string())]);
+        // The all-slots view of `step_frame` reports every slot.
+        let e2 = engine();
+        e2.register_property_script("c", "L", "export function update(v) { return 5; }", "0")
+            .unwrap();
+        assert_eq!(step(&e2)["c"], "5");
+        assert_eq!(step(&e2)["c"], "5");
+    }
+
+    #[test]
+    fn step_sets_inputs_and_time_of_day() {
+        let e = engine();
+        e.register_property_script(
+            "i",
+            "L",
+            "export function update(v) { return [input.cursorScreenPosition.x, input.cursorLeftDown, engine.timeOfDay].join(','); }",
+            "0",
+        )
+        .unwrap();
+        let out = e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        assert_eq!(out.slots[0].1, "1,false,0.25");
+    }
+
+    #[test]
+    fn step_returns_only_changed_layers() {
+        let e = engine();
+        e.register_layer("a", [1.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_layer("b", [2.0; 3], [1.0; 3], [0.0; 3], 1.0, true)
+            .unwrap();
+        e.register_property_script(
+            "s",
+            "a",
+            "let n = 0; export function update(v) { if (n++ === 1) thisLayer.alpha = 0.5; return v; }",
+            "0",
+        )
+        .unwrap();
+        // Registered layers are reported once, then quiet.
+        let f0 = e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        assert_eq!(f0.layers.len(), 2);
+        let f1 = e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
+        assert_eq!(f1.layers.len(), 1);
+        assert_eq!((f1.layers[0].name.as_str(), f1.layers[0].alpha), ("a", 0.5));
+        let f2 = e.step_frame_diff(&frame(&Z64, &Z64, 0.2)).unwrap();
+        assert!(f2.layers.is_empty());
+        assert!(e.changed_layers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn host_sync_does_not_echo_back() {
+        let e = engine();
+        let mut a = LayerState {
+            name: "a".into(),
+            scale: [1.0; 3],
+            color: [1.0; 3],
+            alpha: 1.0,
+            visible: true,
+            ..Default::default()
+        };
+        e.register_scene_layers(&SceneLayers {
+            layers: std::slice::from_ref(&a),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(e.changed_layers().unwrap().is_empty());
+        a.origin = [3.5, 4.0, 5.0];
+        a.text = "hi".into();
+        e.sync_layer_states(std::slice::from_ref(&a)).unwrap();
+        assert!(e.changed_layers().unwrap().is_empty());
+        assert_eq!(e.layer_state("a").unwrap().unwrap(), a);
+    }
+
+    #[test]
+    fn register_scene_layers_sets_groups_and_parents() {
+        let e = engine();
+        let mk = |n: &str| LayerState {
+            name: n.into(),
+            scale: [1.0; 3],
+            color: [1.0; 3],
+            alpha: 1.0,
+            visible: true,
+            ..Default::default()
+        };
+        let layers = [mk("child"), mk("grp")];
+        e.register_scene_layers(&SceneLayers {
+            layers: &layers,
+            parents: &[("child".into(), "grp".into())],
+            group_keys: &["grp".into()],
+            ids: &[("child".into(), 7)],
+        })
+        .unwrap();
+        let out = run(
+            &e,
+            "h",
+            "child",
+            "export function update() { return [thisLayer.getParent().name, thisScene.getLayerByID(7).name, thisScene.enumerateLayers().length].join(','); }",
+        );
+        assert_eq!(out, "grp,child,1");
+    }
+
+    #[test]
+    fn overrunning_slot_is_disabled_after_three_strikes() {
+        let e = engine();
+        e.set_frame_budget(Duration::from_millis(20));
+        e.register_property_script(
+            "hang",
+            "L",
+            "export function update(v) { while (true) {} }",
+            "0",
+        )
+        .unwrap();
+        e.register_property_script(
+            "ok",
+            "L",
+            "export function update(v) { return v + 1; }",
+            "0",
+        )
+        .unwrap();
+        for _ in 0..2 {
+            assert!(e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).is_err());
+            assert!(e.take_disabled_slots().is_empty());
+        }
+        assert!(e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).is_err());
+        assert_eq!(e.take_disabled_slots(), ["hang"]);
+        // Healthy scripts run again and the hung one is gone.
+        let out = e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
+        assert!(out.slots.iter().any(|(k, _)| k == "ok"));
+        assert!(out.slots.iter().all(|(k, _)| k != "hang"));
+    }
+
+    #[test]
+    fn breaker_counts_consecutive_overruns_only() {
+        let mut b = Breaker::default();
+        assert!(!b.overrun("x"));
+        b.frame_ok();
+        assert!(!b.overrun("x"));
+        assert!(!b.overrun("x"));
+        assert!(b.overrun("x"));
+        assert_eq!(b.disabled, ["x"]);
+    }
+
+    #[test]
+    fn load_budget_skips_remaining_scripts() {
+        let e = engine();
+        e.begin_load(Duration::ZERO);
+        let err = e
+            .register_property_script("a", "L", "export function update(v) { return 1; }", "0")
+            .unwrap_err();
+        assert!(err.to_string().contains("budget"), "{err}");
+        e.end_load();
+        e.register_property_script("a", "L", "export function update(v) { return 1; }", "0")
+            .unwrap();
+    }
+
+    #[test]
+    fn cursor_handler_detection_is_per_kind() {
+        let e = engine();
+        assert!(!e.has_cursor_handler(CursorEventKind::Move));
+        e.register_property_script(
+            "c",
+            "L",
+            "export function cursorClick() {} export function update(v) { return v; }",
+            "0",
+        )
+        .unwrap();
+        assert!(e.has_cursor_handler(CursorEventKind::Click));
+        assert!(!e.has_cursor_handler(CursorEventKind::Move));
+        // Without a handler the event is still accepted.
+        e.dispatch_cursor_event(CursorEventKind::Move, 9.0, 8.0)
+            .unwrap();
+    }
+
+    #[test]
+    fn host_internals_are_locked() {
+        let e = engine();
+        let out = run(
+            &e,
+            "lock",
+            "L",
+            "export function update() {
+                let r = [];
+                for (const n of ['__layers', '__scripts', '__log', '__step', 'engine', 'Vec3']) {
+                    try { globalThis[n] = {}; r.push('w'); } catch (err) { r.push('x'); }
+                }
+                try { __WEMath.PI = 3; r.push('w'); } catch (err) { r.push('x'); }
+                return r.join('');
+            }",
+        );
+        assert_eq!(out, "xxxxxxx");
+    }
+
+    #[test]
+    fn log_messages_are_sanitized_and_truncated() {
+        assert_eq!(sanitize_log_message("a\nb\r\tc\u{7}"), "a\\nb\\r c?");
+        let long = "x".repeat(LOG_MAX_CHARS + 40);
+        let out = sanitize_log_message(&long);
+        assert!(out.starts_with(&"x".repeat(LOG_MAX_CHARS)));
+        assert!(out.ends_with("...[40 more chars]"));
+        assert_eq!(sanitize_log_message("héllo"), "héllo");
+    }
+
+    #[test]
+    fn log_limiter_caps_lines_per_window() {
+        let mut l = LogLimiter::default();
+        let t0 = Instant::now();
+        let admitted = (0..100).filter(|_| l.admit(t0).is_some()).count();
+        assert_eq!(admitted, LOG_MAX_PER_WINDOW as usize);
+        // Next window reports how many were dropped.
+        assert_eq!(l.admit(t0 + LOG_WINDOW), Some(80));
+        assert_eq!(l.admit(t0 + LOG_WINDOW), Some(0));
+    }
+
+    #[test]
+    fn log_flood_from_a_script_does_not_break_the_frame() {
+        let e = engine();
+        e.register_property_script(
+            "spam",
+            "L",
+            "export function update(v) { for (let i = 0; i < 500; i++) console.log('line\\nx' + i); return v; }",
+            "0",
+        )
+        .unwrap();
+        step(&e);
     }
 }

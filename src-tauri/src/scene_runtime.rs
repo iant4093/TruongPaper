@@ -17,8 +17,13 @@
 
 use std::collections::{HashMap, HashSet};
 use truongpaper_audio::{effective_volume, SoundLayerPlan, SoundPlaybackMode};
-use truongpaper_renderer::{CameraState, DiagnosticsLog, SceneGraph, ScriptProperty};
-use truongpaper_scenescript::{CursorEventKind, LayerState, SceneScriptEngine};
+use truongpaper_renderer::{
+    CameraState, DiagnosticsLog, SceneGraph, SceneLayer, SceneLayerKind, ScriptProperty,
+};
+use truongpaper_scenescript::{
+    CursorEventKind, FrameInput, InputState, LayerState, SceneLayers, SceneScriptEngine,
+    LOAD_BUDGET,
+};
 use truongpaper_we_formats::scene_schema::{resolve_bound_bool, resolve_bound_value};
 use truongpaper_we_formats::WeVirtualFileSystem;
 
@@ -38,16 +43,6 @@ pub fn cursor_screen_position(cursor_norm: [f32; 2], monitor_size: [f32; 2]) -> 
 fn finite_cursor(c: [f32; 2]) -> [f32; 2] {
     let f = |v: f32| if v.is_finite() { v } else { 0.5 };
     [f(c[0]), f(c[1])]
-}
-
-/// Fallback time of day in `[0, 1)` from UTC, used only if the script runtime's local clock
-/// is unavailable; hosts that know the local offset call [`SceneRuntime::set_time_of_day`].
-fn utc_time_of_day() -> f32 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    ((secs % 86_400.0) / 86_400.0) as f32
 }
 
 /// JS expression for a slot's initial value: `register_property_script` evaluates it as code.
@@ -157,10 +152,16 @@ pub struct SceneRuntime {
     camera: CameraState,
     /// `(layer index, SceneScript layer name = SceneLayer::key())`, unique names only.
     script_layers: Vec<(usize, String)>,
+    /// Graph layer index each `script_layers` entry resolves to (`find_layer`, fixed at load).
+    layer_idx: Vec<Option<usize>>,
     /// Layer state the script context currently holds (last push or pull).
     synced: HashMap<String, LayerState>,
+    /// Last value each slot produced (the script step only reports changes).
+    slot_values: HashMap<String, String>,
     registered_slots: Vec<String>,
     skipped_slots: Vec<String>,
+    /// Slots dropped at run time for overrunning the frame budget repeatedly.
+    disabled_slots: Vec<String>,
     elapsed: f32,
     paused: bool,
     time_of_day: Option<f32>,
@@ -241,9 +242,12 @@ impl SceneRuntime {
             engine,
             camera: CameraState::new(),
             script_layers,
+            layer_idx: Vec::new(),
             synced: HashMap::new(),
+            slot_values: HashMap::new(),
             registered_slots: Vec::new(),
             skipped_slots: Vec::new(),
+            disabled_slots: Vec::new(),
             elapsed: 0.0,
             paused: false,
             time_of_day: None,
@@ -251,14 +255,14 @@ impl SceneRuntime {
             script_stats: ScriptStats::default(),
         };
 
-        for (_, key) in &rt.script_layers {
-            let s = rt.graph_layer_state(key);
-            rt.engine
-                .register_layer(key, s.origin, s.scale, s.angles, s.alpha, s.visible)?;
-        }
-        // register_layer has no size/color: sync the full state once.
-        rt.push_layers()?;
-        rt.register_hierarchy()?;
+        rt.layer_idx = rt
+            .script_layers
+            .iter()
+            .map(|(_, key)| rt.graph.find_layer(key))
+            .collect();
+        // Layers (full state), groups and hierarchy go to the script context in one call.
+        rt.register_scene_layers()?;
+        rt.engine.begin_load(LOAD_BUDGET);
 
         let initial_props = user_props_json.map(plain_properties_json);
         if let Some(json) = &initial_props {
@@ -348,6 +352,7 @@ impl SceneRuntime {
             }
             rt.pull_layers()?;
         }
+        rt.engine.end_load();
         rt.settle_scripts();
         Ok(rt)
     }
@@ -396,7 +401,7 @@ impl SceneRuntime {
         self.paused = paused;
     }
 
-    /// Overrides `engine.timeOfDay` (`[0,1]`); `None` falls back to UTC.
+    /// Overrides `engine.timeOfDay` (`[0,1]`); `None` uses the script runtime's local clock.
     pub fn set_time_of_day(&mut self, time_of_day: Option<f32>) {
         self.time_of_day = time_of_day
             .filter(|t| t.is_finite())
@@ -412,6 +417,11 @@ impl SceneRuntime {
         for slot in &self.skipped_slots {
             log.push(format!(
                 "SceneScript {slot} skipped: failed to compile or start"
+            ));
+        }
+        for slot in &self.disabled_slots {
+            log.push(format!(
+                "SceneScript {slot} disabled: repeatedly exceeded its frame budget"
             ));
         }
         log.extend(self.extra_diagnostics.to_vec());
@@ -487,25 +497,45 @@ impl SceneRuntime {
     ) -> anyhow::Result<()> {
         self.push_layers()?;
         let screen = cursor_screen_position(cursor_norm, self.graph.monitor_size.to_array());
-        let tod = match self.time_of_day {
-            Some(t) => t,
-            None => self
-                .engine
-                .local_time_of_day()
-                .unwrap_or_else(|_| utc_time_of_day()),
-        };
-        self.engine.set_input_state(screen, left_down, tod)?;
-        let outputs = self
-            .engine
-            .step_frame(dt, self.elapsed, world, left_64, right_64)?;
-        self.pull_layers()?;
-        // Registration order keeps multiple slots on one layer deterministic.
+        let stepped = self.engine.step_frame_diff(&FrameInput {
+            dt,
+            runtime: self.elapsed,
+            cursor_world: world,
+            input: Some(InputState {
+                cursor_screen: screen,
+                left_down,
+                time_of_day: self.time_of_day,
+            }),
+            left_64,
+            right_64,
+        });
+        self.drop_disabled_slots();
+        let out = stepped?;
+        self.apply_pulled(out.layers);
+        for (slot, value) in out.slots {
+            self.slot_values.insert(slot, value);
+        }
+        // Registration order keeps multiple slots on one layer deterministic. Slots that did
+        // not change still re-apply their value, so they keep winning over other writers.
         for slot in &self.registered_slots {
-            if let Some(value) = outputs.get(slot) {
+            if let Some(value) = self.slot_values.get(slot) {
                 self.graph.apply_script_output(slot, value);
             }
         }
         Ok(())
+    }
+
+    /// Forgets slots the engine disabled (frame-budget circuit breaker).
+    fn drop_disabled_slots(&mut self) {
+        for slot in self.engine.take_disabled_slots() {
+            tracing::warn!(
+                "scene {}: SceneScript '{slot}' disabled after repeated frame-budget overruns",
+                self.graph.scene_path
+            );
+            self.registered_slots.retain(|s| *s != slot);
+            self.slot_values.remove(&slot);
+            self.disabled_slots.push(slot);
+        }
     }
 
     /// Forwards a desktop cursor event (`cursorMove/Down/Up/Click`) to every script.
@@ -518,6 +548,10 @@ impl SceneRuntime {
             return Ok(());
         }
         let world = cursor_world_position(cursor_norm, self.scene_size());
+        if !self.engine.has_cursor_handler(kind) {
+            // No script listens: only the cursor input changes, no layer traffic.
+            return self.engine.dispatch_cursor_event(kind, world[0], world[1]);
+        }
         self.push_layers()?;
         self.engine
             .dispatch_cursor_event(kind, world[0], world[1])?;
@@ -595,10 +629,19 @@ impl SceneRuntime {
         self.graph.scene_size.to_array()
     }
 
-    /// Exposes parent/child links to `getParent()/getChildren()`. Transform-only parents
-    /// (groups) are registered as non-enumerable pseudo layers.
+    /// Registers every script layer (full state), the transform-only parents (groups, as
+    /// non-enumerable pseudo layers) and the parent/child links for `getParent()/getChildren()`
+    /// in a single script call.
     #[allow(clippy::map_entry)]
-    fn register_hierarchy(&self) -> anyhow::Result<()> {
+    fn register_scene_layers(&mut self) -> anyhow::Result<()> {
+        let mut layers: Vec<LayerState> = self
+            .script_layers
+            .iter()
+            .map(|(_, key)| self.graph_layer_state(key))
+            .collect();
+        for s in &layers {
+            self.synced.insert(s.name.clone(), s.clone());
+        }
         let mut keys: HashMap<usize, String> = HashMap::new();
         let mut used: HashSet<String> = HashSet::new();
         for l in &self.graph.layers {
@@ -630,14 +673,17 @@ impl SceneRuntime {
                         key = format!("#{p}");
                         used.insert(key.clone());
                     }
-                    self.engine.register_layer(
-                        &key,
-                        t.origin.to_array(),
-                        t.scale.to_array(),
-                        t.angles.to_array(),
-                        1.0,
-                        true,
-                    )?;
+                    layers.push(LayerState {
+                        name: key.clone(),
+                        origin: t.origin.to_array(),
+                        scale: t.scale.to_array(),
+                        angles: t.angles.to_array(),
+                        size: [0.0; 2],
+                        color: [1.0; 3],
+                        alpha: 1.0,
+                        visible: true,
+                        text: String::new(),
+                    });
                     groups.push(key.clone());
                     keys.insert(p, key);
                 }
@@ -657,7 +703,12 @@ impl SceneRuntime {
             .iter()
             .filter_map(|l| l.id.map(|id| (l.key(), id)))
             .collect();
-        self.engine.set_layer_hierarchy(&parents, &groups, &ids)
+        self.engine.register_scene_layers(&SceneLayers {
+            layers: &layers,
+            parents: &parents,
+            group_keys: &groups,
+            ids: &ids,
+        })
     }
 
     fn graph_layer_state(&self, key: &str) -> LayerState {
@@ -691,13 +742,23 @@ impl SceneRuntime {
         }
     }
 
+    /// True when the graph layer behind `script_layers[i]` still matches `st` (no allocation).
+    fn layer_matches(&self, i: usize, st: &LayerState) -> bool {
+        let Some(l) = self.layer_idx[i].map(|li| &self.graph.layers[li]) else {
+            return self.graph_layer_state(&self.script_layers[i].1) == *st;
+        };
+        layer_equals(l, st)
+    }
+
     /// Sends host-side changes (script outputs, user properties) to the script context.
     fn push_layers(&mut self) -> anyhow::Result<()> {
-        let changed: Vec<LayerState> = self
-            .script_layers
-            .iter()
-            .map(|(_, key)| self.graph_layer_state(key))
-            .filter(|s| self.synced.get(&s.name) != Some(s))
+        let changed: Vec<LayerState> = (0..self.script_layers.len())
+            .filter(|&i| {
+                self.synced
+                    .get(&self.script_layers[i].1)
+                    .is_none_or(|st| !self.layer_matches(i, st))
+            })
+            .map(|i| self.graph_layer_state(&self.script_layers[i].1))
             .collect();
         if changed.is_empty() {
             return Ok(());
@@ -711,8 +772,15 @@ impl SceneRuntime {
 
     /// `thisLayer` write-back: applies layers whose script-side state changed since the last sync.
     fn pull_layers(&mut self) -> anyhow::Result<usize> {
+        let changed = self.engine.changed_layers()?;
+        Ok(self.apply_pulled(changed))
+    }
+
+    /// Applies script-side layer changes to the graph; layers equal to the synced copy are
+    /// skipped (compared in place).
+    fn apply_pulled(&mut self, layers: Vec<LayerState>) -> usize {
         let mut applied = 0;
-        for s in self.engine.layer_states()? {
+        for s in layers {
             if self.synced.get(&s.name) == Some(&s) {
                 continue;
             }
@@ -729,10 +797,31 @@ impl SceneRuntime {
                 applied += 1;
             }
             self.graph.apply_layer_text(&s.name, &s.text);
-            self.synced.insert(s.name.clone(), s);
+            match self.synced.get_mut(&s.name) {
+                Some(cur) => *cur = s,
+                None => {
+                    self.synced.insert(s.name.clone(), s);
+                }
+            }
         }
-        Ok(applied)
+        applied
     }
+}
+
+/// Field-by-field comparison of a graph layer with a script-side state.
+fn layer_equals(l: &SceneLayer, st: &LayerState) -> bool {
+    let text_eq = match &l.kind {
+        SceneLayerKind::Text { text, .. } => *text == st.text,
+        _ => st.text.is_empty(),
+    };
+    text_eq
+        && l.transform.origin.to_array() == st.origin
+        && l.transform.scale.to_array() == st.scale
+        && l.transform.angles.to_array() == st.angles
+        && l.transform.size.to_array() == st.size
+        && l.color.to_array() == st.color
+        && l.alpha == st.alpha
+        && l.visible == st.visible
 }
 
 #[cfg(test)]
@@ -1394,5 +1483,61 @@ mod tests {
         let o = origin(logical);
         assert_eq!((o[0], o[1]), (1728.0, 1117.0));
         assert!(o[1] < 2160.0);
+    }
+
+    #[test]
+    fn hanging_script_is_disabled_and_others_keep_running() {
+        let t = TempDir::new("breaker");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 100, "height": 50 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Hang", "image": "models/solid.json", "origin": "0 0 0",
+                "alpha": { "script": "let n = 0; export function update(v) { if (n++ > 0) { while (true) {} } return v; }", "value": 1 } },
+              { "name": "Move", "image": "models/solid.json", "origin": "0 0 0",
+                "scale": { "script": "export function update(v) { return new Vec3(v.x + 1, 1, 1); }", "value": "1 1 1" } } ]
+            }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        assert_eq!(rt.script_slots().len(), 2);
+        for _ in 0..4 {
+            step(&mut rt);
+        }
+        assert_eq!(rt.script_slots().len(), 1, "{:?}", rt.script_slots());
+        assert!(rt.diagnostics().iter().any(|d| d.contains("disabled")));
+        let before = layer(&rt, "Move").transform.scale.x;
+        step(&mut rt);
+        assert!(layer(&rt, "Move").transform.scale.x > before);
+    }
+
+    #[test]
+    fn cursor_events_without_handlers_leave_layers_alone() {
+        let t = scene_dir("nohandler");
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        step(&mut rt);
+        let before = layer(&rt, "Hero").transform.origin;
+        rt.dispatch_cursor(CursorEventKind::Move, [0.1, 0.9])
+            .unwrap();
+        assert_eq!(layer(&rt, "Hero").transform.origin, before);
+    }
+
+    #[test]
+    fn push_skips_unchanged_layers() {
+        let t = scene_dir("pushnoop");
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        for i in 0..rt.script_layers.len() {
+            let key = rt.script_layers[i].1.clone();
+            let st = rt.synced.get(&key).cloned().unwrap();
+            assert_eq!(rt.layer_matches(i, &st), rt.graph_layer_state(&key) == st);
+        }
+        let key = rt.script_layers[0].1.clone();
+        let mut st = rt.synced.get(&key).cloned().unwrap();
+        st.alpha += 0.5;
+        assert!(!rt.layer_matches(0, &st));
     }
 }

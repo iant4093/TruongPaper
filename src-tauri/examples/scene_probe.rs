@@ -19,7 +19,7 @@ fn probe_spectrum(frame: u32) -> [f32; 64] {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("warn")
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
         .with_writer(std::io::stderr)
         .init();
     pollster::block_on(render())

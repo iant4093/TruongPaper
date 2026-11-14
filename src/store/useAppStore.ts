@@ -133,7 +133,8 @@ export interface AppState {
   loadGuestAvailability: (workshopIds: string[]) => Promise<void>;
   importLocalWallpaper: (path: string) => Promise<WallpaperItem>;
   /** Stop a running Workshop download. */
-  cancelWorkshopDownload: (workshopId: string) => Promise<void>;
+  /** Resolves to false when no download is registered for the id (not started yet, or already over). */
+  cancelWorkshopDownload: (workshopId: string) => Promise<boolean>;
   deleteWallpaper: (wallpaperId: string) => Promise<void>;
   setWallpaperFavorite: (wallpaperId: string, favorite: boolean) => Promise<void>;
   dismissDownload: (workshopId: string) => void;
@@ -659,7 +660,7 @@ export const useAppStore = create<AppState>((set, get) => {
     closeWorkshopPreview: () => { previewRequest++; set({ inspectedWorkshop: null }); },
 
     cancelWorkshopDownload: async (workshopId) => {
-      await invoke('steam_cancel_download', { urlOrId: workshopId });
+      return (await invoke<boolean>('steam_cancel_download', { urlOrId: workshopId })) !== false;
     },
 
     downloadWorkshopItem: async (urlOrId, source) => {
@@ -940,7 +941,7 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (error) {
         if (seq === settingsSeq) {
           try { set({ settings: await invoke<AppSettings>('settings_get') }); }
-          catch { /* keep the optimistic value; the error is shown by the caller */ }
+          catch { if (before) set({ settings: before }); /* both calls failed: show the last known value */ }
         }
         throw error;
       } finally {

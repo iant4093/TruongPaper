@@ -7,7 +7,7 @@ import { PlaybackBar } from './components/PlaybackBar';
 import { ResourceUsage } from './components/ResourceUsage';
 import { WindowControls } from './components/WindowControls';
 import { AllWallpapersView } from './components/views/AllWallpapersView';
-import { useAppStore } from './store/useAppStore';
+import { errorMessage, useAppStore } from './store/useAppStore';
 import { toast } from './store/feedback';
 import { usePageVisible } from './lib/hooks';
 
@@ -85,7 +85,7 @@ export const App: React.FC = () => {
     setLoadError(null);
     initAppListeners()
       .then((fn) => { if (cancelled) fn(); else cleanup = fn; })
-      .catch((err) => setLoadError(String(err)));
+      .catch((err) => setLoadError(errorMessage(err)));
     return () => { cancelled = true; cleanup?.(); };
   }, [initAppListeners, loadAttempt]);
 

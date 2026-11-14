@@ -2079,7 +2079,7 @@ invoke<string>('steam_login_qr'); // Resolves with the account name after the ph
 invoke<string>('steam_login_credentials', { username: string, password: string });
 invoke<void>('steam_submit_2fa_code', { code: string });
 invoke<void>('steam_cancel_login'); // Stops a running sign-in when the window closes
-invoke<void>('steam_cancel_download', { urlOrId: string }); // Stops a running download; the download call then fails with "Download cancelled."
+invoke<boolean>('steam_cancel_download', { urlOrId: string }); // Stops a running download (the download call then fails with "Download cancelled."); false when none is registered for the id
 invoke<string | null>('steam_account'); // Saved account name, or null when signed out
 invoke<void>('steam_logout');
 invoke<WallpaperItem[]>('steam_sync_local_folders');

@@ -636,7 +636,7 @@ export function createMockBackend(
       return null;
     },
     steam_logout: () => { steamAccount = null; return null; },
-    steam_cancel_download: () => null,
+    steam_cancel_download: () => true,
     playlist_export: () => null,
     steam_cancel_login: () => { cancelSteamLogin?.(); cancelSteamLogin = null; return null; },
     steam_account: () => steamAccount,

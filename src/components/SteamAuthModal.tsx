@@ -22,6 +22,7 @@ export const SteamAuthModal: React.FC = () => {
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const twoFaInputRef = useRef<HTMLInputElement | null>(null);
   const firstRef = useRef<HTMLButtonElement | null>(null);
 
   // Nothing starts on its own: the QR session begins when the user asks for it.
@@ -180,8 +181,9 @@ export const SteamAuthModal: React.FC = () => {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
+                  if (verifying) return;
                   setVerifying(true);
-                  void Promise.resolve(submitSteam2FaCode(twoFaCode)).finally(() => setVerifying(false));
+                  void Promise.resolve(submitSteam2FaCode(twoFaCode)).finally(() => { setVerifying(false); window.setTimeout(() => twoFaInputRef.current?.focus(), 0); });
                 }}
                 style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
               >
@@ -195,11 +197,13 @@ export const SteamAuthModal: React.FC = () => {
                   onChange={(e) => setTwoFaCode(e.target.value)}
                   className="button"
                   style={{ width: '100%', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 16 }}
+                  ref={twoFaInputRef}
                   autoFocus
                   required
-                  disabled={verifying}
+                  readOnly={verifying}
+                  aria-busy={verifying}
                 />
-                <button type="submit" className="button button-primary" disabled={verifying}>
+                <button type="submit" className="button button-primary" aria-disabled={verifying}>
                   Verify code
                 </button>
               </form>

@@ -57,6 +57,8 @@ const VolumeSlider: React.FC<{ monitor: MonitorInfo; onError: (message: string) 
 };
 
 export const MonitorsView: React.FC = () => {
+  const loaded = useAppStore((s) => s.loaded);
+  const loadFailed = useAppStore((s) => s.loadFailed);
   const monitors = useAppStore((s) => s.monitors);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const settings = useAppStore((s) => s.settings);
@@ -171,7 +173,11 @@ export const MonitorsView: React.FC = () => {
             </button>
           );
         })}
-        {monitors.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No displays detected.</div>}
+        {monitors.length === 0 && (
+          <div role="status" style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+            {loaded ? 'No displays detected.' : loadFailed ? 'Could not load your displays. Use Retry above.' : 'Loading…'}
+          </div>
+        )}
       </div>
 
       {monitors.length > 0 && (

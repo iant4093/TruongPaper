@@ -1013,7 +1013,7 @@ impl Operator {
                 phase,
                 mask,
             } => {
-                let t = phase + time_scale * time;
+                let t = phase + wrap_turbulence_time(time_scale, time);
                 let q = p.position * scale * 2.0;
                 let nx = ((q.y + t + p.noise_seed).sin() + (q.x * 0.7 - t).cos()) * 0.5;
                 let ny = ((q.x + t * 1.3 + p.noise_seed).cos() - (q.y * 0.7 + t).sin()) * 0.5;
@@ -1079,6 +1079,21 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 /// A stable value in 0..1 from a particle's `noise_seed` and a per-use key.
+/// `time_scale * time` reduced by a whole number of periods of every trig term it feeds
+/// (`t` and `1.3 t` are both periodic in `20 pi`), so the noise keeps its precision after days.
+fn wrap_turbulence_time(time_scale: f32, time: f32) -> f32 {
+    const PERIOD: f32 = 20.0 * std::f32::consts::PI;
+    let v = time_scale * time;
+    if !v.is_finite() {
+        return 0.0;
+    }
+    // Short runs keep the exact original value.
+    if v.abs() < PERIOD {
+        return v;
+    }
+    (time.rem_euclid(PERIOD / time_scale.abs()) * time_scale).rem_euclid(PERIOD)
+}
+
 fn seeded(seed: f32, key: f32) -> f32 {
     ((seed * 12.9898 + key * 78.233).sin() * 43_758.547)
         .fract()
@@ -1203,5 +1218,22 @@ mod override_tests {
         let b = file.operators();
         assert_eq!(a.len(), 2);
         assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+}
+
+#[cfg(test)]
+mod round13_tests {
+    use super::wrap_turbulence_time;
+
+    #[test]
+    fn turbulence_time_wraps_without_changing_the_phase() {
+        let period = 20.0 * std::f32::consts::PI;
+        let small = wrap_turbulence_time(1.5, 3.0);
+        assert!((small - 4.5).abs() < 1e-4);
+        let big = wrap_turbulence_time(1.5, 1.0e6);
+        assert!((0.0..period).contains(&big));
+        assert_eq!(wrap_turbulence_time(0.0, 5.0), 0.0);
+        assert_eq!(wrap_turbulence_time(-1.5, 3.0), -4.5);
+        assert_eq!(wrap_turbulence_time(1.0, f32::NAN), 0.0);
     }
 }

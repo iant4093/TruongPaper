@@ -197,6 +197,24 @@ async fn render() -> anyhow::Result<()> {
         );
     }
     let warnings = renderer.load(&device, &queue, &vfs, runtime.graph());
+    if std::env::var("PROBE_RELOADTIME").is_ok() {
+        // Property-change reload: `load` (old behaviour, drops and re-decodes every texture)
+        // against `reload` (keeps decoded textures).
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let t = std::time::Instant::now();
+        renderer.load(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let before = t.elapsed();
+        let t = std::time::Instant::now();
+        renderer.reload(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let after = t.elapsed();
+        eprintln!(
+            "RELOADTIME load={:.1}ms reload={:.1}ms",
+            before.as_secs_f64() * 1e3,
+            after.as_secs_f64() * 1e3
+        );
+    }
     // Embedded MP4 textures stay white until the host pushes frames; the probe pushes the first
     // frame decoded with `ffmpeg` (when installed) so renders look like the running wallpaper.
     for path in renderer.embedded_video_paths() {

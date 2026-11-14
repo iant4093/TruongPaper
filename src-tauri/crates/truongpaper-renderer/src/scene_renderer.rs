@@ -2591,7 +2591,7 @@ impl SceneRenderer {
                 fbos += fx.targets.len();
             }
         }
-        tracing::info!(
+        tracing::debug!(
             "scene layers: {image_layers} effect/image, {direct_layers} drawn directly, {fbos} layer FBOs"
         );
 
@@ -2781,6 +2781,10 @@ impl SceneRenderer {
         fullscreen: bool,
         samples_scene: bool,
     ) -> Option<BlendMode> {
+        // Debug switch for A/B pixel checks of the direct path.
+        if std::env::var_os("TRUONGPAPER_NO_DIRECT_DRAW").is_some() {
+            return None;
+        }
         let SceneLayerKind::Image {
             texture_paths,
             material,

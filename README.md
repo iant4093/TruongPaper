@@ -61,6 +61,16 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
       <p align="center"><sub><b>Menu Bar & System Tray</b> · pause, next, favorite and display switching without opening the studio</sub></p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/playlists.jpg" width="100%" alt="Playlists view with a mixed playlist of photos and wallpapers, plus save and load playlist file buttons">
+      <p align="center"><sub><b>Playlists</b> · mix photos and wallpapers, one playlist per display, save and load as a file</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/settings.jpg" width="100%" alt="Settings view with animation smoothness, picture quality, smart pause, startup and keyboard shortcuts">
+      <p align="center"><sub><b>Settings</b> · smoothness, quality, smart pause, shortcuts and backup</sub></p>
+    </td>
+  </tr>
 </table>
 
 ## Features
@@ -114,7 +124,7 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 ## Install
 
-This project is in preview testing. Test installers are available from [GitHub Actions](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml); release download links become available after the first approved publication. See [the testing checklist](docs/MANUAL-TESTING.md) and [remaining limitations](docs/RELEASE-READINESS.md).
+Download the latest installers from [GitHub Releases](https://github.com/iant4093/TruongPaper/releases/latest). Installed apps update themselves from there. See [the testing checklist](docs/MANUAL-TESTING.md) and [remaining limitations](docs/RELEASE-READINESS.md).
 
 **macOS** (Apple Silicon, macOS 14.2 or later)
 

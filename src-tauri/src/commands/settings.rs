@@ -74,6 +74,10 @@ pub async fn settings_update(
         );
     }
 
+    if before.render_gpu != after.render_gpu {
+        state.host.request_renderer_restart();
+    }
+
     #[cfg(target_os = "windows")]
     if before.sync_lock_screen != after.sync_lock_screen {
         super::lock_screen::request_sync(&app);
@@ -97,4 +101,13 @@ fn apply_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
             if enabled { "enable" } else { "disable" }
         )
     })
+}
+
+/// GPUs that can draw photos and scenes, with the one in use. Empty until the desktop renderer
+/// has started once.
+#[tauri::command]
+pub async fn gpu_list_adapters(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::gpu_select::GpuAdapterInfo>, String> {
+    Ok(state.host.gpu_adapters())
 }

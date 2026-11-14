@@ -117,6 +117,9 @@ pub fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     }
     s.next_hotkey = s.next_hotkey.trim().chars().take(MAX_HOTKEY_LEN).collect();
     s.pause_hotkey = s.pause_hotkey.trim().chars().take(MAX_HOTKEY_LEN).collect();
+    if !crate::gpu_select::GpuPreference::is_valid_setting(&s.render_gpu) {
+        s.render_gpu = truongpaper_core::DEFAULT_RENDER_GPU.into();
+    }
     s
 }
 

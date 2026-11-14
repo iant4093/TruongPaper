@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-gpu-list-adapters"
+description = "Enables the gpu_list_adapters command without any pre-configured scope."
+commands.allow = ["gpu_list_adapters"]
+
+[[permission]]
+identifier = "deny-gpu-list-adapters"
+description = "Denies the gpu_list_adapters command without any pre-configured scope."
+commands.deny = ["gpu_list_adapters"]

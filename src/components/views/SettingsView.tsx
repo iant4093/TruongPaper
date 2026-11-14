@@ -14,7 +14,9 @@ import {
   onUpdateChange,
   type AvailableUpdate,
 } from '../../services/updates';
-import type { AppSettings, BackupImportSummary } from '../../types/ipc';
+import { invoke } from '@tauri-apps/api/core';
+import type { AppSettings, BackupImportSummary, GpuAdapterInfo } from '../../types/ipc';
+import { Dropdown } from '../Dropdown';
 import { SectionTitle, SegmentedControl, ToggleRow, ViewHeader } from '../ui';
 
 const FPS_OPTIONS = [
@@ -82,6 +84,43 @@ const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = (
           {status && <span role={status.error ? 'alert' : 'status'} style={{ fontSize: 12, color: status.error ? '#e3b1b1' : 'var(--text-secondary)' }}>{status.text}</span>}
         </div>
       </form>
+    </>
+  );
+};
+
+const GPU_KIND_LABEL: Record<GpuAdapterInfo['kind'], string> = { integrated: 'integrated', dedicated: 'dedicated', other: 'other' };
+
+/** Which GPU draws photos and scenes. Integrated by default, so games keep the dedicated GPU. */
+export const GpuPicker: React.FC<{ value: string; onChange: (next: string) => void }> = ({ value, onChange }) => {
+  const [adapters, setAdapters] = useState<GpuAdapterInfo[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => invoke<GpuAdapterInfo[]>('gpu_list_adapters')
+      .then((list) => { if (alive) setAdapters(list); })
+      .catch(() => { if (alive) setAdapters([]); });
+    void load();
+    // The renderer restarts on the new GPU a moment after a change; show which one it took.
+    const timer = window.setTimeout(() => void load(), 2500);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [value]);
+  const list = adapters ?? [];
+  const has = (kind: GpuAdapterInfo['kind']) => list.some((a) => a.kind === kind);
+  const options: Array<readonly [string, string]> = [
+    ['integrated', has('integrated') || list.length === 0 ? 'Integrated GPU (recommended)' : 'Most power-efficient GPU'],
+    ['dedicated', has('dedicated') || list.length === 0 ? 'Dedicated GPU' : 'Most powerful GPU'],
+    ...list.map((a) => [`adapter:${a.name}`, `${a.name} (${GPU_KIND_LABEL[a.kind]})`] as const),
+  ];
+  if (!options.some(([key]) => key === value)) options.push([value, value.replace(/^adapter:/, '') + ' (not found)']);
+  const inUse = list.find((a) => a.inUse);
+  return (
+    <>
+      <div style={{ fontSize: 13, margin: '14px 0 2px' }}>Graphics card</div>
+      <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>
+        Draws photos and scene wallpapers. The integrated GPU leaves your dedicated GPU free for games.
+        {list.length === 1 && ' This computer has one GPU, so it is always used.'}
+      </div>
+      <Dropdown<string> label="Graphics card" value={value} options={options} onChange={onChange} />
+      {inUse && <div className="view-subtitle" role="status" style={{ marginTop: 6 }}>In use: {inUse.name}</div>}
     </>
   );
 };
@@ -238,6 +277,7 @@ export const SettingsView: React.FC = () => {
           options={QUALITY_OPTIONS}
           onChange={(next) => void updateSettings({ qualityPreset: next })}
         />
+        <GpuPicker value={settings.renderGpu ?? 'integrated'} onChange={(next) => void updateSettings({ renderGpu: next })} />
       </div>
 
       <SectionTitle>Smart pause</SectionTitle>

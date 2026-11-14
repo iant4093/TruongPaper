@@ -2109,6 +2109,7 @@ invoke<Playlist>('playlist_save', { playlist: Playlist }); // empty playlistId c
 invoke<void>('playlist_delete', { playlistId: string }); // displays using it fall back to photo_api
 invoke<AppSettings>('settings_get');
 invoke<void>('settings_update', { settings: Partial<AppSettings> });
+invoke<GpuAdapterInfo[]>('gpu_list_adapters'); // GPUs for photos/scenes; settings.renderGpu picks one
 invoke<string>('update_feed_status');
 invoke<void>('runtime_shutdown_for_update');
 invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: number }, main process RAM only

@@ -239,6 +239,15 @@ export interface AppSettings {
   nextHotkey: string;
   /** Global shortcut for Pause / Resume all displays; empty = disabled. */
   pauseHotkey: string;
+  /** GPU for photos and scenes: `integrated` (default), `dedicated` or `adapter:<name>`. */
+  renderGpu: string;
+}
+
+/** A GPU the desktop renderer can use (`gpu_list_adapters`). */
+export interface GpuAdapterInfo {
+  name: string;
+  kind: 'integrated' | 'dedicated' | 'other';
+  inUse: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +308,7 @@ export const IPC_COMMANDS = [
   'playlist_delete',
   'settings_get',
   'settings_update',
+  'gpu_list_adapters',
   'update_feed_status',
   'runtime_shutdown_for_update',
   'runtime_get_memory_usage',

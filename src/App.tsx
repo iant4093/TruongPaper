@@ -5,7 +5,7 @@ import { DetailsDrawer } from './components/DetailsDrawer';
 import { FeedbackHost, StatusBanner } from './components/Feedback';
 import { PlaybackBar } from './components/PlaybackBar';
 import { ResourceUsage } from './components/ResourceUsage';
-import { WindowControls } from './components/WindowControls';
+import { WindowControls, WindowsCaptionButtons, isWindowsPlatform } from './components/WindowControls';
 import { AllWallpapersView } from './components/views/AllWallpapersView';
 import { errorMessage, useAppStore } from './store/useAppStore';
 import { toast } from './store/feedback';
@@ -39,6 +39,7 @@ export const STUDIO_TABS = [
   ['settings', 'Settings', SettingsIcon],
 ] as const;
 const nativeMacTitlebar = /Mac/.test(navigator.platform);
+const windowsCaption = !nativeMacTitlebar && isWindowsPlatform();
 
 /** True from the first time `flag` is true: keeps a lazily loaded modal mounted after it closes. */
 function useEverTrue(flag: boolean) {
@@ -174,7 +175,7 @@ export const App: React.FC = () => {
       </Suspense>
       <FeedbackHost floatingToasts={false} />
       <aside className="app-sidebar">
-        <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && <WindowControls />}</div>
+        <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && !windowsCaption && <WindowControls />}</div>
         <div className="app-brand" data-tauri-drag-region><img src="/app-icon.png" width={23} height={23} alt="" /><span>TruongPaper</span></div>
         <nav aria-label="Studio views" className="sidebar-nav">
           {STUDIO_TABS.filter(([key]) => key !== 'settings').map(navButton)}
@@ -203,6 +204,7 @@ export const App: React.FC = () => {
               </button>
             );
           })()}
+          {windowsCaption && <WindowsCaptionButtons />}
         </header>
         <div className={`workspace-body ${showInspector ? 'with-inspector' : ''}`}>
           <main className="content-viewport" onClickCapture={(event) => {

@@ -1283,6 +1283,13 @@ fn release_free_memory() {
     }
 }
 
+/// Waits for the GPU so wgpu destroys the dropped textures and buffers, then returns the freed
+/// heap pages. Without the poll the relief runs before the device side is released.
+fn release_gpu_and_heap(device: &wgpu::Device) {
+    device.poll(wgpu::Maintain::Wait);
+    release_free_memory();
+}
+
 struct PhotoWorker {
     jobs: mpsc::Sender<PhotoJob>,
     done: mpsc::Receiver<PhotoDone>,
@@ -1317,6 +1324,115 @@ impl PhotoWorker {
     }
 
     fn drain(&self) -> Vec<PhotoDone> {
+        self.done.try_iter().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scene load worker (CPU stage of a scene load, off the shared render thread)
+// ---------------------------------------------------------------------------------------------
+
+struct SceneJob {
+    monitor_id: String,
+    generation: u64,
+    desc: SceneDescriptor,
+    monitor_size: [f32; 2],
+}
+
+/// CPU half of a scene: the mounted VFS and the runtime (graph + script context). The GPU half
+/// is built from it on the render thread by [`finish_scene_gpu`].
+struct SceneCpu {
+    vfs: WeVirtualFileSystem,
+    runtime: SceneRuntime,
+}
+
+struct SceneDone {
+    monitor_id: String,
+    generation: u64,
+    desc: SceneDescriptor,
+    result: Result<SceneCpu, String>,
+}
+
+/// VFS mount, `SceneGraph::load` and script init: everything that needs no GPU.
+fn run_scene_job(job: SceneJob) -> SceneDone {
+    let SceneJob {
+        monitor_id,
+        generation,
+        desc,
+        monitor_size,
+    } = job;
+    let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
+    let result = SceneRuntime::load(
+        &vfs,
+        &desc.scene_file,
+        Some(&desc.user_properties_json),
+        monitor_size,
+    )
+    .map(|runtime| SceneCpu { vfs, runtime })
+    .map_err(|err| err.to_string());
+    SceneDone {
+        monitor_id,
+        generation,
+        desc,
+        result,
+    }
+}
+
+/// Newest job per monitor: a burst of clicks loads only the last scene.
+fn coalesce_scene_jobs(jobs: Vec<SceneJob>) -> Vec<SceneJob> {
+    let mut out: Vec<SceneJob> = Vec::new();
+    for job in jobs {
+        match out.iter_mut().find(|j| j.monitor_id == job.monitor_id) {
+            Some(slot) => *slot = job,
+            None => out.push(job),
+        }
+    }
+    out
+}
+
+struct SceneLoadWorker {
+    jobs: mpsc::Sender<SceneJob>,
+    done: mpsc::Receiver<SceneDone>,
+}
+
+impl SceneLoadWorker {
+    fn spawn(host: Arc<WallpaperHost>) -> Option<Self> {
+        let (jobs, job_rx) = mpsc::channel::<SceneJob>();
+        let (done_tx, done) = mpsc::channel::<SceneDone>();
+        std::thread::Builder::new()
+            .name("truongpaper-scene-load".into())
+            .spawn(move || {
+                while let Ok(first) = job_rx.recv() {
+                    let mut batch = vec![first];
+                    batch.extend(job_rx.try_iter());
+                    for job in coalesce_scene_jobs(batch) {
+                        let (monitor_id, generation, desc) =
+                            (job.monitor_id.clone(), job.generation, job.desc.clone());
+                        let done = catch_unwind(AssertUnwindSafe(|| run_scene_job(job)))
+                            .unwrap_or_else(|_| SceneDone {
+                                monitor_id,
+                                generation,
+                                desc,
+                                result: Err("scene loader panicked".into()),
+                            });
+                        if done_tx.send(done).is_err() {
+                            return;
+                        }
+                        host.wake();
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, done })
+    }
+
+    fn submit(&self, job: SceneJob) {
+        if self.jobs.send(job).is_err() {
+            tracing::warn!("scene load worker is gone");
+        }
+    }
+
+    fn drain(&self) -> Vec<SceneDone> {
         self.done.try_iter().collect()
     }
 }
@@ -1492,6 +1608,9 @@ struct MonitorRenderer {
     pending_error: Option<WallpaperErrorPayload>,
     /// A photo for this generation is being decoded on the worker; the previous frame stays.
     awaiting_photo: Option<u64>,
+    /// The CPU half of the scene for this generation is loading on the worker; the previous
+    /// content stays on screen (shares `awaiting_photo` as the "load pending" marker).
+    ready_scene: Option<SceneDone>,
     /// The last acquire failed: the loop retries soon instead of idling.
     stalled: bool,
     /// A scene was replaced by something else: tell the UI to drop its diagnostics.
@@ -1573,6 +1692,7 @@ impl MonitorRenderer {
             load_failed: false,
             pending_error: None,
             awaiting_photo: None,
+            ready_scene: None,
             stalled: false,
             diag_clear: None,
         })
@@ -1666,10 +1786,11 @@ impl MonitorRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         host: &WallpaperHost,
-        worker: &PhotoWorker,
+        workers: (&PhotoWorker, &SceneLoadWorker),
         max_display: (u32, u32),
         rt: Option<&MonitorRuntime>,
     ) {
+        let (worker, scene_worker) = workers;
         let generation = rt.map_or(0, |r| r.generation);
         if self.generation == Some(generation) {
             return;
@@ -1689,6 +1810,7 @@ impl MonitorRenderer {
         self.load_failed = false;
         let active = rt.map(|r| r.active.clone()).unwrap_or_default();
         self.awaiting_photo = None;
+        self.ready_scene = None;
         if matches!(self.content, Content::Scene(_)) && !matches!(active, ActiveRuntime::Scene(_)) {
             if let Content::Scene(old) = &self.content {
                 self.diag_clear = Some(old.wallpaper_id.clone());
@@ -1706,7 +1828,7 @@ impl MonitorRenderer {
                         self.to = None;
                     }
                     self.compositor.invalidate_caches();
-                    release_free_memory();
+                    release_gpu_and_heap(device);
                 }
                 let pending = host.take_pending_photo(&self.monitor_id, generation);
                 let input = match (pending, path) {
@@ -1743,30 +1865,19 @@ impl MonitorRenderer {
                         return;
                     }
                 }
-                // Free the old scene first. Keeping it for a rollback held two scenes in memory
-                // at once (well over 1 GB for large 4K scenes).
-                let had_scene = matches!(self.content, Content::Scene(_));
-                if had_scene {
-                    self.content = Content::None;
-                    release_free_memory();
-                }
-                match load_scene(device, queue, &self.config, self.scale_factor, &desc, rt) {
-                    Ok(state) => {
-                        self.content = Content::Scene(Box::new(state));
-                        release_free_memory();
-                    }
-                    Err(err) => {
-                        tracing::warn!("scene {} failed to load: {err}", desc.scene_file);
-                        // A black surface instead of a stale frame.
-                        self.content = Content::None;
-                        self.load_failed = true;
-                        self.pending_error = Some(WallpaperErrorPayload {
-                            monitor_id: self.monitor_id.clone(),
-                            wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
-                            message: format!("Scene failed to load: {err}"),
-                        });
-                    }
-                }
+                // The CPU stage runs on the worker; the old scene keeps rendering until the
+                // new one is ready (`finish_scene` swaps them).
+                self.awaiting_photo = Some(generation);
+                scene_worker.submit(SceneJob {
+                    monitor_id: self.monitor_id.clone(),
+                    generation,
+                    monitor_size: scene_monitor_size(
+                        self.config.width,
+                        self.config.height,
+                        self.scale_factor,
+                    ),
+                    desc,
+                });
             }
             ActiveRuntime::Webview {
                 preview_path: Some(path),
@@ -1796,7 +1907,53 @@ impl MonitorRenderer {
                 self.to = None;
                 self.transition_started = None;
                 self.compositor.invalidate_caches();
+                release_gpu_and_heap(device);
+            }
+        }
+    }
+
+    /// Swaps in a scene whose CPU stage the worker finished. A result for a generation that has
+    /// been replaced since is dropped.
+    fn finish_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rt: Option<&MonitorRuntime>,
+    ) {
+        let Some(done) = self.ready_scene.take() else {
+            return;
+        };
+        if self.generation != Some(done.generation) || self.awaiting_photo != Some(done.generation)
+        {
+            return;
+        }
+        self.awaiting_photo = None;
+        self.dirty = true;
+        // Free the old scene before the GPU stage: keeping both held well over 1 GB for large
+        // 4K scenes. The poll lets wgpu actually destroy its textures before the heap is trimmed.
+        if matches!(self.content, Content::Scene(_)) {
+            self.content = Content::None;
+            release_gpu_and_heap(device);
+        }
+        let desc = done.desc;
+        let loaded = done.result.and_then(|cpu| {
+            finish_scene_gpu(device, queue, cpu, &desc, rt).map_err(|err| err.to_string())
+        });
+        match loaded {
+            Ok(state) => {
+                self.content = Content::Scene(Box::new(state));
                 release_free_memory();
+            }
+            Err(err) => {
+                tracing::warn!("scene {} failed to load: {err}", desc.scene_file);
+                // A black surface instead of a stale frame.
+                self.content = Content::None;
+                self.load_failed = true;
+                self.pending_error = Some(WallpaperErrorPayload {
+                    monitor_id: self.monitor_id.clone(),
+                    wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
+                    message: format!("Scene failed to load: {err}"),
+                });
             }
         }
     }
@@ -2176,24 +2333,16 @@ pub fn scene_monitor_size(width: u32, height: u32, scale_factor: f32) -> [f32; 2
     [(width as f32 / s).round(), (height as f32 / s).round()]
 }
 
-/// Loads a scene wallpaper on the render thread: SceneRuntime (scripts), SceneRenderer (GPU
-/// resources), an offscreen target, scene sounds and embedded videos.
-fn load_scene(
+/// GPU stage of a scene load on the render thread: SceneRenderer resources, an offscreen
+/// target, scene sounds and embedded videos. The CPU stage ran on the scene load worker.
+fn finish_scene_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    config: &wgpu::SurfaceConfiguration,
-    scale_factor: f32,
+    cpu: SceneCpu,
     desc: &SceneDescriptor,
     rt: Option<&MonitorRuntime>,
 ) -> anyhow::Result<SceneState> {
-    let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
-    let monitor_size = scene_monitor_size(config.width, config.height, scale_factor);
-    let mut runtime = SceneRuntime::load(
-        &vfs,
-        &desc.scene_file,
-        Some(&desc.user_properties_json),
-        monitor_size,
-    )?;
+    let SceneCpu { vfs, mut runtime } = cpu;
     let scene_size = runtime.graph().scene_size;
     let (w, h) = (
         scene_size.x.clamp(1.0, MAX_SCENE_TARGET_DIMENSION),
@@ -2432,6 +2581,11 @@ fn run_renderer(
         monitors.clear();
         return RunEnd::SetupFailed;
     };
+    let Some(scene_worker) = SceneLoadWorker::spawn(Arc::clone(host)) else {
+        tracing::error!("could not start the scene load worker");
+        monitors.clear();
+        return RunEnd::SetupFailed;
+    };
     let mut last_epoch = u64::MAX;
     let mut was_idle = false;
     let mut last_suspended = false;
@@ -2535,6 +2689,17 @@ fn run_renderer(
             }
         }
 
+        let scenes = scene_worker.drain();
+        let photo_ready = photo_ready || !scenes.is_empty();
+        for done in scenes {
+            if let Some(m) = monitors
+                .iter_mut()
+                .find(|m| m.monitor_id == done.monitor_id)
+            {
+                m.ready_scene = Some(done);
+            }
+        }
+
         let epoch = host.epoch();
         let (interval, transition_secs, span_mode) = {
             let s = settings.lock();
@@ -2607,7 +2772,15 @@ fn run_renderer(
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
         for m in &mut monitors {
             let rt = rt_of(&m.monitor_id);
-            m.sync_content(&gpu.device, &gpu.queue, host, &worker, max_display, rt);
+            m.sync_content(
+                &gpu.device,
+                &gpu.queue,
+                host,
+                (&worker, &scene_worker),
+                max_display,
+                rt,
+            );
+            m.finish_scene(&gpu.device, &gpu.queue, rt);
             if let Content::Scene(scene) = &mut m.content {
                 for RenderEvent::SceneProperties {
                     wallpaper_id,
@@ -3060,6 +3233,48 @@ mod tests {
             max_display: (100, 100),
             preview,
         }
+    }
+
+    fn scene_job(monitor: &str, generation: u64) -> SceneJob {
+        SceneJob {
+            monitor_id: monitor.into(),
+            generation,
+            desc: SceneDescriptor {
+                install_dir: std::env::temp_dir().join("truongpaper-no-such-scene"),
+                core_assets_dir: std::env::temp_dir().join("truongpaper-no-such-assets"),
+                scene_file: "scene.json".into(),
+                content_revision: 0,
+                user_properties_json: "{}".into(),
+            },
+            monitor_size: [1920.0, 1080.0],
+        }
+    }
+
+    #[test]
+    fn scene_jobs_keep_only_the_newest_per_monitor() {
+        let jobs = vec![
+            scene_job("a", 1),
+            scene_job("b", 2),
+            scene_job("a", 3),
+            scene_job("a", 4),
+        ];
+        let kept: Vec<_> = coalesce_scene_jobs(jobs)
+            .iter()
+            .map(|j| (j.monitor_id.clone(), j.generation))
+            .collect();
+        assert_eq!(kept, vec![("a".into(), 4), ("b".into(), 2)]);
+    }
+
+    #[test]
+    fn scene_load_off_thread_reports_failure_with_its_generation() {
+        // The loaded CPU stage must be movable to the render thread.
+        fn assert_send<T: Send>() {}
+        assert_send::<SceneDone>();
+        let done = std::thread::spawn(|| run_scene_job(scene_job("m", 9)))
+            .join()
+            .unwrap();
+        assert_eq!((done.monitor_id.as_str(), done.generation), ("m", 9));
+        assert!(done.result.is_err());
     }
 
     #[test]

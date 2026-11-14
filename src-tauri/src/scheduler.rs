@@ -43,6 +43,10 @@ const NOT_RENDERABLE_RECHECK: Duration = Duration::from_secs(10);
 const MAX_IDLE_BETWEEN_FULL_TICKS: Duration = Duration::from_secs(30);
 /// Bound for queued manual notes when no scheduler is draining them (tests, early startup).
 const MAX_PENDING_MANUAL_NOTES: usize = 256;
+/// One rotation (apply, including the macOS web ready wait) may not stall the others longer.
+const PLAN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pause before the supervisor restarts a scheduler loop that panicked.
+const RESTART_DELAY: Duration = Duration::from_secs(5);
 
 /// Why a monitor rotates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,8 +621,29 @@ pub fn planned_source_is_current(
 /// something needs it: the first run, a note / replan request, a wake from sleep, a changed
 /// rotation setting or monitor list, the planned next due time, or the idle safety net.
 pub fn spawn(app: AppHandle) {
+    // Supervisor: a panic inside a tick ends the inner task, not rotation for the session.
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(LAUNCH_DELAY).await;
+        let mut first = true;
+        loop {
+            let handle = tauri::async_runtime::spawn(run_loop(app.clone(), first));
+            first = false;
+            match handle.await {
+                Ok(()) => break,
+                Err(err) => {
+                    tracing::error!("rotation scheduler stopped ({err}); restarting");
+                    REPLAN.store(true, Ordering::Relaxed);
+                    tokio::time::sleep(RESTART_DELAY).await;
+                }
+            }
+        }
+    });
+}
+
+async fn run_loop(app: AppHandle, first_start: bool) {
+    {
+        if first_start {
+            tokio::time::sleep(LAUNCH_DELAY).await;
+        }
         let mut scheduler = RotationScheduler::new(crate::power::wake_generation());
         if let Some(state) = app.try_state::<AppState>() {
             match crate::db::load_playlist_positions(&state.db.lock()) {
@@ -665,14 +690,11 @@ pub fn spawn(app: AppHandle) {
             last_full = now;
             run_tick(&app, &mut scheduler, &live).await;
         }
-    });
+    }
 }
 
 async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[String]) {
-    let (Some(state), Some(photo)) = (
-        app.try_state::<AppState>(),
-        app.try_state::<PhotoServiceState>(),
-    ) else {
+    let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let settings_interval = state.settings.lock().rotation_interval_seconds;
@@ -722,75 +744,131 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
             }
         }
     }
-    execute(app, &state, &photo, plans, clone_photos).await;
+    execute(app, plans, clone_photos).await;
 }
 
-async fn execute(
-    app: &AppHandle,
-    state: &AppState,
-    photo: &PhotoServiceState,
-    plans: Vec<PlannedRotation>,
-    clone_photos: bool,
-) {
+/// Runs the planned rotations of different monitors in parallel; each plan has its own
+/// timeout so a slow display does not delay the others.
+async fn execute(app: &AppHandle, plans: Vec<PlannedRotation>, clone_photos: bool) {
+    let mut set = tokio::task::JoinSet::new();
+    for plan in plans {
+        let app = app.clone();
+        set.spawn(async move { run_plan_with_timeout(&app, plan, clone_photos).await });
+    }
     let mut cloned_photo_draw = false;
-    for p in plans {
-        tracing::debug!(
-            "rotation scheduler: {} {:?} -> {:?}",
-            p.monitor_id,
-            p.trigger,
-            p.action
-        );
-        let id = p.monitor_id.as_str();
-        // Same lock as `monitor_apply_wallpaper`; once held, a rotation planned from an older
-        // snapshot is dropped if the user changed the monitor's source in the meantime.
-        let _apply = lock_monitor_apply(id).await;
-        let current = {
-            let conn = state.db.lock();
-            crate::db::monitor_sources(&conn).map(|mut s| s.remove(id))
-        };
-        match current {
-            Ok(current) if planned_source_is_current(current.as_ref(), &p.source) => {}
-            Ok(_) => {
-                tracing::debug!("rotation scheduler: {id} changed source; rotation dropped");
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!("rotation scheduler: cannot re-read the source of {id}: {err}");
-                continue;
-            }
-        }
-        let res = match &p.action {
-            RotationAction::Restore => match &p.source {
-                // Unassigned monitors stay unassigned (no DB write).
-                WallpaperSource::PhotoApi => show_photo(app, state, photo, id, false).await,
-                other => apply_source(app, state, photo, id, other).await,
-            },
-            RotationAction::NextPhoto if clone_photos && p.source == WallpaperSource::PhotoApi => {
-                cloned_photo_draw = true;
-                Ok(())
-            }
-            RotationAction::NextPhoto => show_photo(app, state, photo, id, true).await,
-            RotationAction::ShowPlaylistItem {
-                playlist_id, item, ..
-            } => show_playlist_item(app, state, photo, id, playlist_id, item, true).await,
-        };
-        if let Err(err) = res {
-            tracing::warn!(
-                "rotation scheduler: {:?} rotation of {id} failed: {err}",
-                p.trigger
-            );
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(draw) => cloned_photo_draw |= draw,
+            Err(err) => tracing::warn!("rotation scheduler: a rotation task failed: {err}"),
         }
     }
     if cloned_photo_draw {
-        if let Err(err) = rotate_photo_next(app, photo, None).await {
-            tracing::warn!("rotation scheduler: cloned photo rotation failed: {err}");
+        let Some(photo) = app.try_state::<PhotoServiceState>() else {
+            return;
+        };
+        match tokio::time::timeout(PLAN_TIMEOUT, rotate_photo_next(app, &photo, None)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!("rotation scheduler: cloned photo rotation failed: {err}")
+            }
+            Err(_) => tracing::warn!("rotation scheduler: cloned photo rotation timed out"),
         }
     }
+}
+
+/// Returns true when the plan asks for the shared cloned-photo draw.
+async fn run_plan_with_timeout(app: &AppHandle, plan: PlannedRotation, clone_photos: bool) -> bool {
+    let id = plan.monitor_id.clone();
+    with_plan_timeout(&id, PLAN_TIMEOUT, execute_plan(app, plan, clone_photos)).await
+}
+
+/// Bounds one plan; a timed-out plan counts as "no shared photo draw requested".
+async fn with_plan_timeout(
+    id: &str,
+    limit: Duration,
+    plan: impl std::future::Future<Output = bool>,
+) -> bool {
+    match tokio::time::timeout(limit, plan).await {
+        Ok(draw) => draw,
+        Err(_) => {
+            tracing::warn!("rotation scheduler: rotation of {id} timed out after {limit:?}");
+            false
+        }
+    }
+}
+
+async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -> bool {
+    let (Some(state), Some(photo)) = (
+        app.try_state::<AppState>(),
+        app.try_state::<PhotoServiceState>(),
+    ) else {
+        return false;
+    };
+    let (state, photo) = (&*state, &*photo);
+    tracing::debug!(
+        "rotation scheduler: {} {:?} -> {:?}",
+        p.monitor_id,
+        p.trigger,
+        p.action
+    );
+    let id = p.monitor_id.as_str();
+    // Same lock as `monitor_apply_wallpaper`; once held, a rotation planned from an older
+    // snapshot is dropped if the user changed the monitor's source in the meantime.
+    let _apply = lock_monitor_apply(id).await;
+    let current = {
+        let conn = state.db.lock();
+        crate::db::monitor_sources(&conn).map(|mut s| s.remove(id))
+    };
+    match current {
+        Ok(current) if planned_source_is_current(current.as_ref(), &p.source) => {}
+        Ok(_) => {
+            tracing::debug!("rotation scheduler: {id} changed source; rotation dropped");
+            return false;
+        }
+        Err(err) => {
+            tracing::warn!("rotation scheduler: cannot re-read the source of {id}: {err}");
+            return false;
+        }
+    }
+    let mut cloned_photo_draw = false;
+    let res = match &p.action {
+        RotationAction::Restore => match &p.source {
+            // Unassigned monitors stay unassigned (no DB write).
+            WallpaperSource::PhotoApi => show_photo(app, state, photo, id, false).await,
+            other => apply_source(app, state, photo, id, other).await,
+        },
+        RotationAction::NextPhoto if clone_photos && p.source == WallpaperSource::PhotoApi => {
+            cloned_photo_draw = true;
+            Ok(())
+        }
+        RotationAction::NextPhoto => show_photo(app, state, photo, id, true).await,
+        RotationAction::ShowPlaylistItem {
+            playlist_id, item, ..
+        } => show_playlist_item(app, state, photo, id, playlist_id, item, true).await,
+    };
+    if let Err(err) = res {
+        tracing::warn!(
+            "rotation scheduler: {:?} rotation of {id} failed: {err}",
+            p.trigger
+        );
+    }
+    cloned_photo_draw
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stuck_plan_times_out_without_blocking_the_others() {
+        let stuck = with_plan_timeout("a", Duration::from_millis(20), async {
+            std::future::pending::<bool>().await
+        });
+        let quick = with_plan_timeout("b", Duration::from_secs(5), async { true });
+        let (stuck, quick) = tokio::join!(stuck, quick);
+        assert!(!stuck);
+        assert!(quick);
+    }
 
     fn ws(id: &str) -> PlaylistItem {
         PlaylistItem::Workshop {

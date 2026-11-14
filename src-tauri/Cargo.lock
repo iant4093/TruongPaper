@@ -6447,6 +6447,7 @@ dependencies = [
  "truongpaper-scenescript",
  "truongpaper-steam",
  "truongpaper-we-formats",
+ "webview2-com",
  "wgpu",
  "windows 0.62.2",
 ]

@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use truongpaper_platform::MonitorPlaybackPolicy;
 use truongpaper_renderer::{
     audio_dispatch_js, cursor_event_js, pack_web_audio_frame, video_set_paused_js,
 };
@@ -263,6 +264,68 @@ pub fn plan_geometry_updates(
         .collect()
 }
 
+/// `true` when the page should be suspended by the OS webview (WebView2 `TrySuspend`): the window
+/// is covered by a fullscreen / maximized app or the display is asleep (`suspended`). A user
+/// pause and Battery Saver keep the page alive: only the JS pause applies, so the frame stays
+/// visible and resumes instantly.
+pub fn os_suspend_wanted(policy: MonitorPlaybackPolicy, suspended: bool) -> bool {
+    suspended
+        || matches!(
+            policy,
+            MonitorPlaybackPolicy::PausedFullscreen
+                | MonitorPlaybackPolicy::PausedMaximized
+                | MonitorPlaybackPolicy::PausedDisplaySleep
+        )
+}
+
+/// `(label, suspend)` for every loaded window whose OS-suspend state differs from the last one
+/// applied. Input is `(label, loaded, wanted, applied)`.
+pub fn plan_os_suspend(windows: &[(String, bool, bool, bool)]) -> Vec<(String, bool)> {
+    windows
+        .iter()
+        .filter(|(_, loaded, wanted, applied)| *loaded && wanted != applied)
+        .map(|(label, _, wanted, _)| (label.clone(), *wanted))
+        .collect()
+}
+
+/// Suspends (`true`) or resumes (`false`) the WebView2 of `label`. WebView2 only suspends a hidden
+/// webview, so it is hidden first and shown again after the resume. Other platforms: no-op (the
+/// JS pause is all that is applied there).
+#[cfg(target_os = "windows")]
+fn set_os_suspended(app: &AppHandle, label: &str, suspend: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+    use webview2_com::TrySuspendCompletedHandler;
+    use windows::core::Interface;
+
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    let result = window.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        let Ok(core) = controller.CoreWebView2() else {
+            return;
+        };
+        let Ok(core3) = core.cast::<ICoreWebView2_3>() else {
+            return;
+        };
+        if suspend {
+            let _ = controller.SetIsVisible(false);
+            let handler =
+                TrySuspendCompletedHandler::create(Box::new(|_result, _suspended| Ok(())));
+            let _ = core3.TrySuspend(&handler);
+        } else {
+            let _ = core3.Resume();
+            let _ = controller.SetIsVisible(true);
+        }
+    });
+    if let Err(err) = result {
+        tracing::debug!("webview suspend on {label} failed: {err}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_os_suspended(_app: &AppHandle, _label: &str, _suspend: bool) {}
+
 // ---------------------------------------------------------------------------------------------
 // Window registry
 // ---------------------------------------------------------------------------------------------
@@ -276,6 +339,8 @@ struct WebWindow {
     loaded: bool,
     preview_ready_at: Instant,
     paused_sent: Option<bool>,
+    /// The OS webview is suspended (covered / hidden only, see [`os_suspend_wanted`]).
+    os_suspended: bool,
     /// Last volume / mute script sent to the page (`None` = never sent since load).
     audio_sent: Option<String>,
     /// Logical rect of the window (its monitor's rect when it was last placed).
@@ -432,6 +497,7 @@ pub async fn show(
                 w.loaded = true;
                 // The bridge re-sends the pause state for the fresh page.
                 w.paused_sent = None;
+                w.os_suspended = false;
             }
             wake_bridge();
             for js in &load_scripts {
@@ -529,6 +595,7 @@ pub async fn show(
             loaded: loaded.load(Ordering::Acquire),
             preview_ready_at,
             paused_sent: None,
+            os_suspended: false,
             audio_sent: None,
             logical: (lx, ly, lw, lh),
             css_size: (lw, lh),
@@ -876,10 +943,38 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
                 })
                 .collect();
             let playing = |id: &str| !suspended && host.monitor_should_render(id);
+            // 3a. Wake pages that are no longer covered / hidden before the JS pause state goes
+            // out, then suspend the covered ones after it.
+            let suspend_plan: Vec<(String, bool)> = {
+                let windows: Vec<(String, bool, bool, bool)> = WINDOWS
+                    .lock()
+                    .iter()
+                    .map(|(id, w)| {
+                        let policy = host
+                            .monitor(id)
+                            .map_or(MonitorPlaybackPolicy::Playing, |rt| rt.policy);
+                        let wanted = os_suspend_wanted(policy, suspended);
+                        (w.label.clone(), w.loaded, wanted, w.os_suspended)
+                    })
+                    .collect();
+                plan_os_suspend(&windows)
+            };
+            for (label, suspend) in suspend_plan.iter().filter(|(_, s)| !*s) {
+                set_os_suspended(&app, label, *suspend);
+            }
             for (label, js, paused) in plan_pause_updates(&states, playing) {
                 eval(&app, &label, &js);
                 if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
                     w.paused_sent = Some(paused);
+                }
+            }
+
+            for (label, suspend) in suspend_plan.iter().filter(|(_, s)| *s) {
+                set_os_suspended(&app, label, *suspend);
+            }
+            for (label, suspend) in &suspend_plan {
+                if let Some(w) = WINDOWS.lock().values_mut().find(|w| &w.label == label) {
+                    w.os_suspended = *suspend;
                 }
             }
 
@@ -1169,6 +1264,7 @@ mod tests {
             loaded: true,
             preview_ready_at: Instant::now(),
             paused_sent: None,
+            os_suspended: false,
             audio_sent: None,
             logical: (0.0, 0.0, 100.0, 100.0),
             css_size: (100.0, 100.0),
@@ -1263,5 +1359,28 @@ mod tests {
         assert!(video[0]
             .1
             .starts_with("window.__truongpaper_apply_video_adjustments("));
+    }
+
+    #[test]
+    fn os_suspend_only_for_covered_or_hidden_not_user_pause_or_battery() {
+        use MonitorPlaybackPolicy::*;
+        assert!(os_suspend_wanted(PausedFullscreen, false));
+        assert!(os_suspend_wanted(PausedMaximized, false));
+        assert!(os_suspend_wanted(PausedDisplaySleep, false));
+        assert!(os_suspend_wanted(Playing, true));
+        assert!(!os_suspend_wanted(Playing, false));
+        assert!(!os_suspend_wanted(PausedBattery, false));
+    }
+
+    #[test]
+    fn os_suspend_plan_lists_only_loaded_changes() {
+        let w = |l: &str, loaded, wanted, applied| (l.to_string(), loaded, wanted, applied);
+        let plan = plan_os_suspend(&[
+            w("A", true, true, false),
+            w("B", true, false, true),
+            w("C", true, true, true),
+            w("D", false, true, false),
+        ]);
+        assert_eq!(plan, vec![("A".into(), true), ("B".into(), false)]);
     }
 }

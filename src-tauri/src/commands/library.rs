@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Manager, State};
 
 /// Parsed `project.json` per wallpaper folder, validated by the file's mtime and size, so
@@ -213,9 +213,11 @@ pub async fn library_import_local(
 /// `<app_data>/wallpapers/local`); folders owned by a local Steam install are left for Steam.
 #[tauri::command]
 pub async fn library_delete_wallpaper(
+    app: AppHandle,
     state: State<'_, AppState>,
     wallpaper_id: String,
 ) -> Result<(), String> {
+    let switched = switch_monitors_off(&app, &state, &wallpaper_id).await;
     let row = {
         let conn = state.db.lock();
         db::delete_wallpaper(&conn, &wallpaper_id)?
@@ -230,18 +232,90 @@ pub async fn library_delete_wallpaper(
     }
     let workshop_root = state.workshop_dir();
     let local_root = local_dir(&state);
+    // The render thread releases the scene (and its mmap of scene.pkg) a moment after the
+    // monitor switched; give it that moment before the first attempt.
+    let first_delay = if switched {
+        DELETE_SETTLE
+    } else {
+        Duration::ZERO
+    };
     tokio::task::spawn_blocking(move || {
         if is_strictly_within(&install_dir, &workshop_root)
             || is_direct_child(&install_dir, &local_root)
         {
-            std::fs::remove_dir_all(&install_dir)
-                .map_err(|e| format!("Removed from library but deleting files failed: {e}"))
+            std::thread::sleep(first_delay);
+            remove_dir_all_with_retry(&install_dir, DELETE_RETRY_DELAYS, |p| {
+                std::fs::remove_dir_all(p)
+            })
+            .map_err(|e| format!("Removed from library but deleting files failed: {e}"))
         } else {
             Ok(())
         }
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Time the render thread gets to drop a scene after its monitor switched away.
+const DELETE_SETTLE: Duration = Duration::from_millis(250);
+/// Waits between deletion attempts: Windows reports a sharing violation while the renderer or
+/// a webview still holds a file of the wallpaper.
+const DELETE_RETRY_DELAYS: &[Duration] = &[
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(1000),
+    Duration::from_millis(2000),
+];
+
+/// Retries `remove` on failure after each delay; a folder that is already gone counts as done.
+fn remove_dir_all_with_retry<F>(path: &Path, delays: &[Duration], remove: F) -> std::io::Result<()>
+where
+    F: Fn(&Path) -> std::io::Result<()>,
+{
+    let mut attempt = 0;
+    loop {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => match delays.get(attempt) {
+                Some(delay) => {
+                    std::thread::sleep(*delay);
+                    attempt += 1;
+                }
+                None => return Err(err),
+            },
+        }
+    }
+}
+
+/// Moves every monitor showing `wallpaper_id` back to the Photo API so nothing holds the
+/// wallpaper's files open. Returns whether any monitor was switched. Failures are logged: the
+/// delete still goes ahead.
+async fn switch_monitors_off(app: &AppHandle, state: &AppState, wallpaper_id: &str) -> bool {
+    let showing = state.host.monitors_showing(wallpaper_id);
+    let Some(photo) = app.try_state::<crate::commands::photo::PhotoServiceState>() else {
+        return false;
+    };
+    let mut switched = false;
+    for (monitor_id, _) in showing {
+        let _apply = crate::commands::monitor::lock_monitor_apply(&monitor_id).await;
+        match crate::commands::monitor::apply_source(
+            app,
+            state,
+            &photo,
+            &monitor_id,
+            &crate::models::WallpaperSource::PhotoApi,
+        )
+        .await
+        {
+            Ok(()) => switched = true,
+            Err(err) => {
+                tracing::warn!("could not switch {monitor_id} off a deleted wallpaper: {err}");
+            }
+        }
+    }
+    switched
 }
 
 /// Marks / unmarks any library wallpaper as a favorite.
@@ -296,6 +370,37 @@ pub async fn wallpaper_apply_preset(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn delete_retries_until_the_folder_is_free() {
+        let calls = std::cell::Cell::new(0);
+        let remove = |_: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(())
+            }
+        };
+        let delays = [Duration::ZERO; 4];
+        assert!(remove_dir_all_with_retry(Path::new("x"), &delays, remove).is_ok());
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn delete_gives_up_after_the_last_delay() {
+        let calls = std::cell::Cell::new(0);
+        let remove = |_: &Path| {
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        let delays = [Duration::ZERO; 2];
+        assert!(remove_dir_all_with_retry(Path::new("x"), &delays, remove).is_err());
+        assert_eq!(calls.get(), 3);
+        // A folder that vanished meanwhile is success.
+        let gone = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(remove_dir_all_with_retry(Path::new("x"), &delays, gone).is_ok());
+    }
 
     fn project_dir(tag: &str, body: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tp-libcache-{tag}-{}", std::process::id()));

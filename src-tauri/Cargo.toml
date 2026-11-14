@@ -106,7 +106,7 @@ memmap2 = "0.9"
 rustfft = "6.2"
 cpal = "0.15"
 kira = "0.9"
-rquickjs = { version = "0.8", features = ["bindgen", "classes", "array-buffer", "loader"] }
+rquickjs = { version = "0.8", features = ["bindgen", "classes", "array-buffer", "loader", "parallel"] }
 keyvalues-parser = "0.2"
 notify = { version = "8.0", default-features = false, features = ["macos_fsevent"] }
 raw-window-handle = "0.6"

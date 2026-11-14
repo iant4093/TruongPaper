@@ -825,12 +825,25 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
         if changed {
             // 1. Close windows whose monitor switched to another source.
             let stale = {
+                // Host locks are taken before `WINDOWS` everywhere else, so query the host
+                // first and only then lock `WINDOWS`.
+                let ids: Vec<String> = WINDOWS.lock().keys().cloned().collect();
+                let runtimes: HashMap<String, Option<MonitorRuntime>> = ids
+                    .into_iter()
+                    .map(|id| {
+                        let rt = host.monitor(&id);
+                        (id, rt)
+                    })
+                    .collect();
+                let attached = host.live_renderer_attached();
                 let mut stale = Vec::new();
                 WINDOWS.lock().retain(|id, window| {
-                    let rt = host.monitor(id);
-                    if window_matches_host(window, rt.as_ref())
-                        || keep_outgoing_window(rt.as_ref(), host.live_renderer_attached())
-                    {
+                    // A window added since the snapshot is judged on the next pass.
+                    let Some(rt) = runtimes.get(id) else {
+                        return true;
+                    };
+                    let rt = rt.as_ref();
+                    if window_matches_host(window, rt) || keep_outgoing_window(rt, attached) {
                         true
                     } else {
                         stale.push(window.label.clone());

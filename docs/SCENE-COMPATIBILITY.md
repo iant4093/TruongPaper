@@ -24,12 +24,16 @@ are rebuilt in place (`SceneRenderer::load`, textures stay cached).
 |---|---|
 | Image layers, parenting, transforms, blend modes | Supported |
 | Effects (GLSL → WGSL translation) | Supported for the stock effects below and for workshop effects that translate. Passes whose shader still fails to translate are skipped (warnings in diagnostics). Effect passes draw a clip-space quad with an identity model-view-projection, as stock passes expect |
-| Particles (sprite, rope) | Supported for common initializers/operators; others ignored |
-| Text layers | Supported (system-font fallback when the WE font is not shipped) |
-| Puppet / skeletal animation | Partial |
+| Particles (sprite and rope renderers) | Supported. Emitters: `boxrandom`; every other emitter name uses the sphere/random-direction fallback. Initializers: `lifetimerandom`, `sizerandom`, `alpharandom`, `colorrandom`, `velocityrandom`, `rotationrandom`, `angularvelocityrandom`. Operators: `movement` (gravity, drag), `angularmovement`, `alphafade`, `sizechange`, `colorchange`, `oscillateposition`, `turbulence`, `vortex`, `controlpointattract`. Control points, sprite-sheet frame animation (`sequencemultiplier`, `animationmode: "randomframe"`), world-space flag and `instanceoverride` are honoured. Any other initializer or operator name is ignored |
+| Particle children | `static`, `eventfollow`, `eventspawn` and `eventdeath` child systems render, with a shared instance budget (2048 per scene particle tree, 1024 per `children` entry). A child's `angles` and `probability` are ignored, `scale` is a uniform size multiplier, and burst children emit for 0.1 s |
+| Refracting particles | `REFRACT` sprite materials sample the scene behind the sprite through a normal map (`ui_editor_properties_refract_amount`, default 0.05). Each particle draw set keeps its own refraction state |
+| Text layers | Supported. Fonts come from the scene package or a VFS path; `systemfont_*` names resolve to a system font (Helvetica/Arial on macOS). Characters the font lacks are drawn from a CJK system font (Hiragino, PingFang, Arial Unicode on macOS; Microsoft YaHei, Yu Gothic, MS Gothic, SimSun on Windows; Noto Sans CJK on Linux) when one is installed |
+| Puppet / skeletal animation | Supported for `.mdl` meshes (`MDLV0005`/`0013`/`0021`/`0023`, plus unskinned 20-byte records) with `MDLS` skeletons and `MDLA` animations: CPU bone skinning, animation layers with blending, mirrored playback and puppet-attached child layers at the parent's `MDAT` attachment point. Morph-target files have no documented layout, so morph weights are not read from a scene |
+| 3D models | Static `.mdl` meshes render with a perspective camera, a depth buffer and a basic material (`texture * (ambient + lambert)` plus a masked emissive term), with `solidlayer` helper materials. The light is one fixed directional light, plus the scene's ambient and skylight colours. Lights and shadows defined in `scene.json` are not read |
 | Embedded video textures (macOS) | Supported |
 | Bloom, camera parallax / shake | Supported |
-| 3D models, light/shadow, depth effects | Not supported |
+| Sprite sheets, blend modes | Sprite-sheet frame animation, HSL blend modes and blend mode 31 (additive light) and 32 (caustics) are supported |
+| Depth effects | `depthparallax` is bundled; scene lights, shadows and true depth-of-field are not supported |
 
 ## Effects and core assets
 
@@ -62,15 +66,26 @@ assignments of a wider vector to a narrower one get a swizzle; scalar uniform ar
 `wgpu` sees it. A scalar material constant bound to a vector uniform (a slider driving `vec2 scale`)
 fills every component.
 
-Not yet bundled: `lightshafts`, audio-responsive variants (`AUDIOPROCESSING`) of `shake`/`pulse`,
-3D/lighting effects, particle textures (`materials/particle/*`) and fonts.
+Bundled textures (procedurally generated, original artwork):
+
+| Group | Contents |
+|---|---|
+| Utility and pattern | `util/white`, `black`, `noflow`, `noise`, `clouds_256`, `perlin_256`, `flatnormal`, `uniform_256`; `pattern/voronoi`, `voronoi_local`; `gradient/blend_gradient`, `gradient_fire`, `gradient_iridescent` |
+| Effect support | `effects/waterripplenormal`, `effects/waterflowphase` |
+| Particle sprites | `halo` (1-8), `glow` (1-3), `sparkle` (1-3), `star` (1-3), `bokeh` (1-3), `dust` (1-3), `ember` (1-3), `fire` (shaped flame sprites), `smoke`, `fog`, `rain` (sprite sheet of short drops), `snow`, `leaves`, `petal`/`rosepetals`, `feather`, `debris`, `bubbles`, `lightning`, `beam`, `light/light_shafts` and `light/flare`, `ring`, `drop`, `sickle`, `chromaticdot`, plus the refraction normal maps (`normal_ring`, `normal_ring_smooth`, `normal_splash`, `normal_pinch_rotate`, `drop_normal`, bubble normals) |
+
+Fonts are not bundled. Text layers use the fonts a scene ships, or system fonts (see Text layers above).
+
+Not yet bundled: `lightshafts` as an effect, audio-responsive variants (`AUDIOPROCESSING`) of `shake`/`pulse`, and 3D/lighting effects.
 
 ## Scripts, audio, input
 
 | Feature | Status |
 |---|---|
-| SceneScript property scripts (`update`, `init`, `applyUserProperties`, `scriptProperties`) | Supported (QuickJS sandbox). Full property set is sent once after scripts load, then only changed properties. Script bodies must be valid multi-line modules; `export var scriptProperties = createScriptProperties()…` works |
-| SceneScript APIs | Partial: layers, engine, input, audio buffers; several `thisScene`/`engine` helpers missing |
+| SceneScript property scripts (`update`, `init`, `applyUserProperties`, `cursorMove/Down/Up/Click`, `scriptProperties`) | Supported (QuickJS sandbox, ES modules). Full property set is sent once after scripts load, then only changed properties. `export var scriptProperties = createScriptProperties()…` works. `import` is limited to the WE modules `WEMath`, `WEVector` and `WEColor` |
+| SceneScript APIs | Supported: `engine` (`frametime`, `runtime`, `timeOfDay` as local time, `screenResolution`, `canvasSize`, `userProperties`, `registerAudioBuffers` at 16/32/64, `setTimeout`/`setInterval` and their clear functions, `isDesktopDevice`, `isWallpaper`, `isScreensaver`, `isRunningInEditor`, `isPortrait`, `isLandscape`), `input` (cursor world/screen position, left button), `thisLayer` and `thisScene.getLayer`/`getLayerByID`/`enumerateLayers` (origin, scale, angles, size, color, alpha, visible, text, parent/children, transform matrix), `Vec2`/`Vec3`/`Vec4`/`Mat4`, `shared`, `localStorage` (in memory, per script runtime), `MediaPlaybackEvent` and the other media event classes |
+| SceneScript APIs that are accepted but inert | Layer and scene animation (`getAnimation`, `getAnimationLayer`, `getTextureAnimation`: `play`/`pause`/`stop` do nothing, `setFrame`/`getFrame` only store a number), `thisLayer.play`/`stop`/`pause`/`setVolume`, video textures, `thisScene.createLayer` (returns a detached stub), `destroyLayer`, `sortLayer`, `getEffect` (returns `{ visible: true }`), `setParent`, `getBoundingBox` (returns `null`), `engine.openUserShortcut`. The renderer drives animation and sound itself |
+| SceneScript limits | 64 MiB memory and 512 KiB native stack per runtime. `init`, events and `applyUserProperties` get a 2 s budget; all scripts together get 3 s at load (later scripts are skipped). A frame step is interrupted after 250 ms. A script slot is disabled after 10 consecutive frames over 50 ms, 3 frames that hit the hard limit, or 3 s of throwing every frame. Script logging is limited to 20 lines per second and 512 characters per line. The per-frame step runs from compiled slots, so a failing script never stops the others |
 | Sound layers, audio-reactive uniforms | Supported |
 | Cursor events / parallax | Supported |
 | Web / Video / Application wallpaper types | Handled outside the scene renderer (Application: Windows only) |
@@ -78,36 +93,33 @@ Not yet bundled: `lightshafts`, audio-responsive variants (`AUDIOPROCESSING`) of
 ## Known limits (this build)
 
 - The bundled effects are written to the documented interface, not pixel-matched to Wallpaper Engine, so strengths and noise patterns differ slightly from the originals. `scene_probe` uses the bundled tree by default (`PROBE_NO_BUNDLED=1` disables it).
-- Particle textures and fonts that only ship with Wallpaper Engine are still replaced by fallbacks.
+- Particle sprites are bundled stand-ins, not Wallpaper Engine's artwork, and fonts that only ship with Wallpaper Engine are replaced by system fonts.
 - `engine.screenResolution` is the monitor size, so scripts that position layers as a percentage of it use that size, as in Wallpaper Engine.
 
-## Render sweep vs. Workshop preview (engine/parity2)
+## Render grading vs. Workshop previews (round 12 build)
 
-Offscreen `scene_probe` renders (1280x720, default properties) compared by eye with each
-scene's preview image. Previews are often promo art or another animation frame, so "mostly"
-means the same scene content with small differences.
+Offscreen `scene_probe` renders of Workshop scenes (default properties, 120 frames at 1920x1080) were graded by eye against each scene's Workshop preview image. Previews are often promo art, a close crop or another animation frame, so "mostly" means the same scene content with visible differences, and "yes" means the same content with only crop, framing or time-of-day differences.
 
-| id | title | matches preview? | remaining issue |
-|---|---|---|---|
-| 1195626192 | Gaze | mostly | cloud/sun frame differs (animated) |
-| 1275921440 | 4K & 2K Aurora Lake | yes | |
-| 1994794519 | D.VA_OVERWATCH[X-Ray] | mostly | red left-hand panel/x-ray tint differs |
-| 2134765860 | Bunk | no | preview shows clock/audio-bars UI over a different room view; render lacks the UI layers |
-| 2370927443 | Lofi Cafe | no | glitched composite with black/blue blocks (render-target/effect mismatch) |
-| 2482408967 | Samurai Doge | mostly | |
-| 2854083091 | Kamisato Ayaka Maid X-Ray | mostly | preview is a close-up crop; x-ray effect not verified |
-| 2887099508 | TIM ear scene | no | render is blank white (layers hidden by script/visibility state) |
-| 2902406982 | Moon-half scene | mostly | stray rectangular panel artifacts in the centre |
-| 2981249186 | 4K SCI-FI Black Hole | mostly | bright dot artifact at the centre |
-| 2998757800 | Azur Lane Littorio | mostly | preview is a title card; scene content renders |
-| 3122339805 | Pixels | no | only black/white/magenta blocks; intended UI/imagery missing |
-| 3299228616 | Lonely Cat (audio visualizer) | no | water/background not drawn; dark scene with green dots only |
-| 833227004 | Nebula Transform | mostly | colours shifted towards orange vs. teal preview |
-| 1160682576 | Watching the Universe | mostly | |
-| 2359043440 | Persica | yes | clock drawn at script-computed origin, no placeholder |
-| 3129893601 | Clone trooper helmet in the snow | yes | |
-| 3521337568 | Cyberpunk: Edgerunner-Lucy | mostly | |
+| Grade | Count |
+|---|---|
+| yes | 77 |
+| mostly | 55 |
+| no | 2 |
 
-SceneScript: all scripts in these scenes now load as real ES modules (0 skipped, 0 runtime
-errors in the sweep). `import` is limited to the WE modules `WEMath`, `WEVector`, `WEColor`.
-Layer animation / sound-layer methods (`getAnimationLayer`, `play`, ...) are accepted but inert.
+The gradings come from three sets of 40, 43 and 51 renders (134 rows covering 124 distinct scenes; ten scenes appear in two sets). The last two rounds had no regressions. Scenes are listed by Workshop id.
+
+The two `no` grades:
+
+- `1444077782`: rain streaks are too long and bright, and pink blobs appear at the bottom, where the preview is soft bokeh.
+- `2938612768`: a grey background with a small music widget renders, but the main artwork is missing.
+
+Remaining causes, most common first:
+
+1. **Extra or oversized overlay layers.** Clocks, weekday/date text, audio bars, notice panels and extra sprites that the preview does not show. Examples: `3292361861`, `3326873240`, `3151551777`, `3195212886`, `3078285611`, `2983846453`, `3122339805`, `2134765860`, and about 17 scenes in set C (`1921212781`, `2212279721`, `3413921910` and others).
+2. **Over-strong rain, light-shaft and particle effects.** `1444077782`, `1823900922`, `1851524277`, `1959836574`, `2282120494`, `2230132661`, `1582915184`, `833227004`, `1994794519`, and particle misplacement in `1039919954`, `1468116360`, `2504353624`, `3152793212`.
+3. **Background and lighting differences.** Hazy or dark backgrounds, or a different hair colour or glow: `2419444134`, `973101892`, `2761155250`, `2885492021`, `3118949804`, `3509243656`.
+4. **Missing background art or text overlays.** `2938612768`, `2250930375` (edge blur, no badges), `2998757800` (promo text), `3147346398` (text missing).
+5. **Framing and crop.** The render shows a wider or different camera view than the preview: `1210752799`, `1364019990`, `1375031246`, `1433247985`, `2405309541`, `3479521040`, `1636394814`.
+6. **Wrong layer scale or missing layers.** `1425503532`, `2149068390`, `3577990983`, `3463520581`.
+7. **Blocky sampling and stray artifacts.** `3141421197`, `3147346398`, `3146507587` (blocky); `3022080536` (red dot), `3146507587` (red streaks).
+8. **Script errors.** The only warnings in the logs: one script on `3047405322` throws every frame and is disabled, a `myLayer/visible` script is skipped in `3326873240` and `3470764447`, and rate-limited script logging drops lines in `3195212886` and `3233141951`.

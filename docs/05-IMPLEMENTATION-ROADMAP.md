@@ -1,5 +1,7 @@
 # 05 — Implementation Roadmap, Dependencies, Pitfalls & Verification Plan
 
+> Historical design spec, written before implementation. The shipped app differs in places; see [RELEASE-READINESS.md](RELEASE-READINESS.md) and the code for current behavior.
+
 ## 1. Phased Implementation Plan for Coding Agents
 
 ### 1.0 Multi-Agent Execution Workflow (Lead Reviewer + Parallel Subagents)
@@ -35,7 +37,7 @@ flowchart LR
 ### Phase 1: Workspace Scaffold, SQLite Schema & Ian's Photo API Engine
 **Target Crates**: `truongpaper-core`, `truongpaper-photo-api`
 - [ ] Initialize Cargo workspace + Tauri v2 + React 19 + TypeScript + Vite scaffold matching the exact manifests in Section 2.
-- [ ] Implement SQLite schema (`photos_cache`, `photos_history`, `photos_blacklist`, `saved_albums`, `wallpaper_configs`, `wallpaper_presets`, `playlists`, `settings`) with WAL mode in `truongpaper-core` (copy directly from [`docs/02-PHOTO-API-AND-CACHE-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/02-PHOTO-API-AND-CACHE-SPEC.md)).
+- [ ] Implement SQLite schema (`photos_cache`, `photos_history`, `photos_blacklist`, `saved_albums`, `wallpaper_configs`, `wallpaper_presets`, `playlists`, `settings`) with WAL mode in `truongpaper-core` (copy directly from [`docs/02-PHOTO-API-AND-CACHE-SPEC.md`](02-PHOTO-API-AND-CACHE-SPEC.md)).
 - [ ] Implement `PhotoApiClient` calling:
   - `GET https://photos-api.iantruongphotography.com/v1/photos/random` (supporting no params, `?featured=true`, `?album=<slug>`, and `?album=<slug>&featured=true`)
   - `GET https://iantruongphotography.com/api/public/albums?type=photo&limit=100` (official public album catalog discovery)
@@ -56,10 +58,10 @@ flowchart LR
 
 ### Phase 2: Cross-Platform Desktop Window Host & `wgpu` Compositor
 **Target Crates**: `truongpaper-platform`, `truongpaper-renderer`
-- [ ] Implement macOS desktop window creator (`NSWindow` at `kCGDesktopWindowLevel`, `CanJoinAllSpaces | Stationary | IgnoresCycle`, ignoring `NSWindow.occlusionState`) per `NSScreen` (copy from [`docs/01-SYSTEM-ARCHITECTURE.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/01-SYSTEM-ARCHITECTURE.md)).
+- [ ] Implement macOS desktop window creator (`NSWindow` at `kCGDesktopWindowLevel`, `CanJoinAllSpaces | Stationary | IgnoresCycle`, ignoring `NSWindow.occlusionState`) per `NSScreen` (copy from [`docs/01-SYSTEM-ARCHITECTURE.md`](01-SYSTEM-ARCHITECTURE.md)).
 - [ ] Implement Windows desktop window creator supporting **both** classic Windows 10/11 23H2 (`WorkerW` top-level sibling) **and** Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP` on `Progman`, `WS_CHILD | WS_EX_LAYERED` parented to `Progman` and Z-ordered immediately below `SHELLDLL_DefView`), with `TaskbarCreated` recovery.
 - [ ] Implement passive desktop cursor coordinate & click hit-test forwarder on both macOS and Windows.
-- [ ] Implement `wgpu` multi-monitor compositor using the exact WGSL shaders (`kawase_blur.wgsl` and `compositor.wgsl`) from [`docs/01-SYSTEM-ARCHITECTURE.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/01-SYSTEM-ARCHITECTURE.md):
+- [ ] Implement `wgpu` multi-monitor compositor using the exact WGSL shaders (`kawase_blur.wgsl` and `compositor.wgsl`) from [`docs/01-SYSTEM-ARCHITECTURE.md`](01-SYSTEM-ARCHITECTURE.md):
   - Orientation detection & fit modes (`Fill`, `Fit + Blur` Kawase dual-pass blur backdrop, `Fit + Black`, `Stretch`).
   - GPU transition shaders (`Smooth Crossfade`, `Blur-Dissolve`, `Liquid Glass Morph`) with configurable duration ($0.3\text{s}$–$3.0\text{s}$).
   - Universal post-processing color grading pass (Brightness, Contrast, Saturation, Hue Shift).
@@ -88,10 +90,10 @@ flowchart LR
 ### Phase 4: Wallpaper Engine Binary Formats (`.pkg`, `.tex`, `.mdl`, 4-Layer VFS) & System Audio FFT
 **Target Crates**: `truongpaper-we-formats`, `truongpaper-audio`
 - [ ] Implement the 4-Layer Virtual File System (`WeVirtualFileSystem`) mounting `<wallpaper_dir>`, `scene.pkg`, `gifscene.pkg`, and `<app_data_dir>/we_core_assets/assets/`.
-- [ ] Implement `.pkg` parser using `i32` length-prefixed strings (`read_string_i32_size`) and `memmap2::Mmap` zero-copy slices (copy from [`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md)).
+- [ ] Implement `.pkg` parser using `i32` length-prefixed strings (`read_string_i32_size`) and `memmap2::Mmap` zero-copy slices (copy from [`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md`](03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md)).
 - [ ] Implement `.tex` decoder (`TEXV0005`, `TEXI0001`, `TEXB0001..0004` including the `FIF_MP4 (35)` `Version4` downgrade rule, `TEXS0001..0003`) using null-terminated strings (`read_n_string`), `lz4_flex::decompress`, BC1/BC2/BC3/RG88/R8/RGBA8 decoding, and NPOT UV scale calculation.
 - [ ] Implement `.mdl` (`MDLV0005`/`MDLV0013`, `MDLS`, `MDLA`) puppet mesh parser with the 80-byte vertex stride (`pos: vec3, weight_indices: uvec4, weights: vec4, tc: vec2`).
-- [ ] Implement system audio loopback capture (`WASAPI Loopback` on Windows; `CoreAudio Process Tap` / `ScreenCaptureKit` on macOS) + `SpectrumAnalyzer` (2048-point Hann-windowed `rustfft` from [`docs/01-SYSTEM-ARCHITECTURE.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/01-SYSTEM-ARCHITECTURE.md)) producing smoothed 16-, 32-, and 64-band stereo arrays at 60 Hz.
+- [ ] Implement system audio loopback capture (`WASAPI Loopback` on Windows; `CoreAudio Process Tap` / `ScreenCaptureKit` on macOS) + `SpectrumAnalyzer` (2048-point Hann-windowed `rustfft` from [`docs/01-SYSTEM-ARCHITECTURE.md`](01-SYSTEM-ARCHITECTURE.md)) producing smoothed 16-, 32-, and 64-band stereo arrays at 60 Hz.
 - [ ] **Phase 4 Verification Command**:
   ```bash
   cargo test -p truongpaper-we-formats -p truongpaper-audio -- --nocapture
@@ -114,7 +116,7 @@ flowchart LR
 ### Phase 6: Wallpaper Engine `Scene` Renderer & SceneScript Engine
 **Target Crates**: `truongpaper-renderer`, `truongpaper-scenescript`
 - [ ] Implement `scene.json` scene-graph loader (orthographic/perspective camera, mouse parallax, camera shake, image/composition/solid layers, sound objects).
-- [ ] Implement Wallpaper Engine Shader Preprocessor (`#include` against 4-layer VFS, `// [COMBO]`, uniform comment metadata, `#define` translation header, and the 5 source compatibility rewrites from [`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md)) and compile via `naga` to `wgpu::RenderPipeline`.
+- [ ] Implement Wallpaper Engine Shader Preprocessor (`#include` against 4-layer VFS, `// [COMBO]`, uniform comment metadata, `#define` translation header, and the 5 source compatibility rewrites from [`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md`](03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md)) and compile via `naga` to `wgpu::RenderPipeline`.
 - [ ] Implement multi-pass FBO effect chains (`_rt_FullFrameBuffer`, ping-pong buffers, blend modes, bloom).
 - [ ] Implement CPU/SIMD + GPU Particle Simulator matching the exact `17-float` (`68-byte`) sprite and `26-float` (`104-byte`) rope vertex layouts.
 - [ ] Implement `.mdl` skeletal bone and morph target deformer.
@@ -128,11 +130,11 @@ flowchart LR
 
 ### Phase 7: Apple Liquid Glass UI, Tray Popover, Auto-Updater, CI/CD & `TruongFlix` Repo Format
 **Target Directory**: `src/`, `src-tauri/`, `scripts/`, `.github/workflows/`, `README.md`
-- [ ] Implement the cross-platform **Apple Liquid Glass Design System** (`LiquidGlassFilters.tsx`, `AmbientBacklightCanvas.tsx`, `liquid-glass.css`, bundled `InterVariable.woff2` font) from [`docs/04-UI-UX-LIQUID-GLASS-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/04-UI-UX-LIQUID-GLASS-SPEC.md).
+- [ ] Implement the cross-platform **Apple Liquid Glass Design System** (`LiquidGlassFilters.tsx`, `AmbientBacklightCanvas.tsx`, `liquid-glass.css`, bundled `InterVariable.woff2` font) from [`docs/04-UI-UX-LIQUID-GLASS-SPEC.md`](04-UI-UX-LIQUID-GLASS-SPEC.md).
 - [ ] Build the **Main Studio Window** (`All Wallpapers`, `Ian's Photos API`, `Steam Workshop`, `Unified Playlists`, `Monitors & Fit`, `Settings`) + **Universal Paste Omnibar** + **Right-hand Dynamic Property Inspector (`PropertyInspector.tsx`)**.
 - [ ] Build the **Menu Bar (macOS) / System Tray (Windows) Liquid Glass Popover** (`tray.html`) and browser preview mock (`src/dev/mockTauri.ts`).
 - [ ] Implement the **Smart Pause, Occlusion, Sleep/Lock & Battery Policy Monitor** (`power.rs` + 250ms occlusion check).
-- [ ] Implement the **Signed In-App Auto-Updater (`src/services/updates.ts`)**, sidecar bundler (`scripts/bundle-depotdownloader.mjs`), local release builder (`scripts/release.mjs`), `.github/workflows/ci.yml`, `.github/dependabot.yml`, and root `README.md` matching [`docs/06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md).
+- [ ] Implement the **Signed In-App Auto-Updater (`src/services/updates.ts`)**, sidecar bundler (`scripts/bundle-depotdownloader.mjs`), local release builder (`scripts/release.mjs`), `.github/workflows/ci.yml`, `.github/dependabot.yml`, and root `README.md` matching [`docs/06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md`](06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md).
 - [ ] **Phase 7 Verification Command**:
   ```bash
   npm test && npm run build && cd src-tauri && cargo test --locked
@@ -346,10 +348,10 @@ export default defineConfig({
 | **10** | **History Deletion on Cache Eviction** | Deleting `photos_history` rows when evicting `.jpg` files causes previously shown photos to be re-downloaded and shown again. | `evict_old_cached_files_preserving_history()` must **only** delete `.jpg` files on disk and `UPDATE photos_cache SET file_present = 0`. It must **never** delete rows from `photos_history`. |
 | **11** | **WASAPI Loopback Silence Freeze** | On Windows WASAPI Loopback, when no application is outputting audio, WASAPI stops firing the capture callback entirely, freezing the last FFT spectrum frame on screen. | Push captured audio into `StereoRingBuffer` with `last_write: Instant`, and step `SpectrumAnalyzer::process_stereo_pcm` on a dedicated 60 Hz timer thread that feeds `[0.0; 2048]` whenever `last_write.elapsed() > 35ms`. |
 | **12** | **Tauri v2 Capabilities & CloudFront CSP** | Tauri v2 blocks `data-tauri-drag-region`, file dialogs, and sidecars unless listed in `capabilities/default.json` for both `"main"` and `"tray-popover"`, and `GET /api/public/albums` serves thumbnails from `d1twwtwfz1yeo4.cloudfront.net`. | Include `"windows": ["main", "tray-popover"]` in `capabilities/default.json` and include `https://*.cloudfront.net` in `security.csp` `img-src`. |
-| **13** | **Windows `cargo test` `0xc0000139` Crash** | `tauri-build` only links its Common Controls v6 manifest into `bin` targets, causing `cargo test` executables on Windows to load Common Controls v5 and crash with `STATUS_ENTRYPOINT_NOT_FOUND`. | Embed `windows-app-manifest.xml` into all targets in `src-tauri/build.rs` via `/MANIFEST:EMBED` and `WindowsAttributes::new_without_app_manifest()` (see [`docs/06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md#L561-L598)). |
+| **13** | **Windows `cargo test` `0xc0000139` Crash** | `tauri-build` only links its Common Controls v6 manifest into `bin` targets, causing `cargo test` executables on Windows to load Common Controls v5 and crash with `STATUS_ENTRYPOINT_NOT_FOUND`. | Embed `windows-app-manifest.xml` into all targets in `src-tauri/build.rs` via `/MANIFEST:EMBED` and `WindowsAttributes::new_without_app_manifest()` (see [`docs/06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md`](06-REPO-STRUCTURE-README-AND-RELEASES-SPEC.md#L561-L598)). |
 | **14** | **macOS Release Proc-Macro Strip Failure** | Setting `strip = true` in `[profile.release]` also strips proc-macro `.dylib` crates on macOS unless overridden, breaking `dlopen` during release builds. | Always include `[profile.release.build-override] strip = false` in `src-tauri/Cargo.toml`. |
 | **15** | **`keyring` Crate No-Op Store & Multiple Prompts** | `keyring` v3 compiles with a no-op backend if `"apple-native"` and `"windows-native"` features are omitted, and storing multiple keys triggers repeated macOS Keychain prompts. | Enable `features = ["apple-native", "windows-native"]` on `keyring` and store all secrets inside a single JSON vault item (`service = "com.iantruong.truongpaper"`, `account = "vault"`). |
-| **16** | **`wpe://` Custom Protocol `<video>`/`<audio>` `206 Partial Content`** | `WKWebView` (macOS) and `WebView2` (Windows) refuse to play or loop `<video>` or `<audio>` over custom schemes if `Range: bytes=start-end` returns `200 OK` instead of `206 Partial Content`. | Implement byte-range parsing (`StatusCode::PARTIAL_CONTENT`, `Accept-Ranges: bytes`, `Content-Range: bytes start-end/total`) in `handle_wpe_protocol_request` (see [`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md#L1312-L1386)). |
+| **16** | **`wpe://` Custom Protocol `<video>`/`<audio>` `206 Partial Content`** | `WKWebView` (macOS) and `WebView2` (Windows) refuse to play or loop `<video>` or `<audio>` over custom schemes if `Range: bytes=start-end` returns `200 OK` instead of `206 Partial Content`. | Implement byte-range parsing (`StatusCode::PARTIAL_CONTENT`, `Accept-Ranges: bytes`, `Content-Range: bytes start-end/total`) in `handle_wpe_protocol_request` (see [`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md`](03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md#L1312-L1386)). |
 
 ---
 

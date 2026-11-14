@@ -31,7 +31,7 @@ These checks cover guest and signed-in Workshop access.
 4. Paste another direct Workshop URL or ID into Import and choose **Download via GGNetwork**. If GGNetwork requires its own account or has no archive ready, the preview should explain that. Test **Download with Steam** separately using an account with Wallpaper Engine access.
 5. Watch the wallpaper for three loops, try Pause/Resume, then lock/unlock and sleep/wake. Repeat the guest browsing and download/apply checks on Windows when available.
 
-The native guest gallery and GGNetwork download of `3836199874` passed. The packaged Steam downloader started and displayed a live QR. The 159 frontend tests and 405 Rust tests passed. Playback, downloading through a Steam account with Wallpaper Engine access, and Windows desktop behavior still need desktop testing. Detailed checks follow below.
+The native guest gallery and GGNetwork download of `3836199874` passed. The packaged Steam downloader started and displayed a live QR. The 285 frontend tests and 761 Rust tests (1 ignored) passed on 2026-11-13. Playback, downloading through a Steam account with Wallpaper Engine access, and Windows desktop behavior still need desktop testing. Detailed checks follow below.
 
 ## Priority retest: fill, gray flashes, and branding
 
@@ -142,7 +142,12 @@ Use actual Workshop IDs/links in your report so failures can be reproduced.
 5. Create a playlist with at least three items and a one-minute interval. Once it has advanced, unplug and reconnect the external display. It should restore its current item rather than restarting the playlist.
 6. Change resolution/scaling and move a display in OS display settings. Windows should resize/reposition correctly; disconnects should not move wallpaper onto the wrong monitor.
 
-**Known:** A single canvas spanning displays is not implemented. Applying the same source to all displays does not synchronize independent photo draws.
+7. Turn on **Span one wallpaper across all displays** in Displays with a photo, then a scene. The image should stretch over the combined desktop. Switch to a video or web wallpaper: it should stay on its own display. Turn span off and confirm each display returns to its own wallpaper.
+8. Drag the per-display **Volume** slider for a scene or video on one display. Only that display's sound should change, and the value should persist after a restart.
+9. In Settings, change the Next and Pause shortcuts, save, and press them with another app focused.
+10. Settings › Backup & restore: export a backup, change a setting and a playlist, then import the backup and check both are restored.
+
+**Known:** Applying the same source to all displays without span mode does not synchronize independent photo draws. Span mode does not apply to video, web or application wallpapers.
 
 ## 8. Windows desktop coverage and updates
 

@@ -1,5 +1,7 @@
 # 03 — Wallpaper Engine Compatibility & Steam Workshop Specification
 
+> Historical design spec, written before implementation. The shipped app differs in places; see [RELEASE-READINESS.md](RELEASE-READINESS.md) and the code for current behavior.
+
 > **Implementation Tier**: Copy-Paste Ready / Byte-Verified Specification  
 > All binary structures (`.pkg`, `.tex`, `.mdl`), shader preprocessor rules, particle vertex layouts, `DepotDownloader` v3.4.0 sidecar commands, and 4-layer VFS mounting rules below have been verified directly against the upstream `RePKG`, `linux-wallpaperengine`, and `DepotDownloader` source code.
 

@@ -13,18 +13,18 @@ A native macOS and Windows desktop wallpaper engine built in Rust and WebGPU tha
 
 ![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
-![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-1.82%2B-000000?logo=rust&logoColor=white)
 ![Renderer](https://img.shields.io/badge/renderer-wgpu-6E3FA3)
-![Platforms](https://img.shields.io/badge/platforms-macOS_%7C_Windows-555555)
+![Platforms](https://img.shields.io/badge/platforms-macOS_(Apple_Silicon)_%7C_Windows_x64-555555)
 [![CI](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml/badge.svg)](https://github.com/iant4093/TruongPaper/actions/workflows/ci.yml)
 
 </div>
 
 ---
 
-TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in a simple dark interface that looks identical on macOS and Windows.
+TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in a simple dark interface that looks identical on macOS and Windows. Releases target Apple Silicon Macs and 64-bit Windows.
 
-Workshop includes a native **Discover** gallery with public guest browsing, search, sorting, tag filters, previews, and pagination. **Installed** keeps your downloads and local Steam library. Direct Workshop links and IDs open the download choices. Choose GGNetwork when it has a guest download, or Steam with a Wallpaper Engine license. GGNetwork receives the public Workshop link when you choose it. Discover follows Steam's guest visibility rules. The sidebar reports disk cache and main-process resident RAM separately.
+Workshop includes a native **Discover** gallery with public guest browsing, search, sorting, tag filters, previews, and pagination. **Installed** keeps your downloads and local Steam library. Direct Workshop links and IDs open the download choices. Choose GGNetwork when it has a guest download, or Steam with a Wallpaper Engine license. GGNetwork receives the public Workshop link when you choose it. Discover follows Steam's guest visibility rules. The sidebar reports disk cache and main-process resident RAM as separate readings: Disk cache is the size of cached photos on disk, and RAM is the app's resident memory, refreshed every three seconds (helper-process and GPU memory are not included).
 
 ## Screenshots
 
@@ -33,11 +33,11 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/studio-library.jpg" width="100%" alt="TruongPaper main dark studio window showing unified library, top paste omnibar, active 5-photo queue and live property inspector">
-      <p align="center"><sub><b>Wallpaper Library</b> · unified library, paste omnibar and live inspector</sub></p>
+      <img src="docs/screenshots/studio-library.jpg" width="100%" alt="TruongPaper main dark studio window showing the unified library with search, sort and favorites, the Import from computer control, and the details panel">
+      <p align="center"><sub><b>Wallpaper Library</b> · unified library with search, sort, favorites and local import</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/photos-api.jpg" width="100%" alt="Ian Truong Photography API studio view showing saved albums, featured filter, 5-photo offline queue, cache slider and history controls">
+      <img src="docs/screenshots/photos-api.jpg" width="100%" alt="Ian Truong Photography API studio view showing saved albums, featured filter, offline photo queue, cache slider and history controls">
       <p align="center"><sub><b>Ian's Photos API</b> · offline queue, saved albums and zero-repeat history</sub></p>
     </td>
   </tr>
@@ -47,18 +47,18 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
       <p align="center"><sub><b>Steam Workshop</b> · browse the public catalog inside the app; direct links still work</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/scene-inspector.jpg" width="100%" alt="Dynamic Wallpaper Engine property inspector with auto-generated sliders, color pickers, toggles, presets and audio FFT sensitivity">
-      <p align="center"><sub><b>Wallpaper Engine Inspector</b> · user properties, presets and audio FFT</sub></p>
+      <img src="docs/screenshots/scene-inspector.jpg" width="100%" alt="Dynamic Wallpaper Engine property inspector with auto-generated sliders, color pickers, toggles and presets">
+      <p align="center"><sub><b>Wallpaper Engine Inspector</b> · user properties, presets and scene report</sub></p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/monitors-playlists.jpg" width="100%" alt="Multi-monitor layout diagram with per-display wallpaper assignment, GPU transitions and unified mixed playlists">
-      <p align="center"><sub><b>Monitors & Playlists</b> · per-display fit modes and wallpaper transitions</sub></p>
+      <img src="docs/screenshots/monitors-playlists.jpg" width="100%" alt="Displays view listing each monitor and the wallpaper assigned to it">
+      <p align="center"><sub><b>Displays</b> · each monitor's wallpaper, volume, span mode and lock screen still</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/tray-popover.jpg" width="100%" alt="Dark Menu Bar and System Tray popover with quick pause, next wallpaper, favorite, volume and queue status">
-      <p align="center"><sub><b>Menu Bar & System Tray</b> · instant controls without opening the studio</sub></p>
+      <img src="docs/screenshots/tray-popover.jpg" width="100%" alt="Dark Menu Bar and System Tray popover with display picker, pause, next wallpaper, favorite and cache status">
+      <p align="center"><sub><b>Menu Bar & System Tray</b> · pause, next, favorite and display switching without opening the studio</sub></p>
     </td>
   </tr>
 </table>
@@ -77,7 +77,9 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 **Steam Workshop & Wallpaper Engine**
 
-- Paste any Steam Workshop link (`https://steamcommunity.com/sharedfiles/filedetails/?id=...`) or Workshop ID to inspect metadata and download the wallpaper directly inside TruongPaper
+- Paste any Steam Workshop link (`https://steamcommunity.com/sharedfiles/filedetails/?id=...`) or Workshop ID into the Discover search box to inspect metadata and download the wallpaper directly inside TruongPaper. A running download has a **Cancel download** button in its preview dialog
+- **Import from computer…** copies a Wallpaper Engine item folder or a video file (`mp4`, `webm`, `mov`, `mkv`) from disk into the library
+- Library search (press `/` to focus it), sort by recent, name, size or type, a Favorites filter, and per-type filters
 - Built-in standalone Steam downloader powered by a bundled, checksum-verified `DepotDownloader` sidecar with Steam Mobile QR code and 2FA sign-in; TruongPaper keeps the account name in the OS credential store, while DepotDownloader manages remembered login data separately
 - Automatic local Steam sync: discovers local Steam libraries (`libraryfolders.vdf`) and watches `steamapps/workshop/content/431960` in real time so subscriptions from the Steam client appear automatically
 - First-run core asset bootstrap: automatically fetches Wallpaper Engine's core shaders and materials (`Depot 431961`) on macOS or Windows machines where Wallpaper Engine isn't installed locally
@@ -85,6 +87,8 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 **Scene, Video, Web & Application Runtimes**
 
 - **Scene wallpapers**: native Rust `.pkg` (`PKGV0001`–`PKGV0022+`) memory-mapped archive reader, `.tex` (`TEXV0005` / `TEXB0001`–`TEXB0004` / `TEXS0001`–`TEXS0003`) LZ4/DXT1/DXT3/DXT5/RG88/R8/MP4 texture decoder, 4-layer Virtual File System, HLSL/GLSL-to-WGSL shader preprocessor, multi-pass FBO effects, GPU/SIMD particle systems, `.mdl` skeletal puppet warp, and an embedded `rquickjs` SceneScript runtime (`init`, `update`, `cursorMove`, `applyUserProperties`, `engine.registerAudioBuffers`)
+- **Scene engine summary**: image, text, particle, sound, group and static 3D model layers; 30 bundled clean-room stock effects plus translation of Workshop effect shaders; particle systems with 9 operators, child systems (static, follow, spawn, death), rope trails, sprite sheets and refracting sprites; skeletal puppets with animation layers; bloom, camera parallax and user-property bindings that apply live. Original stand-ins for Wallpaper Engine's stock textures are bundled, and text layers fall back to system fonts, including CJK fonts. Grading 124 Workshop scenes by eye against their preview images gave 77 "yes", 55 "mostly" and 2 "no"; see [docs/SCENE-COMPATIBILITY.md](docs/SCENE-COMPATIBILITY.md) for supported features, limits and remaining causes
+- **Scene report**: warnings the renderer collects while loading a scene (skipped scripts, fallback shaders and similar) appear as a collapsed **Scene report** in the wallpaper's details panel
 - **Video wallpapers**: looping playback through WKWebView / WebView2 (codec support depends on the platform), plus AVFoundation decoding for embedded scene videos on macOS with gapless loop, playback speed (`0.1x`–`3.0x`) and volume control
 - **Web wallpapers**: embedded `wry` desktop WebView with `window.wallpaperPropertyListener` and 60 Hz 128-band stereo `window.wallpaperRegisterAudioListener` injection
 - **Application wallpapers** (Windows): launches Windows application wallpapers with desktop bounds; flagged as `Windows Only` on macOS
@@ -100,8 +104,12 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 - Independent per-monitor wallpapers and applying the same source across displays (photo draws remain independent), with platform support for both classic Windows 10/11 `WorkerW` and Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP`) raised layered desktops
 - Smart orientation matching: skips portrait photos on landscape monitors (and vice-versa) by default, or displays mismatched aspect ratios over a dual-pass Kawase GPU-blurred ambient backdrop (`Fit + Blur`)
-- Custom `wgpu` transitions: **Smooth Crossfade**, **Blur-Dissolve**, and **Liquid Glass Morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
-- Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`), on app launch, on display wake
+- Custom `wgpu` transitions: **Smooth Crossfade**, **Blur-Dissolve**, and **Liquid morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
+- Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`, or manual only), on app launch, on display wake. Each display keeps its own playlist position and timer, and positions persist across restarts
+- Per-display volume slider in **Displays**, and **Span one wallpaper across all displays** for photos and scenes (videos, web wallpapers and applications stay on their own display)
+- Lock screen still: on macOS **Prepare Lock Screen Still** saves a JPEG of the selected display's wallpaper and reveals it in Finder, so you can choose it in System Settings; on Windows **Set Lock Screen Still** sets the image once, and **Follow the primary display** keeps it in sync as the wallpaper changes
+- Global keyboard shortcuts for Next wallpaper (`CmdOrCtrl+Alt+Right`) and Pause / Resume (`CmdOrCtrl+Alt+P`), editable in Settings
+- Backup and restore: **Settings › Backup & restore** exports settings, playlists, favorites and per-wallpaper customization to one JSON file, and imports it again. Wallpaper files, Steam account data and secrets are never included
 - Smart pause & battery saver: suspends animation and FFT work and mutes audio when a fullscreen game or maximized window covers a monitor, when running on laptop battery / Low Power Mode, or when the screen locks or sleeps
 
 ## Install
@@ -137,7 +145,7 @@ Installed copies check for a new version once a day (or from **Settings › Abou
 
 ## Build locally
 
-Requires **Node 22.12+**, **Rust stable** and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
+Requires **Node 22.12+**, **Rust 1.82 or newer** (CI builds with 1.94.0) and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
 
 ```bash
 npm install
@@ -193,25 +201,33 @@ The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository 
 
 ```text
 .
-├── src/                    React app (Wallpaper Library & Menu Bar / Tray Popover)
-│   ├── components/         Studio views (views/), PropertyInspector, Omnibar,
-│   │                       AmbientBacklightCanvas, Steam sign-in and Workshop preview modals
+├── src/                    React app (Studio window and Menu Bar / Tray popover)
+│   ├── components/         Shared components: WallpaperCard, VirtualGrid, WorkshopBrowser,
+│   │                       WorkshopPreviewModal, WorkshopImport, LocalImport, DetailsDrawer,
+│   │                       SceneReport, SourceDetails, PropertyInspector, PresetBar,
+│   │                       PlaylistEditor, ResourceUsage, PlaybackBar, SteamAuthModal
+│   │   └── views/          Studio views: library, Photography, Workshop, Displays, Playlists, Settings
 │   ├── services/           Signed auto-updater client (updates.ts)
 │   ├── store/              Zustand store (useAppStore.ts): photos, Workshop, playlists, monitors, presets
 │   ├── tray/               Menu Bar (macOS) / System Tray (Windows) quick-control popover
-│   ├── lib/ types/         Formatting helpers and IPC types (ipc.ts)
+│   ├── lib/ types/         Formatting helpers, hooks and IPC types (ipc.ts)
 │   ├── styles/             Neutral dark theme (theme.css)
 │   └── dev/                Browser-preview mock of the Tauri backend (dev only)
 ├── src-tauri/              Rust backend
-│   ├── crates/             Modular crates: core, photo-api, steam, we-formats, renderer, scenescript, audio, platform
-│   ├── src/                Tauri entrypoints, IPC commands (commands/), desktop host, Smart Pause,
+│   ├── crates/             Modular crates: core, photo-api, steam, we-formats, renderer, scenescript,
+│   │                       audio, platform
+│   ├── src/                Tauri entrypoints and IPC commands (commands/: library, monitor, photo,
+│   │                       playlist, runtime, settings, steam, backup, lock_screen, updater),
+│   │                       desktop host, scheduler, global controls (hotkeys), Smart Pause,
 │   │                       power/lock watcher, OS keychain vault, wpe:// protocol, tray, SQLite state
 │   ├── capabilities/       Tauri permissions
+│   ├── resources/          Bundled clean-room core assets (effects, shaders, textures)
 │   ├── bin/                DepotDownloader sidecar and licenses (populated by the bundler script)
-│   └── examples/           Renderer smoke test (wallpaper_smoke.rs)
+│   └── examples/           wallpaper_smoke, scene_probe and other developer tools
 ├── tests/                  Vitest unit and component tests
-├── scripts/                DepotDownloader sidecar bundling and release packaging
-├── docs/                   Architecture specs, README screenshots and icon
+├── scripts/                DepotDownloader sidecar bundling, core-asset texture generation, release packaging
+├── docs/                   Design specs (01-06), scene compatibility, release readiness, manual
+│                           testing checklist, README screenshots and icon
 ├── .github/                CI/release workflow and Dependabot
 ├── index.html              Main Studio window entry
 ├── tray.html               Menu Bar / System Tray popover entry

@@ -1,5 +1,7 @@
 # 02 — Ian Truong Photography API, Local Queue & SQLite Cache Specification
 
+> Historical design spec, written before implementation. The shipped app differs in places; see [RELEASE-READINESS.md](RELEASE-READINESS.md) and the code for current behavior.
+
 > **Implementation Tier**: Copy-Paste Ready / Live-Verified API Specification  
 > All endpoints, headers, error JSON bodies, rate limits, small-album edge cases, SQLite queries, and Rust queue/refill code below have been verified directly against the live `photos-api.iantruongphotography.com` and `iantruongphotography.com` production servers.
 
@@ -952,7 +954,7 @@ pub fn decode_photo_for_wgpu(
 
 ## 6. Complete Implementation of All 13 `photo_*` Tauri v2 IPC Commands (`src-tauri/src/commands/photo.rs`)
 
-Below is the complete, copy-paste-ready Rust implementation of all 13 `photo_*` IPC commands defined in [`docs/04-UI-UX-LIQUID-GLASS-SPEC.md`](file:///Users/iantruong/Desktop/Fun/TruongPaper/docs/04-UI-UX-LIQUID-GLASS-SPEC.md#L1060-L1074), including:
+Below is the complete, copy-paste-ready Rust implementation of all 13 `photo_*` IPC commands defined in [`docs/04-UI-UX-LIQUID-GLASS-SPEC.md`](04-UI-UX-LIQUID-GLASS-SPEC.md#L1060-L1074), including:
 - Non-blocking disk file eviction outside the SQLite `Mutex` lock (`evict_old_cached_files_preserving_history_unlocked`).
 - Multi-monitor Cloned vs. Independent rotation (`pop_next_queued_photo_with_exclusions`) with automatic fallback to `FitMode::FitBlur` when an active album contains zero photos matching a portrait/landscape monitor's native orientation.
 

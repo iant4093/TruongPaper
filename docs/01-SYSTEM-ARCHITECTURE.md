@@ -1,5 +1,7 @@
 # 01 — System Architecture, OS Desktop Host, GPU Shaders & Audio DSP
 
+> Historical design spec, written before implementation. The shipped app differs in places; see [RELEASE-READINESS.md](RELEASE-READINESS.md) and the code for current behavior.
+
 > **Implementation Tier**: Copy-Paste Ready / Zero-Ambiguity Specification  
 > All OS windowing quirks (including the **Windows 11 24H2 `WS_EX_NOREDIRECTIONBITMAP` breaking change** and **macOS `WKWebView`/`CAMetalLayer` occlusion throttling**), WGSL transition shaders, and FFT audio binning formulas are specified with concrete Rust & WGSL code below.
 

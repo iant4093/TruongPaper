@@ -25,11 +25,14 @@ pub const INIT_BUDGET: Duration = Duration::from_secs(2);
 pub const FRAME_BUDGET: Duration = Duration::from_millis(250);
 /// A slot whose own `update` takes longer than this (milliseconds) in a frame counts a slow
 /// strike; [`SLOW_STRIKES`] frames in a row disable it.
-pub const SLOW_SLOT_MS: f64 = 50.0;
+pub const SLOW_SLOT_MS: f64 = 100.0;
 /// Consecutive slow frames of one slot before it is disabled.
-pub const SLOW_STRIKES: u32 = 10;
-/// A slot whose `update` throws on every frame for this long is disabled.
+pub const SLOW_STRIKES: u32 = 30;
+/// A slot whose `update` throws on every frame for this much stepped (frame delta) time is
+/// disabled, provided it also threw on at least [`ERROR_DISABLE_MIN_FRAMES`] frames in a row.
 pub const ERROR_DISABLE_AFTER: Duration = Duration::from_secs(3);
+/// Minimum number of consecutive throwing frames before a slot is disabled for errors.
+pub const ERROR_DISABLE_MIN_FRAMES: u32 = 60;
 /// Minimum gap between repeated log lines about the same failing slot.
 pub const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// Total wall-clock budget for compiling and initializing every property script at load (see
@@ -518,6 +521,7 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
     g.__step = function (p) {
         PENDING.length = 0;
         const e = g.engine, inp = g.input;
+        const dt = Math.min(Math.max(p[0] || 0, 0), 0.1);
         e.frametime = p[0]; e.runtime = p[1];
         if (p[4] !== 0) {
             const sp = inp.cursorScreenPosition; sp.x = p[5]; sp.y = p[6];
@@ -551,14 +555,18 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
                 } catch (err) {
                     const now = __now();
                     let s = ERR.get(k);
-                    if (!s) { s = { since: now, logAt: now, n: 0 }; ERR.set(k, s); __log('error', `[${k}] update: ${err}`); }
+                    if (!s) { s = { frames: 0, stepped: 0, logAt: now, n: 0 }; ERR.set(k, s); __log('error', `[${k}] update: ${err}`); }
                     else if (now - s.logAt >= g.__errLogMs) {
                         s.logAt = now;
                         __log('error', `[${k}] update: ${err} (${s.n} more failures since the last report)`);
                         s.n = 0;
                     }
                     s.n++;
-                    if (now - s.since >= g.__errDisableMs) failed.push(k);
+                    // Consecutive throwing frames and stepped time, not wall time: a pause, a
+                    // sleep or a render-thread stall must not count towards the limit.
+                    s.frames++;
+                    s.stepped += dt;
+                    if (s.frames >= g.__errFrames && s.stepped * 1000 >= g.__errDisableMs) failed.push(k);
                 }
             }
             const str = String(slot.currentValue);
@@ -578,7 +586,7 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
     // A frame that failed may have handed out values the host never received: forget what was
     // reported so the next frame sends every slot again.
     g.__resetDiff = function () { LAST.clear(); PENDING.length = 0; };
-    g.__errLogMs = 60000; g.__errDisableMs = 3000; g.__slowMs = 50;
+    g.__errLogMs = 60000; g.__errDisableMs = 3000; g.__errFrames = 60; g.__slowMs = 100;
     g.__disable = function (k) { delete g.__scripts[k]; LAST.delete(k); ERR.delete(k); };
     g.__hasHandler = function (name) {
         for (const k in g.__scripts) if (typeof g.__scripts[k].exports[name] === 'function') return true;
@@ -937,6 +945,15 @@ where
     ctx.eval::<T, _>(src).map_err(|e| js_err(ctx, e))
 }
 
+/// What is needed to register a property script again.
+#[derive(Debug, Clone)]
+struct Registration {
+    layer: String,
+    source: String,
+    initial: String,
+    props: String,
+}
+
 pub struct SceneScriptEngine {
     _runtime: Runtime,
     context: Context,
@@ -944,6 +961,11 @@ pub struct SceneScriptEngine {
     deadline: Arc<Mutex<Option<Instant>>>,
     frame_budget: Cell<Duration>,
     error_disable_after: Cell<Duration>,
+    /// Every successful property-script registration, so slots the breaker disabled can be
+    /// brought back ([`Self::reenable_disabled_slots`]).
+    registrations: RefCell<HashMap<String, Registration>>,
+    /// Slots disabled by the breaker since the last re-enable.
+    off_slots: RefCell<Vec<String>>,
     /// End of the total script-load budget while one is running ([`Self::begin_load`]).
     load_deadline: Cell<Option<Instant>>,
     breaker: RefCell<Breaker>,
@@ -1012,6 +1034,8 @@ impl SceneScriptEngine {
             deadline,
             frame_budget: Cell::new(FRAME_BUDGET),
             error_disable_after: Cell::new(ERROR_DISABLE_AFTER),
+            registrations: RefCell::new(HashMap::new()),
+            off_slots: RefCell::new(Vec::new()),
             load_deadline: Cell::new(None),
             breaker: RefCell::new(Breaker::default()),
             handlers: Cell::new([None; 4]),
@@ -1055,6 +1079,38 @@ impl SceneScriptEngine {
                 .set("__errDisableMs", after.as_secs_f64() * 1000.0)
                 .map_err(|e| js_err(ctx, e))
         });
+    }
+
+    /// Overrides the minimum number of consecutive throwing frames (tests).
+    pub fn set_error_disable_min_frames(&self, frames: u32) {
+        let _ = self.guarded(INIT_BUDGET, |ctx| {
+            ctx.globals()
+                .set("__errFrames", f64::from(frames))
+                .map_err(|e| js_err(ctx, e))
+        });
+    }
+
+    /// Registers again every slot the breaker disabled (frame-budget overruns, slow frames or
+    /// throwing updates), e.g. after `applyUserProperties`. Returns `(slot, initial value)` of
+    /// the slots that came back; a slot whose script fails to start stays off.
+    pub fn reenable_disabled_slots(&self) -> Vec<(String, String)> {
+        let off = std::mem::take(&mut *self.off_slots.borrow_mut());
+        let mut back = Vec::new();
+        for slot in off {
+            let Some(r) = self.registrations.borrow().get(&slot).cloned() else {
+                continue;
+            };
+            match self.register_property_script_with_props(
+                &slot, &r.layer, &r.source, &r.initial, &r.props,
+            ) {
+                Ok(v) => back.push((slot, v)),
+                Err(err) => {
+                    tracing::warn!(target: "scenescript", "script '{slot}' not re-enabled: {err}");
+                    self.off_slots.borrow_mut().push(slot);
+                }
+            }
+        }
+        back
     }
 
     /// Runs `f` inside the context with a wall-clock budget enforced by the interrupt handler.
@@ -1297,7 +1353,7 @@ impl SceneScriptEngine {
             None => INIT_BUDGET,
         };
         self.handlers.set([None; 4]);
-        self.guarded(budget, |ctx| {
+        let res = self.guarded(budget, |ctx| {
             eval_js::<()>(
                 ctx,
                 format!(
@@ -1346,7 +1402,20 @@ impl SceneScriptEngine {
                     slot_key = js_str(slot_key),
                 ),
             )
-        })
+        });
+        if res.is_ok() {
+            self.registrations.borrow_mut().insert(
+                slot_key.to_string(),
+                Registration {
+                    layer: layer_name.to_string(),
+                    source: raw_es_script.to_string(),
+                    initial: initial_value_expr.to_string(),
+                    props: script_props.clone(),
+                },
+            );
+            self.off_slots.borrow_mut().retain(|s| s != slot_key);
+        }
+        res
     }
 
     /// Local wall-clock time of day in `[0, 1)` as the script runtime's `Date` sees it
@@ -1641,6 +1710,10 @@ impl SceneScriptEngine {
         });
         self.slot_values.borrow_mut().remove(slot);
         self.handlers.set([None; 4]);
+        let mut off = self.off_slots.borrow_mut();
+        if !off.iter().any(|s| s == slot) {
+            off.push(slot.to_string());
+        }
     }
 
     /// Like [`Self::step_frame_diff`] but returns the current value of every slot and leaves
@@ -2402,6 +2475,7 @@ mod tests {
     fn slot_throwing_every_frame_is_disabled_and_reported() {
         let e = engine();
         e.set_error_disable_after(Duration::from_millis(60));
+        e.set_error_disable_min_frames(3);
         e.register_property_script(
             "bad",
             "L",
@@ -2416,9 +2490,12 @@ mod tests {
             "0",
         )
         .unwrap();
-        e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        // dt is 16 ms: 60 ms of stepped time and 3 frames need 4 frames.
+        for i in 0..3 {
+            e.step_frame_diff(&frame(&Z64, &Z64, i as f32 * 0.016))
+                .unwrap();
+        }
         assert!(e.take_failed_slots().is_empty());
-        std::thread::sleep(Duration::from_millis(80));
         e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
         assert_eq!(e.take_failed_slots(), ["bad"]);
         assert_eq!(e.take_disabled_slots(), ["bad"]);
@@ -2427,20 +2504,74 @@ mod tests {
     }
 
     #[test]
-    fn slot_that_recovers_is_not_disabled() {
+    fn error_disable_ignores_wall_time_and_needs_min_frames() {
         let e = engine();
-        e.set_error_disable_after(Duration::from_millis(60));
+        e.set_error_disable_after(Duration::from_millis(10));
         e.register_property_script(
-            "flaky",
+            "bad",
             "L",
-            "let c = 0; export function update(v) { if (++c === 1 || c === 3) throw new Error('x'); return v; }",
+            "export function update(v) { throw new Error('x'); }",
             "0",
         )
         .unwrap();
+        // Wall time passes between two throwing frames (sleep, stall): no disable.
         e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
         e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
-        std::thread::sleep(Duration::from_millis(80));
-        e.step_frame_diff(&frame(&Z64, &Z64, 0.2)).unwrap();
+        assert!(e.take_failed_slots().is_empty());
+        // Default minimum is 60 frames even once the stepped time is exceeded.
+        for i in 0..56 {
+            e.step_frame_diff(&frame(&Z64, &Z64, 0.2 + i as f32 * 0.016))
+                .unwrap();
+        }
+        assert!(e.take_failed_slots().is_empty());
+        e.step_frame_diff(&frame(&Z64, &Z64, 9.0)).unwrap();
+        e.step_frame_diff(&frame(&Z64, &Z64, 9.1)).unwrap();
+        assert_eq!(e.take_failed_slots(), ["bad"]);
+    }
+
+    #[test]
+    fn disabled_slots_come_back_with_reenable() {
+        let e = engine();
+        e.set_error_disable_after(Duration::from_millis(30));
+        e.set_error_disable_min_frames(2);
+        e.register_property_script(
+            "bad",
+            "L",
+            "export function update(v) { throw new Error('x'); }",
+            "5",
+        )
+        .unwrap();
+        for i in 0..4 {
+            e.step_frame_diff(&frame(&Z64, &Z64, i as f32 * 0.016))
+                .unwrap();
+        }
+        assert_eq!(e.take_disabled_slots(), ["bad"]);
+        assert_eq!(
+            e.reenable_disabled_slots(),
+            [("bad".to_string(), "5".to_string())]
+        );
+        assert!(e.reenable_disabled_slots().is_empty());
+        let out = e.step_frame_diff(&frame(&Z64, &Z64, 1.0)).unwrap();
+        assert!(out.slots.iter().any(|(k, _)| k == "bad"));
+    }
+
+    #[test]
+    fn slot_that_recovers_is_not_disabled() {
+        let e = engine();
+        e.set_error_disable_after(Duration::from_millis(60));
+        e.set_error_disable_min_frames(2);
+        e.register_property_script(
+            "flaky",
+            "L",
+            "let c = 0; export function update(v) { if (++c === 1 || c === 3 || c === 4) throw new Error('x'); return v; }",
+            "0",
+        )
+        .unwrap();
+        for i in 0..6 {
+            e.step_frame_diff(&frame(&Z64, &Z64, i as f32 * 0.016))
+                .unwrap();
+        }
         assert!(e.take_failed_slots().is_empty());
     }
 

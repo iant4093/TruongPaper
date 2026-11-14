@@ -47,7 +47,9 @@ const MAX_PENDING_MANUAL_NOTES: usize = 256;
 /// wait) so a slow display does not hold up the others. The rotation itself is never cancelled.
 const PLAN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a rotation waits for the per-monitor apply lock (a long manual apply holds it).
-const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Kept short: the tick joins every plan, so a long wait would hold up the rotation of the other
+/// monitors. A busy monitor is retried like a failed rotation.
+const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A failed or timed-out rotation is planned again after this delay.
 const RETRY_DELAY: Duration = Duration::from_secs(45);
 /// Retries of one rotation before the scheduler waits for the next interval.
@@ -801,11 +803,26 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
         }
     }
     for (plan, outcome) in execute(app, plans, clone_photos).await {
-        if outcome.failed {
-            scheduler.note_failed(plan, Instant::now());
-        } else {
-            scheduler.note_succeeded(&plan.monitor_id);
-        }
+        note_outcome(scheduler, plan, outcome, Instant::now());
+    }
+}
+
+/// Feeds one plan's outcome back to the scheduler. A rotation that is still running after its
+/// time limit is neither a failure nor a success: it is not retried (the retry would rotate
+/// again as soon as the first one finishes).
+fn note_outcome(
+    scheduler: &mut RotationScheduler,
+    plan: PlannedRotation,
+    outcome: PlanOutcome,
+    now: Instant,
+) {
+    if outcome.still_running {
+        return;
+    }
+    if outcome.failed {
+        scheduler.note_failed(plan, now);
+    } else {
+        scheduler.note_succeeded(&plan.monitor_id);
     }
 }
 
@@ -814,13 +831,22 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
 struct PlanOutcome {
     /// The plan asks for the shared cloned-photo draw.
     cloned_draw: bool,
-    /// The rotation failed, timed out or could not start; the scheduler retries it.
+    /// The rotation failed or could not start; the scheduler retries it.
     failed: bool,
+    /// The rotation outlived [`PLAN_TIMEOUT`] and keeps running in its own task. Not retried.
+    still_running: bool,
 }
 
 const PLAN_FAILED: PlanOutcome = PlanOutcome {
     cloned_draw: false,
     failed: true,
+    still_running: false,
+};
+
+const PLAN_STILL_RUNNING: PlanOutcome = PlanOutcome {
+    cloned_draw: false,
+    failed: false,
+    still_running: true,
 };
 
 /// Runs the planned rotations of different monitors in parallel. Each plan's wait is bounded so
@@ -872,12 +898,9 @@ async fn run_plan_with_timeout(
     clone_photos: bool,
 ) -> PlanOutcome {
     let id = plan.monitor_id.clone();
-    let guard = match tokio::time::timeout(LOCK_WAIT_TIMEOUT, lock_monitor_apply(&id)).await {
-        Ok(guard) => guard,
-        Err(_) => {
-            tracing::warn!("rotation scheduler: {id} stayed busy for {LOCK_WAIT_TIMEOUT:?}");
-            return PLAN_FAILED;
-        }
+    let Some(guard) = lock_within(&id, LOCK_WAIT_TIMEOUT).await else {
+        tracing::warn!("rotation scheduler: {id} stayed busy for {LOCK_WAIT_TIMEOUT:?}");
+        return PLAN_FAILED;
     };
     let (app, plan) = (app.clone(), plan.clone());
     let task = tokio::spawn(async move {
@@ -885,29 +908,48 @@ async fn run_plan_with_timeout(
         drop(guard);
         outcome
     });
-    wait_bounded(&id, PLAN_TIMEOUT, task)
+    match wait_bounded(&id, PLAN_TIMEOUT, task).await {
+        Bounded::Done(outcome) => outcome,
+        Bounded::Failed => PLAN_FAILED,
+        Bounded::StillRunning => PLAN_STILL_RUNNING,
+    }
+}
+
+/// Takes the monitor's apply lock, giving up after `limit`.
+async fn lock_within(id: &str, limit: Duration) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    tokio::time::timeout(limit, lock_monitor_apply(id))
         .await
-        .unwrap_or(PLAN_FAILED)
+        .ok()
+}
+
+/// How a bounded wait for a spawned rotation ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Bounded<T> {
+    Done(T),
+    /// The task panicked or was cancelled.
+    Failed,
+    /// The limit passed; the task keeps running.
+    StillRunning,
 }
 
 /// Waits for a spawned rotation at most `limit`. On timeout the task is left running (never
-/// cancelled midway) and `None` is returned.
+/// cancelled midway) and [`Bounded::StillRunning`] is returned.
 async fn wait_bounded<T>(
     id: &str,
     limit: Duration,
     mut task: tokio::task::JoinHandle<T>,
-) -> Option<T> {
+) -> Bounded<T> {
     match tokio::time::timeout(limit, &mut task).await {
-        Ok(Ok(value)) => Some(value),
+        Ok(Ok(value)) => Bounded::Done(value),
         Ok(Err(err)) => {
             tracing::warn!("rotation scheduler: rotation of {id} failed: {err}");
-            None
+            Bounded::Failed
         }
         Err(_) => {
             tracing::warn!(
                 "rotation scheduler: rotation of {id} still running after {limit:?}; it keeps going"
             );
-            None
+            Bounded::StillRunning
         }
     }
 }
@@ -971,6 +1013,7 @@ async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -
     PlanOutcome {
         cloned_draw: cloned_photo_draw,
         failed,
+        still_running: false,
     }
 }
 
@@ -987,8 +1030,37 @@ mod tests {
         );
         let quick = wait_bounded("b", Duration::from_secs(5), tokio::spawn(async { true }));
         let (stuck, quick) = tokio::join!(stuck, quick);
-        assert_eq!(stuck, None);
-        assert_eq!(quick, Some(true));
+        assert_eq!(stuck, Bounded::StillRunning);
+        assert_eq!(quick, Bounded::Done(true));
+    }
+
+    #[test]
+    fn a_rotation_still_running_is_not_retried() {
+        let t0 = Instant::now();
+        let mut s = RotationScheduler::new(0);
+        note_outcome(&mut s, photo_plan("m"), PLAN_STILL_RUNNING, t0);
+        assert!(s.retries.is_empty());
+        assert!(s.failures.is_empty());
+        note_outcome(&mut s, photo_plan("m"), PLAN_FAILED, t0);
+        assert_eq!(s.retries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_busy_monitor_is_given_up_after_the_lock_wait_only() {
+        let held = lock_monitor_apply("LOCKWAIT-A").await;
+        let started = Instant::now();
+        assert!(lock_within("LOCKWAIT-A", Duration::from_millis(30))
+            .await
+            .is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(lock_within("LOCKWAIT-B", Duration::from_millis(30))
+            .await
+            .is_some());
+        drop(held);
+        assert!(lock_within("LOCKWAIT-A", Duration::from_millis(30))
+            .await
+            .is_some());
+        assert!(LOCK_WAIT_TIMEOUT <= Duration::from_secs(10));
     }
 
     #[tokio::test]
@@ -1001,7 +1073,7 @@ mod tests {
         });
         assert_eq!(
             wait_bounded("a", Duration::from_millis(10), task).await,
-            None
+            Bounded::StillRunning
         );
         assert!(!done.load(Ordering::SeqCst));
         tokio::time::sleep(Duration::from_millis(250)).await;

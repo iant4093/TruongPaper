@@ -103,7 +103,7 @@ impl ParticleSystemInstance {
         anchor: Vec3,
         burst: bool,
     ) -> ParticleSystemInstance {
-        let mut inst = ParticleSystemInstance::new_unwarmed((**file).clone());
+        let mut inst = ParticleSystemInstance::new_unwarmed(Arc::clone(file));
         inst.anchor = anchor;
         inst.draw_scale = self.draw_scale * spec.scale.x;
         inst.overrides = self.overrides;
@@ -739,6 +739,19 @@ mod tests {
         sys.particles[0].position.x = f32::NAN;
         sys.step(0.01, Vec3::ZERO);
         assert!(sys.particles.iter().all(|p| p.position.is_finite()));
+    }
+    #[test]
+    fn child_instances_share_the_parsed_file() {
+        let mut root = parse(r#"{"maxcount":1,"children":[{"name":"s.json","type":"static"}]}"#);
+        root.resolve_children(&|p| {
+            (p == "s.json")
+                .then(|| r#"{"maxcount":1,"operator":[{"name":"movement"}]}"#.to_string())
+        });
+        let mut sys = ParticleSystemInstance::new(root);
+        sys.step(0.05, Vec3::ZERO);
+        let file = sys.groups[0].file.clone().unwrap();
+        let child = &sys.groups[0].instances[0].inst;
+        assert!(Arc::ptr_eq(&child.spec, &file));
     }
 }
 

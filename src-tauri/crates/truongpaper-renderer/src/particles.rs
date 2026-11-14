@@ -59,6 +59,9 @@ pub struct ParticleFile {
     /// The parsed file of each entry of `children` (`None` when it could not be loaded); filled
     /// by [`ParticleFile::resolve_children`].
     pub child_files: Vec<Option<std::sync::Arc<ParticleFile>>>,
+    /// `operator` compiled into typed structs on first use (shared by every instance of this
+    /// file). Edit `operator` before the first step; the cache is not invalidated.
+    compiled_operators: std::sync::OnceLock<std::sync::Arc<[Operator]>>,
 }
 
 /// How a child system is spawned from its parent.
@@ -253,6 +256,13 @@ impl ParticleControlPointSpec {
 }
 
 impl ParticleFile {
+    /// The compiled operator list, built once per file.
+    pub(crate) fn operators(&self) -> std::sync::Arc<[Operator]> {
+        self.compiled_operators
+            .get_or_init(|| self.operator.iter().map(Operator::compile).collect())
+            .clone()
+    }
+
     /// Decodes a Wallpaper Engine `particles/*.json` document.
     pub fn from_json_str(src: &str) -> Result<Self, ParticleSpecError> {
         Self::from_json(&Value::parse(src)?)
@@ -291,6 +301,7 @@ impl ParticleFile {
                 .map(ParticleChildSpec::from_json)
                 .collect(),
             child_files: Vec::new(),
+            compiled_operators: std::sync::OnceLock::new(),
         })
     }
 
@@ -383,7 +394,7 @@ impl Default for ParticleOverrides {
 
 pub struct ParticleSystemInstance {
     pub overrides: ParticleOverrides,
-    pub spec: ParticleFile,
+    pub spec: std::sync::Arc<ParticleFile>,
     pub particles: Vec<SingleParticle>,
     pub emit_accumulators: Vec<f32>,
     pub control_points: [Vec3; 8],
@@ -411,7 +422,7 @@ pub struct ParticleSystemInstance {
 
 impl ParticleSystemInstance {
     pub fn new(spec: ParticleFile) -> Self {
-        let mut inst = Self::new_unwarmed(spec);
+        let mut inst = Self::new_unwarmed(std::sync::Arc::new(spec));
         inst.prewarm();
         inst
     }
@@ -427,7 +438,7 @@ impl ParticleSystemInstance {
         }
     }
 
-    pub fn new_unwarmed(spec: ParticleFile) -> Self {
+    pub fn new_unwarmed(spec: std::sync::Arc<ParticleFile>) -> Self {
         let max_count = spec.maxcount.clamp(1, 10_000) as usize;
         let mut control_points = [Vec3::ZERO; 8];
         for cp in &spec.controlpoint {
@@ -517,7 +528,8 @@ impl ParticleSystemInstance {
 
         // 2. Spawn new particles from emitters
         let max_count = self.max_count();
-        for (e_idx, emitter) in self.spec.emitter.clone().iter().enumerate() {
+        let spec = self.spec.clone();
+        for (e_idx, emitter) in spec.emitter.iter().enumerate() {
             let mut to_spawn = 0usize;
             if !self.spawned_instantaneous && emitter.instantaneous > 0 {
                 to_spawn += emitter.instantaneous as usize;
@@ -552,7 +564,7 @@ impl ParticleSystemInstance {
         self.spawned_instantaneous = true;
 
         // 3. Run operators and integrate active particles
-        let operators = self.spec.operator.clone();
+        let operators = self.spec.operators();
         let cps = self.control_points;
         let time = self.elapsed_time;
 
@@ -570,130 +582,8 @@ impl ParticleSystemInstance {
             }
             let life_frac = (p.age / p.lifetime.max(0.0001)).clamp(0.0, 1.0);
 
-            for op in &operators {
-                let op_name = op.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                match op_name {
-                    "movement" => {
-                        let gravity = parse_vec3_json(op.get("gravity"), Vec3::ZERO);
-                        let drag = op.get("drag").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        p.velocity += gravity * dt;
-                        p.velocity *= (1.0 - drag * dt).max(0.0);
-                        p.position += p.velocity * dt;
-                    }
-                    "angularmovement" => {
-                        let drag = op.get("drag").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let force = parse_vec3_json(op.get("force"), Vec3::ZERO);
-                        p.angular_velocity += force * dt;
-                        p.angular_velocity *= (1.0 - drag * dt).max(0.0);
-                        p.rotation += p.angular_velocity * dt;
-                    }
-                    "alphafade" => {
-                        // Wallpaper Engine's defaults are 0.5 / 0.5 (linux-wallpaperengine's
-                        // ObjectParser agrees): fade in over the first half, out over the second.
-                        let fade_in =
-                            op.get("fadeintime").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
-                        let fade_out = op
-                            .get("fadeouttime")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.5) as f32;
-                        let factor = if life_frac < fade_in && fade_in > 0.0 {
-                            life_frac / fade_in
-                        } else if life_frac > fade_out && fade_out < 1.0 {
-                            1.0 - (life_frac - fade_out) / (1.0 - fade_out)
-                        } else {
-                            1.0
-                        };
-                        p.alpha = p.initial_alpha * factor.clamp(0.0, 1.0);
-                    }
-                    "sizechange" => {
-                        let st = op.get("starttime").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let et = op.get("endtime").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                        let sv =
-                            op.get("startvalue").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                        let ev = op.get("endvalue").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let t = ((life_frac - st) / (et - st).max(0.0001)).clamp(0.0, 1.0);
-                        p.size = p.initial_size * (sv + (ev - sv) * t);
-                    }
-                    "colorchange" => {
-                        let st = op.get("starttime").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let et = op.get("endtime").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                        let sv = parse_vec3_json(op.get("startvalue"), Vec3::ONE);
-                        let ev = parse_vec3_json(op.get("endvalue"), Vec3::ONE);
-                        let t = ((life_frac - st) / (et - st).max(0.0001)).clamp(0.0, 1.0);
-                        p.color = p.initial_color * sv.lerp(ev, t);
-                    }
-                    "oscillateposition" => {
-                        let freq = op
-                            .get("frequencymax")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(1.0) as f32;
-                        let scale =
-                            op.get("scalemax").and_then(|v| v.as_f64()).unwrap_or(5.0) as f32;
-                        let mask = parse_vec3_json(op.get("mask"), Vec3::new(1.0, 1.0, 0.0));
-                        let wave =
-                            (time * freq + p.noise_seed * std::f32::consts::TAU).sin() * scale;
-                        p.position += mask * wave * dt;
-                    }
-                    "turbulence" => {
-                        let speed =
-                            op.get("speedmax").and_then(|v| v.as_f64()).unwrap_or(50.0) as f32;
-                        let scale = op.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.01) as f32;
-                        let mask = parse_vec3_json(op.get("mask"), Vec3::new(1.0, 1.0, 0.0));
-                        let nx = ((p.position.y * scale + time + p.noise_seed).sin()
-                            + (p.position.x * scale * 0.7 - time).cos())
-                            * 0.5;
-                        let ny = ((p.position.x * scale + time * 1.3 + p.noise_seed).cos()
-                            - (p.position.y * scale * 0.7 + time).sin())
-                            * 0.5;
-                        p.velocity += Vec3::new(nx, ny, 0.0) * mask * speed * dt;
-                    }
-                    "vortex" => {
-                        let cp_id =
-                            op.get("controlpoint").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let center = cps.get(cp_id).copied().unwrap_or(Vec3::ZERO)
-                            + parse_vec3_json(op.get("offset"), Vec3::ZERO);
-                        let axis = parse_vec3_json(op.get("axis"), Vec3::Z).normalize_or_zero();
-                        let r_vec = p.position - center;
-                        let dist = r_vec.length().max(0.001);
-                        let inner = op
-                            .get("distanceinner")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0) as f32;
-                        let outer = op
-                            .get("distanceouter")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(250.0) as f32;
-                        let s_in = op
-                            .get("speedinner")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(100.0) as f32;
-                        let s_out =
-                            op.get("speedouter").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let t = ((dist - inner) / (outer - inner).max(0.001)).clamp(0.0, 1.0);
-                        let speed = s_in + (s_out - s_in) * t;
-                        let tangent = axis.cross(r_vec / dist).normalize_or_zero();
-                        p.velocity += tangent * speed * dt;
-                    }
-                    "controlpointattract" => {
-                        let cp_id =
-                            op.get("controlpoint").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let center = cps.get(cp_id).copied().unwrap_or(Vec3::ZERO)
-                            + parse_vec3_json(op.get("origin"), Vec3::ZERO);
-                        let scale =
-                            op.get("scale").and_then(|v| v.as_f64()).unwrap_or(200.0) as f32;
-                        let threshold = op
-                            .get("threshold")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(512.0) as f32;
-                        let to_cp = center - p.position;
-                        let dist = to_cp.length();
-                        if dist > 0.001 && dist < threshold {
-                            let falloff = 1.0 - (dist / threshold);
-                            p.velocity += (to_cp / dist) * scale * falloff * dt;
-                        }
-                    }
-                    _ => {}
-                }
+            for op in operators.iter() {
+                op.apply(p, dt, life_frac, time, &cps);
             }
             // A NaN / inf from a bad expression would corrupt the vertex buffer.
             p.position.is_finite()
@@ -753,7 +643,8 @@ impl ParticleSystemInstance {
             id: 0,
         };
 
-        for init in &self.spec.initializer.clone() {
+        let spec = self.spec.clone();
+        for init in &spec.initializer {
             let name = init.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match name {
                 "lifetimerandom" => {
@@ -920,6 +811,221 @@ impl ParticleSystemInstance {
     }
 }
 
+/// A particle operator parsed once from its JSON object (defaults match Wallpaper Engine's).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Operator {
+    Movement {
+        gravity: Vec3,
+        drag: f32,
+    },
+    AngularMovement {
+        drag: f32,
+        force: Vec3,
+    },
+    AlphaFade {
+        fade_in: f32,
+        fade_out: f32,
+    },
+    SizeChange {
+        start: f32,
+        end: f32,
+        start_value: f32,
+        end_value: f32,
+    },
+    ColorChange {
+        start: f32,
+        end: f32,
+        start_value: Vec3,
+        end_value: Vec3,
+    },
+    OscillatePosition {
+        frequency: f32,
+        scale: f32,
+        mask: Vec3,
+    },
+    Turbulence {
+        speed: f32,
+        scale: f32,
+        mask: Vec3,
+    },
+    Vortex {
+        control_point: usize,
+        offset: Vec3,
+        axis: Vec3,
+        inner: f32,
+        outer: f32,
+        speed_inner: f32,
+        speed_outer: f32,
+    },
+    ControlPointAttract {
+        control_point: usize,
+        origin: Vec3,
+        scale: f32,
+        threshold: f32,
+    },
+    /// Unknown operator: ignored.
+    Other,
+}
+
+impl Operator {
+    pub(crate) fn compile(op: &Value) -> Self {
+        let num = |key: &str, default: f32| {
+            op.get(key)
+                .and_then(|v| v.as_f64())
+                .map_or(default, |n| n as f32)
+        };
+        let vec3 = |key: &str, default: Vec3| parse_vec3_json(op.get(key), default);
+        let index = |key: &str| op.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        match op.get("name").and_then(|v| v.as_str()).unwrap_or("") {
+            "movement" => Self::Movement {
+                gravity: vec3("gravity", Vec3::ZERO),
+                drag: num("drag", 0.0),
+            },
+            "angularmovement" => Self::AngularMovement {
+                drag: num("drag", 0.0),
+                force: vec3("force", Vec3::ZERO),
+            },
+            // Wallpaper Engine's defaults are 0.5 / 0.5 (linux-wallpaperengine's ObjectParser
+            // agrees): fade in over the first half, out over the second.
+            "alphafade" => Self::AlphaFade {
+                fade_in: num("fadeintime", 0.5),
+                fade_out: num("fadeouttime", 0.5),
+            },
+            "sizechange" => Self::SizeChange {
+                start: num("starttime", 0.0),
+                end: num("endtime", 1.0),
+                start_value: num("startvalue", 1.0),
+                end_value: num("endvalue", 0.0),
+            },
+            "colorchange" => Self::ColorChange {
+                start: num("starttime", 0.0),
+                end: num("endtime", 1.0),
+                start_value: vec3("startvalue", Vec3::ONE),
+                end_value: vec3("endvalue", Vec3::ONE),
+            },
+            "oscillateposition" => Self::OscillatePosition {
+                frequency: num("frequencymax", 1.0),
+                scale: num("scalemax", 5.0),
+                mask: vec3("mask", Vec3::new(1.0, 1.0, 0.0)),
+            },
+            "turbulence" => Self::Turbulence {
+                speed: num("speedmax", 50.0),
+                scale: num("scale", 0.01),
+                mask: vec3("mask", Vec3::new(1.0, 1.0, 0.0)),
+            },
+            "vortex" => Self::Vortex {
+                control_point: index("controlpoint"),
+                offset: vec3("offset", Vec3::ZERO),
+                axis: vec3("axis", Vec3::Z).normalize_or_zero(),
+                inner: num("distanceinner", 0.0),
+                outer: num("distanceouter", 250.0),
+                speed_inner: num("speedinner", 100.0),
+                speed_outer: num("speedouter", 0.0),
+            },
+            "controlpointattract" => Self::ControlPointAttract {
+                control_point: index("controlpoint"),
+                origin: vec3("origin", Vec3::ZERO),
+                scale: num("scale", 200.0),
+                threshold: num("threshold", 512.0),
+            },
+            _ => Self::Other,
+        }
+    }
+
+    /// Advances one particle by `dt` (`life_frac` is its normalized age, `time` the system clock).
+    fn apply(&self, p: &mut SingleParticle, dt: f32, life_frac: f32, time: f32, cps: &[Vec3; 8]) {
+        match *self {
+            Self::Movement { gravity, drag } => {
+                p.velocity += gravity * dt;
+                p.velocity *= (1.0 - drag * dt).max(0.0);
+                p.position += p.velocity * dt;
+            }
+            Self::AngularMovement { drag, force } => {
+                p.angular_velocity += force * dt;
+                p.angular_velocity *= (1.0 - drag * dt).max(0.0);
+                p.rotation += p.angular_velocity * dt;
+            }
+            Self::AlphaFade { fade_in, fade_out } => {
+                let factor = if life_frac < fade_in && fade_in > 0.0 {
+                    life_frac / fade_in
+                } else if life_frac > fade_out && fade_out < 1.0 {
+                    1.0 - (life_frac - fade_out) / (1.0 - fade_out)
+                } else {
+                    1.0
+                };
+                p.alpha = p.initial_alpha * factor.clamp(0.0, 1.0);
+            }
+            Self::SizeChange {
+                start,
+                end,
+                start_value,
+                end_value,
+            } => {
+                let t = ((life_frac - start) / (end - start).max(0.0001)).clamp(0.0, 1.0);
+                p.size = p.initial_size * (start_value + (end_value - start_value) * t);
+            }
+            Self::ColorChange {
+                start,
+                end,
+                start_value,
+                end_value,
+            } => {
+                let t = ((life_frac - start) / (end - start).max(0.0001)).clamp(0.0, 1.0);
+                p.color = p.initial_color * start_value.lerp(end_value, t);
+            }
+            Self::OscillatePosition {
+                frequency,
+                scale,
+                mask,
+            } => {
+                let wave = (time * frequency + p.noise_seed * std::f32::consts::TAU).sin() * scale;
+                p.position += mask * wave * dt;
+            }
+            Self::Turbulence { speed, scale, mask } => {
+                let nx = ((p.position.y * scale + time + p.noise_seed).sin()
+                    + (p.position.x * scale * 0.7 - time).cos())
+                    * 0.5;
+                let ny = ((p.position.x * scale + time * 1.3 + p.noise_seed).cos()
+                    - (p.position.y * scale * 0.7 + time).sin())
+                    * 0.5;
+                p.velocity += Vec3::new(nx, ny, 0.0) * mask * speed * dt;
+            }
+            Self::Vortex {
+                control_point,
+                offset,
+                axis,
+                inner,
+                outer,
+                speed_inner,
+                speed_outer,
+            } => {
+                let center = cps.get(control_point).copied().unwrap_or(Vec3::ZERO) + offset;
+                let r_vec = p.position - center;
+                let dist = r_vec.length().max(0.001);
+                let t = ((dist - inner) / (outer - inner).max(0.001)).clamp(0.0, 1.0);
+                let speed = speed_inner + (speed_outer - speed_inner) * t;
+                let tangent = axis.cross(r_vec / dist).normalize_or_zero();
+                p.velocity += tangent * speed * dt;
+            }
+            Self::ControlPointAttract {
+                control_point,
+                origin,
+                scale,
+                threshold,
+            } => {
+                let center = cps.get(control_point).copied().unwrap_or(Vec3::ZERO) + origin;
+                let to_cp = center - p.position;
+                let dist = to_cp.length();
+                if dist > 0.001 && dist < threshold {
+                    let falloff = 1.0 - (dist / threshold);
+                    p.velocity += (to_cp / dist) * scale * falloff * dt;
+                }
+            }
+            Self::Other => {}
+        }
+    }
+}
+
 pub fn parse_vec3_str(s: &str, default: Vec3) -> Vec3 {
     let mut it = s.split_whitespace().filter_map(|p| p.parse::<f32>().ok());
     match (it.next(), it.next(), it.next()) {
@@ -980,5 +1086,81 @@ mod override_tests {
         });
         slow.step(1.0, Vec3::ZERO);
         assert_eq!(slow.particles.len(), 10);
+    }
+    fn particle() -> SingleParticle {
+        SingleParticle {
+            position: Vec3::ZERO,
+            initial_position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            color: Vec3::ONE,
+            initial_color: Vec3::ONE,
+            alpha: 1.0,
+            initial_alpha: 1.0,
+            size: 10.0,
+            initial_size: 10.0,
+            age: 0.0,
+            lifetime: 1.0,
+            noise_seed: 0.0,
+            alive: true,
+            id: 1,
+        }
+    }
+
+    fn compile(json: &str) -> Operator {
+        Operator::compile(&Value::parse(json).unwrap())
+    }
+
+    #[test]
+    fn operators_compile_with_wallpaper_engine_defaults() {
+        assert_eq!(
+            compile(r#"{"name":"alphafade"}"#),
+            Operator::AlphaFade {
+                fade_in: 0.5,
+                fade_out: 0.5
+            }
+        );
+        assert_eq!(
+            compile(r#"{"name":"movement","gravity":"0 -100 0","drag":2}"#),
+            Operator::Movement {
+                gravity: Vec3::new(0.0, -100.0, 0.0),
+                drag: 2.0
+            }
+        );
+        assert_eq!(compile(r#"{"name":"nope"}"#), Operator::Other);
+        assert_eq!(compile(r#"{}"#), Operator::Other);
+    }
+
+    #[test]
+    fn compiled_operators_move_and_fade_a_particle() {
+        let cps = [Vec3::ZERO; 8];
+        let mut p = particle();
+        let gravity = compile(r#"{"name":"movement","gravity":"0 -10 0"}"#);
+        gravity.apply(&mut p, 0.5, 0.0, 0.0, &cps);
+        assert_eq!(p.velocity, Vec3::new(0.0, -5.0, 0.0));
+        assert_eq!(p.position, Vec3::new(0.0, -2.5, 0.0));
+
+        let fade = compile(r#"{"name":"alphafade","fadeintime":0.5,"fadeouttime":0.5}"#);
+        fade.apply(&mut p, 0.0, 0.25, 0.0, &cps);
+        assert!((p.alpha - 0.5).abs() < 1e-6);
+        fade.apply(&mut p, 0.0, 0.75, 0.0, &cps);
+        assert!((p.alpha - 0.5).abs() < 1e-6);
+
+        let size = compile(r#"{"name":"sizechange","startvalue":1,"endvalue":0}"#);
+        size.apply(&mut p, 0.0, 0.5, 0.0, &cps);
+        assert!((p.size - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn operators_are_compiled_once_per_file() {
+        let file = ParticleFile::from_json_str(
+            r#"{"maxcount":1,"operator":[{"name":"movement"},{"name":"alphafade"}]}"#,
+        )
+        .unwrap();
+        let a = file.operators();
+        let b = file.operators();
+        assert_eq!(a.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 }

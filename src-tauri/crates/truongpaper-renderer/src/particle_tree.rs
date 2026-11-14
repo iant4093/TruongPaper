@@ -240,8 +240,16 @@ impl ParticleSystemInstance {
                     rotation_xy: uv,
                 });
             }
-            geo.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            if !geo.skip_sprite_indices {
+                geo.indices.extend_from_slice(&[
+                    base,
+                    base + 1,
+                    base + 2,
+                    base,
+                    base + 2,
+                    base + 3,
+                ]);
+            }
         }
     }
 
@@ -252,18 +260,14 @@ impl ParticleSystemInstance {
         if n < 2 {
             return;
         }
-        let pts: Vec<Vec3> = self
-            .particles
-            .iter()
-            .map(|p| self.abs_position(p))
-            .collect();
+        let pt = |i: usize| self.abs_position(&self.particles[i]);
         let first = geo.vertices.len();
         for (i, p) in self.particles.iter().enumerate() {
             if geo.vertices.len() + 2 > u16::MAX as usize {
                 break;
             }
-            let prev = pts[i.saturating_sub(1)];
-            let next = pts[(i + 1).min(n - 1)];
+            let prev = pt(i.saturating_sub(1));
+            let next = pt((i + 1).min(n - 1));
             let dir = (next - prev).truncate().normalize_or_zero();
             let normal = Vec3::new(-dir.y, dir.x, 0.0);
             let half = p.size * 0.5 * self.draw_scale;
@@ -271,7 +275,7 @@ impl ParticleSystemInstance {
             let norm_age = (p.age / p.lifetime.max(0.0001)).clamp(0.0, 1.0);
             for (side, u) in [(1.0f32, 0.0f32), (-1.0, 1.0)] {
                 geo.vertices.push(SpriteParticleVertex {
-                    position: (pts[i] + normal * half * side).to_array(),
+                    position: (pt(i) + normal * half * side).to_array(),
                     texcoord_rot_size: [u, v, 0.0, 0.0],
                     color: [p.color.x, p.color.y, p.color.z, p.alpha],
                     velocity_life: [p.velocity.x, p.velocity.y, p.velocity.z, norm_age],
@@ -317,6 +321,9 @@ pub struct DrawSetPlan {
 pub struct SetGeometry {
     pub vertices: Vec<SpriteParticleVertex>,
     pub indices: Vec<u16>,
+    /// The caller draws sprites with a fixed quad index pattern, so `push_sprites` leaves
+    /// `indices` empty.
+    pub skip_sprite_indices: bool,
 }
 
 impl SetGeometry {
@@ -526,6 +533,30 @@ mod tests {
     }
 
     #[test]
+    fn skipped_sprite_indices_leave_the_index_list_empty_but_keep_vertices() {
+        let mut sys = ParticleSystemInstance::new(tree());
+        let plan = plan_draw_sets(&sys.spec);
+        for _ in 0..30 {
+            sys.step(0.05, Vec3::ZERO);
+        }
+        let mut full = vec![SetGeometry::default(); plan.len()];
+        sys.gather_geometry(&plan, &[], &mut full);
+        let mut skip: Vec<SetGeometry> = plan
+            .iter()
+            .map(|e| SetGeometry {
+                skip_sprite_indices: !e.rope,
+                ..SetGeometry::default()
+            })
+            .collect();
+        sys.gather_geometry(&plan, &[], &mut skip);
+        assert_eq!(full[0].vertices.len(), skip[0].vertices.len());
+        assert!(!full[0].indices.is_empty());
+        assert!(skip[0].indices.is_empty());
+        // Ropes keep their indices.
+        assert_eq!(full[1].indices, skip[1].indices);
+    }
+
+    #[test]
     fn fit_drops_triangles_with_missing_vertices() {
         let v = SpriteParticleVertex {
             position: [0.0; 3],
@@ -537,6 +568,7 @@ mod tests {
         let mut g = SetGeometry {
             vertices: vec![v; 6],
             indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            ..SetGeometry::default()
         };
         g.fit(10);
         assert_eq!(g.indices.len(), 6);

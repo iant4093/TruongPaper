@@ -254,6 +254,7 @@ export const IPC_COMMANDS = [
   'photo_trigger_refill',
   'photo_retry_now',
   'photo_add_album',
+  'photo_list_albums',
   'photo_toggle_album',
   'photo_remove_album',
   'photo_set_filter',
@@ -273,6 +274,7 @@ export const IPC_COMMANDS = [
   'steam_submit_2fa_code',
   'steam_logout',
   'steam_cancel_login',
+  'steam_cancel_download',
   'steam_account',
   'steam_sync_local_folders',
   'library_list_wallpapers',
@@ -287,6 +289,7 @@ export const IPC_COMMANDS = [
   'monitor_update_adjustments',
   'wallpaper_save_preset',
   'wallpaper_apply_preset',
+  'wallpaper_list_presets',
   'playback_set_paused',
   'playback_next',
   'monitor_set_volume',
@@ -301,6 +304,7 @@ export const IPC_COMMANDS = [
   'runtime_get_memory_usage',
   'backup_export',
   'backup_import',
+  'playlist_export',
 ] as const;
 
 export type IpcCommand = (typeof IPC_COMMANDS)[number];

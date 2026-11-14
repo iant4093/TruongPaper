@@ -21,7 +21,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => undefined),
 }));
 
-import { useAppStore } from '../src/store/useAppStore';
+import { legacyAlbumsToMigrate, mergeNewWallpapers, useAppStore } from '../src/store/useAppStore';
 import { IPC_COMMANDS } from '../src/types/ipc';
 
 const status = { filterMode: 'all', featuredOnly: false, unusedQueue: [], favoritePhotos: [], currentPhotoByMonitor: {}, cachedBytes: 0, maxCacheBytes: 1, historyCount: 0, blacklistCount: 0, isRefilling: false, rateLimitRemaining: 100 };
@@ -70,7 +70,7 @@ describe('store → invoke() contract', () => {
   it('refreshAll loads status, monitors, library, settings, playlists and the Steam account', async () => {
     await useAppStore.getState().refreshAll();
     expect(calls().map((c) => c[0]).sort()).toEqual(
-      ['library_list_wallpapers', 'monitors_list', 'photo_get_status', 'playlist_list', 'settings_get', 'steam_account'].sort()
+      ['library_list_wallpapers', 'monitors_list', 'photo_get_status', 'photo_list_albums', 'playlist_list', 'settings_get', 'steam_account', 'wallpaper_list_presets'].sort()
     );
     expect(useAppStore.getState().selectedMonitorId).toBe('M1');
     expect(useAppStore.getState().selectedWallpaperId).toBeNull();
@@ -119,11 +119,132 @@ describe('store → invoke() contract', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('persists saved albums and presets across store instances via localStorage', async () => {
+  it('loads saved albums and presets from the backend in refreshAll', async () => {
+    const album = { albumSlug: 'cape-horn-11-7', displayName: 'Cape Horn', albumUrl: '', isEnabled: true, addedAt: 1 };
+    const preset = { presetId: 'p1', wallpaperId: 'workshop:1', name: 'Night', properties: {}, adjustments: {} };
+    responses.photo_list_albums = [album];
+    responses.wallpaper_list_presets = { 'workshop:1': [preset] };
+    try {
+      await useAppStore.getState().refreshAll();
+      expect(useAppStore.getState().savedAlbums).toEqual([album]);
+      expect(useAppStore.getState().presetsByWallpaper['workshop:1']).toEqual([preset]);
+      expect(useAppStore.getState().loaded).toBe(true);
+    } finally {
+      delete responses.photo_list_albums;
+      delete responses.wallpaper_list_presets;
+    }
+  });
+
+  it('moves albums kept only in localStorage into the backend once', async () => {
+    const local = { albumSlug: 'old-album-1', displayName: 'Old', albumUrl: '', isEnabled: false, addedAt: 1 };
+    localStorage.setItem('truongpaper.savedAlbums', JSON.stringify([local]));
+    responses.photo_list_albums = [];
+    try {
+      await useAppStore.getState().refreshAll();
+      await vi.waitFor(() => expect(localStorage.getItem('truongpaper.savedAlbums')).toBeNull());
+      expect(calls()).toContainEqual(['photo_add_album', { urlOrSlug: 'old-album-1', displayName: 'Old' }]);
+      expect(calls()).toContainEqual(['photo_toggle_album', { albumSlug: 'old-album-1', enabled: false }]);
+      // A second refresh does not import again.
+      invokeMock.mockClear();
+      await useAppStore.getState().refreshAll();
+      expect(calls().some(([cmd]) => cmd === 'photo_add_album')).toBe(false);
+    } finally {
+      delete responses.photo_list_albums;
+    }
+  });
+
+  it('keeps the old albums for the next launch when the import fails', async () => {
+    localStorage.setItem('truongpaper.savedAlbums', JSON.stringify([{ albumSlug: 'old-album-1', displayName: 'Old' }]));
+    responses.photo_list_albums = [];
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'photo_add_album') throw new Error('offline');
+      return responses[cmd] ?? null;
+    });
+    try {
+      await useAppStore.getState().refreshAll();
+      await vi.waitFor(() => expect(calls().some(([cmd]) => cmd === 'photo_add_album')).toBe(true));
+      await Promise.resolve();
+      expect(localStorage.getItem('truongpaper.savedAlbums')).not.toBeNull();
+    } finally {
+      delete responses.photo_list_albums;
+    }
+  });
+
+  it('adds and removes albums in the store without touching localStorage', async () => {
     await useAppStore.getState().addAlbum('cape-horn-11-7');
-    expect(JSON.parse(localStorage.getItem('truongpaper.savedAlbums')!)).toHaveLength(1);
+    expect(useAppStore.getState().savedAlbums).toHaveLength(1);
+    expect(localStorage.getItem('truongpaper.savedAlbums')).toBeNull();
     await useAppStore.getState().savePreset('workshop:1', 'Night');
     expect(useAppStore.getState().presetsByWallpaper['workshop:1'][0].presetId).toBe('p1');
+  });
+
+  it('applyPreset re-lists wallpapers when the preset is not in the local list', async () => {
+    await useAppStore.getState().applyPreset('workshop:1', 'unknown');
+    expect(calls().map(([cmd]) => cmd)).toEqual(['wallpaper_apply_preset', 'library_list_wallpapers']);
+  });
+
+  it('only the newest settings write publishes its result', async () => {
+    useAppStore.setState({ settings: { fpsCap: 30, qualityPreset: 'low' } as never });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reads = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'settings_update') { await gate; return null; }
+      if (cmd === 'settings_get') { reads += 1; return { fpsCap: reads === 1 ? 30 : 60, qualityPreset: 'high' }; }
+      return null;
+    });
+    const first = useAppStore.getState().updateSettings({ fpsCap: 30 });
+    expect(useAppStore.getState().settings).toMatchObject({ fpsCap: 30 });
+    const second = useAppStore.getState().updateSettings({ fpsCap: 60 });
+    expect(useAppStore.getState().settings).toMatchObject({ fpsCap: 60 });
+    release();
+    await Promise.all([first, second]);
+    expect(useAppStore.getState().settings).toMatchObject({ fpsCap: 60 });
+  });
+
+  it('a failed settings write puts back what the backend has', async () => {
+    useAppStore.setState({ settings: { fpsCap: 30 } as never });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'settings_update') throw new Error('no');
+      if (cmd === 'settings_get') return { fpsCap: 30 };
+      return null;
+    });
+    await expect(useAppStore.getState().updateSettings({ fpsCap: 99 } as never)).rejects.toThrow('no');
+    expect(useAppStore.getState().settings).toMatchObject({ fpsCap: 30 });
+  });
+
+  it('a failed apply still refreshes the display list', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'monitor_apply_wallpaper') throw new Error('bad scene');
+      if (cmd === 'monitors_list') return [{ monitorId: 'M1', userPaused: false, name: 'fresh' }];
+      return null;
+    });
+    await expect(useAppStore.getState().applyMonitorSource('M1', { kind: 'photo_api' })).rejects.toThrow('bad scene');
+    expect(useAppStore.getState().monitors[0]).toMatchObject({ name: 'fresh' });
+  });
+
+  it('cancelWorkshopDownload and exportPlaylists call their commands', async () => {
+    await useAppStore.getState().cancelWorkshopDownload('123');
+    await useAppStore.getState().exportPlaylists('/tmp/p.json', '{}');
+    expect(calls()).toEqual([
+      ['steam_cancel_download', { urlOrId: '123' }],
+      ['playlist_export', { path: '/tmp/p.json', contents: '{}' }],
+    ]);
+  });
+
+  it('mergeNewWallpapers keeps local edits and appends only new items', () => {
+    const edited = { wallpaperId: 'a', userProperties: { x: 1 } } as never;
+    const merged = mergeNewWallpapers([edited], [{ wallpaperId: 'a', userProperties: {} } as never, { wallpaperId: 'b' } as never]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toBe(edited);
+    const same = [edited];
+    expect(mergeNewWallpapers(same, [{ wallpaperId: 'a' } as never])).toBe(same);
+  });
+
+  it('legacyAlbumsToMigrate skips albums the backend already has', () => {
+    const a = { albumSlug: 'a' } as never;
+    const b = { albumSlug: 'b' } as never;
+    expect(legacyAlbumsToMigrate([a, b], [a])).toEqual([b]);
   });
 
   it('surfaces Steam auth failures in steamAuthError instead of throwing', async () => {

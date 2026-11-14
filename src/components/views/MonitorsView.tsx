@@ -1,6 +1,6 @@
 // src/components/views/MonitorsView.tsx
 // §2.5 View 4: "Monitors & Fit" View
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Copy, Lock } from 'lucide-react';
 import { currentWallpaperForMonitor, useAppStore } from '../../store/useAppStore';
@@ -67,11 +67,11 @@ export const MonitorsView: React.FC = () => {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const [msg, setMsg] = useState<string | null>(null);
-  const showsOptions = [
+  const showsOptions = useMemo(() => [
     ['photo_api', 'Photos'] as const,
     ...wallpapers.filter((w) => w.type !== 'photo').map((w) => [`w:${w.wallpaperId}`, w.title] as const),
     ...playlists.map((p) => [`p:${p.playlistId}`, `Playlist: ${p.name}`] as const),
-  ];
+  ], [wallpapers, playlists]);
   const setShows = (monitor: MonitorInfo, key: string) => {
     const source = sourceFromKey(key);
     const label = showsOptions.find(([k]) => k === key)?.[1] ?? 'Photos';
@@ -107,7 +107,7 @@ export const MonitorsView: React.FC = () => {
       }
       toast.success(`Showing ${describeSource(active.activeSource, lookup)} on all displays`);
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
+      toast.error(err, 'Could not show it on every display');
     }
   };
   const report = (action: Promise<unknown>) => {

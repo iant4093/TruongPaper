@@ -2059,6 +2059,7 @@ invoke<PhotoItem>('photo_rotate_next', { monitorId?: string });
 invoke<void>('photo_trigger_refill');
 invoke<void>('photo_retry_now'); // clears the offline / throttle backoff, then refills
 invoke<SavedAlbum>('photo_add_album', { urlOrSlug: string, displayName?: string });
+invoke<SavedAlbum[]>('photo_list_albums'); // Saved albums, oldest first
 invoke<void>('photo_toggle_album', { albumSlug: string, enabled: boolean });
 invoke<void>('photo_remove_album', { albumSlug: string });
 invoke<void>('photo_set_filter', { mode: FilterMode, featuredOnly: boolean });
@@ -2078,6 +2079,7 @@ invoke<string>('steam_login_qr'); // Resolves with the account name after the ph
 invoke<string>('steam_login_credentials', { username: string, password: string });
 invoke<void>('steam_submit_2fa_code', { code: string });
 invoke<void>('steam_cancel_login'); // Stops a running sign-in when the window closes
+invoke<void>('steam_cancel_download', { urlOrId: string }); // Stops a running download; the download call then fails with "Download cancelled."
 invoke<string | null>('steam_account'); // Saved account name, or null when signed out
 invoke<void>('steam_logout');
 invoke<WallpaperItem[]>('steam_sync_local_folders');
@@ -2094,6 +2096,7 @@ invoke<void>('monitor_update_property', { wallpaperId: string, propKey: string, 
 invoke<void>('monitor_update_adjustments', { wallpaperId: string, adjustments: UniversalAdjustments });
 invoke<WallpaperPreset>('wallpaper_save_preset', { wallpaperId: string, presetName: string });
 invoke<void>('wallpaper_apply_preset', { wallpaperId: string, presetId: string });
+invoke<PresetsByWallpaper>('wallpaper_list_presets'); // PresetsByWallpaper = Record<wallpaperId, WallpaperPreset[]>: every saved preset
 invoke<void>('playback_set_paused', { monitorId?: string, paused: boolean });
 invoke<void>('playback_next', { monitorId: string }); // next photo, or next playlist item, on that display
 invoke<void>('monitor_set_volume', { monitorId: string, volume: number }); // 0..1, multiplies the wallpaper volume; only the sound owner of a wallpaper is audible
@@ -2108,6 +2111,7 @@ invoke<string>('update_feed_status');
 invoke<void>('runtime_shutdown_for_update');
 invoke<RuntimeMemoryUsage>('runtime_get_memory_usage'); // { residentBytes: number }, main process RAM only
 invoke<BackupSummary>('backup_export', { path: string }); // one JSON file, no secrets / Steam account data
+invoke<void>('playlist_export', { path: string, contents: string }); // writes the playlist export JSON the UI built to the chosen file
 invoke<BackupSummary>('backup_import', { path: string }); // validates format/version, <= 10 MB; BackupSummary { settings: boolean, playlists: number, favorites: number, wallpapers: number, missingWorkshopIds: string[] }
 ```
 

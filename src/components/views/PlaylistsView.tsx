@@ -1,6 +1,7 @@
 // src/components/views/PlaylistsView.tsx
 // §2.4 View 3: "Unified Playlists & Rotation" View
 import React, { useRef, useState } from 'react';
+import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { Download, Pencil, Plus, Save, Trash2, Upload } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { PLAYLIST_MODE_LABEL, ROTATION_INTERVALS, plural } from '../../lib/format';
@@ -54,6 +55,7 @@ export const PlaylistsView: React.FC = () => {
   const savedAlbums = useAppStore((s) => s.savedAlbums);
   const presetsByWallpaper = useAppStore((s) => s.presetsByWallpaper);
   const savePlaylist = useAppStore((s) => s.savePlaylist);
+  const exportPlaylistsFile = useAppStore((s) => s.exportPlaylists);
   const deletePlaylist = useAppStore((s) => s.deletePlaylist);
   const addAlbum = useAppStore((s) => s.addAlbum);
 
@@ -96,7 +98,7 @@ export const PlaylistsView: React.FC = () => {
     } catch (err) { toast.error(err, 'Could not delete'); }
   };
 
-  const exportPlaylists = () => {
+  const exportPlaylists = async () => {
     const referenced = new Set(
       playlists.flatMap((p) => p.items.flatMap((i) => (i.kind === 'workshop' ? [i.wallpaperId] : [])))
     );
@@ -110,14 +112,16 @@ export const PlaylistsView: React.FC = () => {
         .flatMap(([, list]) => list),
       albumSlugs: savedAlbums.map((a) => a.albumSlug),
     };
-    const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'truongpaper-playlists.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success('Playlists saved to a file');
+    try {
+      const path = await saveDialog({
+        defaultPath: 'truongpaper-playlists.json',
+        filters: [{ name: 'TruongPaper playlists', extensions: ['json'] }],
+        title: 'Save playlists',
+      });
+      if (!path) return;
+      await exportPlaylistsFile(path, JSON.stringify(file, null, 2));
+      toast.success('Playlists saved to a file');
+    } catch (err) { toast.error(err, 'Could not save the playlists'); }
   };
 
   const importPlaylists = async (fileList: FileList | null) => {
@@ -147,7 +151,7 @@ export const PlaylistsView: React.FC = () => {
         subtitle="Mix photos and wallpapers. Pick a playlist for each display in Displays."
         actions={
           <>
-            <button type="button" className="button" onClick={exportPlaylists}>
+            <button type="button" className="button" onClick={() => void exportPlaylists()}>
               <Download size={14} /> Save playlists to a file
             </button>
             <button type="button" className="button" onClick={() => fileRef.current?.click()}>

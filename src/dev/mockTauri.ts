@@ -492,6 +492,7 @@ export function createMockBackend(
       savedAlbums = [...savedAlbums.filter((a) => a.albumSlug !== slug), created];
       return created;
     },
+    photo_list_albums: () => savedAlbums,
     photo_toggle_album: (args) => {
       savedAlbums = savedAlbums.map((a) => (a.albumSlug === args.albumSlug ? { ...a, isEnabled: Boolean(args.enabled) } : a));
       return null;
@@ -635,6 +636,8 @@ export function createMockBackend(
       return null;
     },
     steam_logout: () => { steamAccount = null; return null; },
+    steam_cancel_download: () => null,
+    playlist_export: () => null,
     steam_cancel_login: () => { cancelSteamLogin?.(); cancelSteamLogin = null; return null; },
     steam_account: () => steamAccount,
     steam_sync_local_folders: () => wallpapers,
@@ -705,6 +708,11 @@ export function createMockBackend(
       };
       presets.push(preset);
       return preset;
+    },
+    wallpaper_list_presets: () => {
+      const byWallpaper: Record<string, WallpaperPreset[]> = {};
+      for (const preset of presets) (byWallpaper[preset.wallpaperId] ??= []).push(preset);
+      return byWallpaper;
     },
     wallpaper_apply_preset: (args) => {
       const preset = presets.find((p) => p.presetId === args.presetId && p.wallpaperId === args.wallpaperId);

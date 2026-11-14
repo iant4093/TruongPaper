@@ -8,6 +8,8 @@ const ROW_GAP = 20;
 const COL_GAP = 16;
 const INFO_HEIGHT = 112; // keep in sync with .wallpaper-info
 const OVERSCAN_ROWS = 2;
+/** Scroll offsets are kept in steps of this many pixels; the overscan rows cover the gap. */
+const SCROLL_STEP = 64;
 
 function scrollParent(node: HTMLElement | null): HTMLElement | null {
   for (let el = node?.parentElement ?? null; el; el = el.parentElement) {
@@ -46,8 +48,9 @@ export function VirtualGrid<T>({ items, getKey, renderItem, label, minColumn = 2
     const scroller = scrollParent(node);
     if (!scroller) { setViewport((v) => (v.height === 0 && v.top === 0 ? v : { top: 0, height: 0 })); return; }
     const offset = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-    const next = { top: Math.max(0, scroller.scrollTop - offset), height: scroller.clientHeight };
-    setViewport((v) => (Math.abs(v.top - next.top) < 1 && v.height === next.height ? v : next));
+    const top = Math.floor(Math.max(0, scroller.scrollTop - offset) / SCROLL_STEP) * SCROLL_STEP;
+    const next = { top, height: scroller.clientHeight };
+    setViewport((v) => (v.top === next.top && v.height === next.height ? v : next));
   }, []);
 
   useLayoutEffect(() => {

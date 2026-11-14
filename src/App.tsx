@@ -77,15 +77,17 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<StudioTab>('all');
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     let cleanup: (() => void) | undefined;
+    setLoadError(null);
     initAppListeners()
       .then((fn) => { if (cancelled) fn(); else cleanup = fn; })
       .catch((err) => setLoadError(String(err)));
     return () => { cancelled = true; cleanup?.(); };
-  }, [initAppListeners]);
+  }, [initAppListeners, loadAttempt]);
 
   // Warm the other views once the first screen is up, so switching tabs is instant.
   useEffect(() => {
@@ -207,7 +209,12 @@ export const App: React.FC = () => {
             const opener = (event.target as Element).closest?.('.wallpaper-details-button, .wallpaper-select');
             if (opener instanceof HTMLElement) openerRef.current = opener;
           }}>
-            {loadError && <div role="alert" className="error-banner">{loadError}</div>}
+            {loadError && (
+              <div role="alert" className="error-banner error-banner-dismissible">
+                <span>{loadError}</span>
+                <button type="button" className="button" onClick={() => setLoadAttempt((n) => n + 1)}>Retry</button>
+              </div>
+            )}
             <div key={activeTab} className={`view-content${activeTab === 'settings' ? ' settings-enter' : ''}`}>
               <Suspense fallback={<div className="view-loading" role="status">Loading…</div>}>{dormant ? null : view}</Suspense>
             </div>

@@ -1,5 +1,5 @@
 import { Dropdown } from './Dropdown';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronLeft, ChevronRight, Search, SlidersHorizontal, Star } from 'lucide-react';
 import type { WorkshopBrowsePage, WorkshopBrowseQuery, WorkshopSort } from '../types/ipc';
@@ -25,6 +25,7 @@ export const WorkshopBrowser: React.FC = () => {
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
   const wallpapers = useAppStore((s) => s.wallpapers);
   const guest = useAppStore((s) => s.guestAvailability);
+  const installedIds = useMemo(() => new Set(wallpapers.map((w) => w.workshopId)), [wallpapers]);
   const loadGuestAvailability = useAppStore((s) => s.loadGuestAvailability);
   const previewRequest = useRef(0);
   const top = useRef<HTMLDivElement>(null);
@@ -131,8 +132,8 @@ export const WorkshopBrowser: React.FC = () => {
     <div ref={gridRef} className="wallpaper-grid workshop-browse-grid" aria-busy={loading}
       style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
       {!loading && !error && data?.items.map((item) => <button key={item.workshopId} type="button" className="workshop-result card" aria-label={`Preview ${item.title}`} onClick={() => void preview(item.workshopId)} disabled={!!previewing}>
-        <Thumb src={item.previewUrl} alt={item.title} height={150} />
-        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{guest[item.workshopId] === 'available' && <span className="workshop-mirror-badge" title="Available on GGNetwork, a third-party mirror">GGNetwork</span>}{wallpapers.some((w) => w.workshopId === item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
+        <Thumb src={item.previewUrl} alt={item.title} height={150} lazy />
+        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{guest[item.workshopId] === 'available' && <span className="workshop-mirror-badge" title="Available on GGNetwork, a third-party mirror">GGNetwork</span>}{installedIds.has(item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
           <div className="workshop-result-title" title={item.title}>{item.title}</div>
           <div className="workshop-result-author">{item.author || 'Workshop creator'}</div>
           <div className="workshop-result-stats"><span>{count(item.subscribers)} subscribers</span>{item.rating > 0 ? <span aria-label={`${item.rating} out of 5 stars`}><Star size={11} fill="currentColor" />{item.rating}/5</span> : <span className="workshop-result-unrated">Not rated</span>}</div>

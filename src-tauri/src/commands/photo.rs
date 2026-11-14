@@ -744,6 +744,16 @@ pub async fn photo_add_album(
     })
 }
 
+/// `photo_list_albums`: the saved albums, oldest first.
+#[tauri::command]
+pub async fn photo_list_albums(
+    state: State<'_, PhotoServiceState>,
+) -> Result<Vec<SavedAlbum>, String> {
+    let conn = state.db.lock();
+    let rows = list_saved_albums(&conn).map_err(e)?;
+    Ok(rows.iter().map(SavedAlbum::from).collect())
+}
+
 /// 6. `photo_toggle_album`
 #[tauri::command]
 pub async fn photo_toggle_album(

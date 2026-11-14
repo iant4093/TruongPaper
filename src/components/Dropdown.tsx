@@ -50,11 +50,15 @@ export function Dropdown<T extends string | number>({
       });
     };
     place();
-    window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
+    // Scroll events can fire many times a frame; place once per frame.
+    let frame = 0;
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(place); };
+    window.addEventListener('resize', schedule);
+    window.addEventListener('scroll', schedule, true);
     return () => {
-      window.removeEventListener('resize', place);
-      window.removeEventListener('scroll', place, true);
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', schedule);
+      window.removeEventListener('scroll', schedule, true);
     };
   }, [open, options.length]);
 

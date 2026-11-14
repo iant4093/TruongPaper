@@ -1362,6 +1362,53 @@ struct SceneJob {
 struct SceneCpu {
     vfs: WeVirtualFileSystem,
     runtime: SceneRuntime,
+    /// Textures decoded on the worker; the render thread only uploads them.
+    textures: truongpaper_renderer::PredecodedTextures,
+}
+
+/// Newest scene generation per monitor, shared with the load worker so a superseded job can
+/// stop between stages.
+#[derive(Clone, Default)]
+struct LatestGenerations(Arc<parking_lot::Mutex<HashMap<String, u64>>>);
+
+impl LatestGenerations {
+    fn note(&self, monitor: &str, generation: u64) {
+        self.0.lock().insert(monitor.to_string(), generation);
+    }
+
+    /// Unknown monitors count as current (jobs built outside the host, such as in tests).
+    fn is_current(&self, monitor: &str, generation: u64) -> bool {
+        self.0.lock().get(monitor).is_none_or(|g| *g == generation)
+    }
+}
+
+/// Frees big discarded values (stale scene loads) on a background thread so dropping them
+/// never stalls the render thread.
+fn discard<T: Send + 'static>(value: T) {
+    type Garbage = Box<dyn std::any::Any + Send>;
+    static REAPER: std::sync::OnceLock<Option<std::sync::Mutex<mpsc::Sender<Garbage>>>> =
+        std::sync::OnceLock::new();
+    let reaper = REAPER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Garbage>();
+        std::thread::Builder::new()
+            .name("truongpaper-reaper".into())
+            .spawn(move || {
+                while let Ok(item) = rx.recv() {
+                    drop(item);
+                }
+            })
+            .ok()
+            .map(|_| std::sync::Mutex::new(tx))
+    });
+    match reaper {
+        Some(tx) => {
+            if let Ok(tx) = tx.lock() {
+                // A failed send hands the value back inside the error and drops it here.
+                let _ = tx.send(Box::new(value));
+            }
+        }
+        None => drop(value),
+    }
 }
 
 struct SceneDone {
@@ -1371,29 +1418,63 @@ struct SceneDone {
     result: Result<SceneCpu, String>,
 }
 
-/// VFS mount, `SceneGraph::load` and script init: everything that needs no GPU.
-fn run_scene_job(job: SceneJob) -> SceneDone {
+/// VFS mount, `SceneGraph::load`, script init and texture decode: everything that needs no GPU.
+/// Returns `None` when `is_current` reports the job superseded between stages.
+fn run_scene_job(job: SceneJob, is_current: &(dyn Fn() -> bool + Sync)) -> Option<SceneDone> {
     let SceneJob {
         monitor_id,
         generation,
         desc,
         monitor_size,
     } = job;
+    let started = std::time::Instant::now();
+    if !is_current() {
+        return None;
+    }
     let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
-    let result = SceneRuntime::load(
+    if !is_current() {
+        return None;
+    }
+    let runtime = SceneRuntime::load(
         &vfs,
         &desc.scene_file,
         Some(&desc.user_properties_json),
         monitor_size,
-    )
-    .map(|runtime| SceneCpu { vfs, runtime })
-    .map_err(|err| err.to_string());
-    SceneDone {
+    );
+    let result = match runtime {
+        Ok(runtime) => {
+            if !is_current() {
+                discard(runtime);
+                return None;
+            }
+            let decode_started = std::time::Instant::now();
+            let textures =
+                truongpaper_renderer::predecode_textures(&vfs, runtime.graph(), is_current);
+            tracing::debug!(
+                "scene {}: worker stage {:?} (texture decode {:?}, {} textures)",
+                desc.scene_file,
+                started.elapsed(),
+                decode_started.elapsed(),
+                textures.len()
+            );
+            if !is_current() {
+                discard((runtime, textures));
+                return None;
+            }
+            Ok(SceneCpu {
+                vfs,
+                runtime,
+                textures,
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    };
+    Some(SceneDone {
         monitor_id,
         generation,
         desc,
         result,
-    }
+    })
 }
 
 /// Newest job per monitor: a burst of clicks loads only the last scene.
@@ -1411,40 +1492,69 @@ fn coalesce_scene_jobs(jobs: Vec<SceneJob>) -> Vec<SceneJob> {
 struct SceneLoadWorker {
     jobs: mpsc::Sender<SceneJob>,
     done: mpsc::Receiver<SceneDone>,
+    latest: LatestGenerations,
 }
 
 impl SceneLoadWorker {
     fn spawn(host: Arc<WallpaperHost>) -> Option<Self> {
         let (jobs, job_rx) = mpsc::channel::<SceneJob>();
         let (done_tx, done) = mpsc::channel::<SceneDone>();
+        let latest = LatestGenerations::default();
+        let worker_latest = latest.clone();
         std::thread::Builder::new()
             .name("truongpaper-scene-load".into())
             .spawn(move || {
-                while let Ok(first) = job_rx.recv() {
-                    let mut batch = vec![first];
-                    batch.extend(job_rx.try_iter());
-                    for job in coalesce_scene_jobs(batch) {
-                        let (monitor_id, generation, desc) =
-                            (job.monitor_id.clone(), job.generation, job.desc.clone());
-                        let done = catch_unwind(AssertUnwindSafe(|| run_scene_job(job)))
-                            .unwrap_or_else(|_| SceneDone {
-                                monitor_id,
+                let mut pending: Vec<SceneJob> = Vec::new();
+                loop {
+                    if pending.is_empty() {
+                        match job_rx.recv() {
+                            Ok(job) => pending.push(job),
+                            Err(_) => return,
+                        }
+                    }
+                    // Jobs that arrived while the last one ran: only the newest per monitor
+                    // survives, and jobs the host has already replaced are skipped.
+                    pending.extend(job_rx.try_iter());
+                    let mut pending_now = coalesce_scene_jobs(std::mem::take(&mut pending));
+                    pending_now.retain(|j| worker_latest.is_current(&j.monitor_id, j.generation));
+                    if pending_now.is_empty() {
+                        continue;
+                    }
+                    let job = pending_now.remove(0);
+                    pending = pending_now;
+                    let (monitor_id, generation, desc) =
+                        (job.monitor_id.clone(), job.generation, job.desc.clone());
+                    let is_current = || worker_latest.is_current(&monitor_id, generation);
+                    let done = catch_unwind(AssertUnwindSafe(|| run_scene_job(job, &is_current)))
+                        .unwrap_or_else(|_| {
+                            Some(SceneDone {
+                                monitor_id: monitor_id.clone(),
                                 generation,
                                 desc,
                                 result: Err("scene loader panicked".into()),
-                            });
-                        if done_tx.send(done).is_err() {
-                            return;
-                        }
-                        host.wake();
+                            })
+                        });
+                    let Some(done) = done else {
+                        tracing::debug!("scene load for {monitor_id} superseded; stopped early");
+                        continue;
+                    };
+                    if done_tx.send(done).is_err() {
+                        return;
                     }
+                    host.wake();
                 }
             })
             .ok()?;
-        Some(Self { jobs, done })
+        Some(Self { jobs, done, latest })
+    }
+
+    /// Tells the worker which generation each monitor now wants.
+    fn note_generation(&self, monitor: &str, generation: u64) {
+        self.latest.note(monitor, generation);
     }
 
     fn submit(&self, job: SceneJob) {
+        self.latest.note(&job.monitor_id, job.generation);
         if self.jobs.send(job).is_err() {
             tracing::warn!("scene load worker is gone");
         }
@@ -1828,7 +1938,10 @@ impl MonitorRenderer {
         self.load_failed = false;
         let active = rt.map(|r| r.active.clone()).unwrap_or_default();
         self.awaiting_photo = None;
-        self.ready_scene = None;
+        if let Some(stale) = self.ready_scene.take() {
+            discard(stale);
+        }
+        scene_worker.note_generation(&self.monitor_id, generation);
         if matches!(self.content, Content::Scene(_)) && !matches!(active, ActiveRuntime::Scene(_)) {
             if let Content::Scene(old) = &self.content {
                 self.diag_clear = Some(old.wallpaper_id.clone());
@@ -1941,8 +2054,10 @@ impl MonitorRenderer {
         let Some(done) = self.ready_scene.take() else {
             return;
         };
+        let stage_started = std::time::Instant::now();
         if self.generation != Some(done.generation) || self.awaiting_photo != Some(done.generation)
         {
+            discard(done);
             return;
         }
         self.awaiting_photo = None;
@@ -1961,6 +2076,11 @@ impl MonitorRenderer {
             Ok(state) => {
                 self.content = Content::Scene(Box::new(state));
                 release_free_memory();
+                tracing::debug!(
+                    "scene {}: render thread busy {:?} for this switch",
+                    desc.scene_file,
+                    stage_started.elapsed()
+                );
             }
             Err(err) => {
                 tracing::warn!("scene {} failed to load: {err}", desc.scene_file);
@@ -2360,7 +2480,12 @@ fn finish_scene_gpu(
     desc: &SceneDescriptor,
     rt: Option<&MonitorRuntime>,
 ) -> anyhow::Result<SceneState> {
-    let SceneCpu { vfs, mut runtime } = cpu;
+    let stage_started = std::time::Instant::now();
+    let SceneCpu {
+        vfs,
+        mut runtime,
+        textures,
+    } = cpu;
     let scene_size = runtime.graph().scene_size;
     let (w, h) = (
         scene_size.x.clamp(1.0, MAX_SCENE_TARGET_DIMENSION),
@@ -2389,7 +2514,9 @@ fn finish_scene_gpu(
     });
     let mut renderer =
         SceneRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, scene_size);
-    let load_warnings = renderer.load(device, queue, &vfs, runtime.graph());
+    let load_started = std::time::Instant::now();
+    let load_warnings = renderer.load_with_decoded(device, queue, &vfs, runtime.graph(), textures);
+    let load_time = load_started.elapsed();
     // Skipped effect passes and shader fallbacks join the scene report.
     runtime.add_diagnostics(renderer.diagnostics());
     for warning in &load_warnings {
@@ -2398,7 +2525,15 @@ fn finish_scene_gpu(
     let adjustments = rt
         .map(MonitorRuntime::effective_adjustments)
         .unwrap_or_default();
+    let videos_started = std::time::Instant::now();
     let videos = open_embedded_videos(&renderer, &vfs, desc, &adjustments);
+    tracing::debug!(
+        "scene {}: render-thread stage {:?} (renderer load {:?}, videos {:?})",
+        desc.scene_file,
+        stage_started.elapsed(),
+        load_time,
+        videos_started.elapsed()
+    );
     let loaded_epoch = runtime.graph().render_epoch();
     let mut state = SceneState {
         loaded_epoch,
@@ -2714,7 +2849,9 @@ fn run_renderer(
                 .iter_mut()
                 .find(|m| m.monitor_id == done.monitor_id)
             {
-                m.ready_scene = Some(done);
+                if let Some(old) = m.ready_scene.replace(done) {
+                    discard(old);
+                }
             }
         }
 
@@ -3288,11 +3425,43 @@ mod tests {
         // The loaded CPU stage must be movable to the render thread.
         fn assert_send<T: Send>() {}
         assert_send::<SceneDone>();
-        let done = std::thread::spawn(|| run_scene_job(scene_job("m", 9)))
+        let done = std::thread::spawn(|| run_scene_job(scene_job("m", 9), &|| true))
             .join()
-            .unwrap();
+            .unwrap()
+            .expect("current job finishes");
         assert_eq!((done.monitor_id.as_str(), done.generation), ("m", 9));
         assert!(done.result.is_err());
+    }
+
+    #[test]
+    fn stale_scene_job_stops_before_any_work() {
+        assert!(run_scene_job(scene_job("m", 1), &|| false).is_none());
+    }
+
+    #[test]
+    fn latest_generations_track_each_monitor() {
+        let latest = LatestGenerations::default();
+        assert!(latest.is_current("a", 1), "unknown monitors are current");
+        latest.note("a", 2);
+        assert!(!latest.is_current("a", 1));
+        assert!(latest.is_current("a", 2));
+        assert!(latest.is_current("b", 7));
+    }
+
+    #[test]
+    fn discard_drops_values_off_the_calling_thread() {
+        struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        discard(Probe(tx));
+        let dropped_on = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("value dropped");
+        assert_ne!(dropped_on, std::thread::current().id());
     }
 
     #[test]

@@ -78,7 +78,7 @@ describe('createMockBackend (browser preview)', () => {
 
   it('rejects commands outside the contract', () => {
     const backend = createMockBackend();
-    expect(() => backend.handle('photo_list_albums')).toThrow(/Unhandled command/);
+    expect(() => backend.handle('photo_unknown_command')).toThrow(/Unhandled command/);
   });
 
   it('answers the plugin commands used by the UI', () => {

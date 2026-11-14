@@ -1,6 +1,7 @@
 // src/components/SteamAuthModal.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/useAppStore';
+import { useModalFocus } from '../lib/useModalFocus';
 
 export const SteamAuthModal: React.FC = () => {
   const authModalOpen = useAppStore((s) => s.authModalOpen);
@@ -23,23 +24,13 @@ export const SteamAuthModal: React.FC = () => {
   const firstRef = useRef<HTMLButtonElement | null>(null);
 
   // Nothing starts on its own: the QR session begins when the user asks for it.
-  // Focus moves into the dialog, Escape closes it, and Tab stays inside.
+  useModalFocus(authModalOpen, dialogRef, closeSteamAuthModal, firstRef);
+
+  // Nothing typed here outlives the window: the component stays mounted after it closes.
   useEffect(() => {
-    if (!authModalOpen) return;
-    const previous = document.activeElement as HTMLElement | null;
-    firstRef.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); closeSteamAuthModal(); return; }
-      if (event.key !== 'Tab' || !dialogRef.current) return;
-      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>('button, input, [href], [tabindex]:not([tabindex="-1"])')].filter((el) => !(el as HTMLButtonElement).disabled);
-      if (focusable.length === 0) return;
-      const first = focusable[0], last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('keydown', onKey); if (previous?.isConnected) previous.focus(); };
-  }, [authModalOpen, closeSteamAuthModal]);
+    if (!authModalOpen) { setUsername(''); setPassword(''); setTwoFaCode(''); }
+  }, [authModalOpen]);
+  useEffect(() => { if (!need2Fa) setTwoFaCode(''); }, [need2Fa]);
 
   useEffect(() => {
     const canvas = qrCanvasRef.current;
@@ -150,13 +141,18 @@ export const SteamAuthModal: React.FC = () => {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void submitSteamCredentials(username, password);
+                  const typed = password;
+                  setPassword('');
+                  void submitSteamCredentials(username, typed);
                 }}
                 style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
               >
                 <input
                   type="text"
                   placeholder="Steam Username"
+                  aria-label="Steam username"
+                  autoComplete="username"
+                  disabled={steamSigningIn}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="button"
@@ -166,14 +162,17 @@ export const SteamAuthModal: React.FC = () => {
                 <input
                   type="password"
                   placeholder="Steam Password"
+                  aria-label="Steam password"
+                  autoComplete="current-password"
+                  disabled={steamSigningIn}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="button"
                   style={{ width: '100%', textAlign: 'left', cursor: 'text' }}
                   required
                 />
-                <button type="submit" className="button button-primary">
-                  Sign In
+                <button type="submit" className="button button-primary" disabled={steamSigningIn}>
+                  {steamSigningIn ? 'Signing in…' : 'Sign In'}
                 </button>
               </form>
             ) : (
@@ -188,6 +187,8 @@ export const SteamAuthModal: React.FC = () => {
                 <input
                   type="text"
                   placeholder={need2Fa.kind === 'email' ? 'Email Steam Guard Code' : 'Authenticator 2FA Code'}
+                  aria-label={need2Fa.kind === 'email' ? 'Email Steam Guard code' : 'Authenticator code'}
+                  autoComplete="one-time-code"
                   value={twoFaCode}
                   onChange={(e) => setTwoFaCode(e.target.value)}
                   className="button"

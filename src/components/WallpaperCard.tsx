@@ -37,7 +37,8 @@ const WallpaperCardBase: React.FC<WallpaperCardProps> = ({
       <div className="wallpaper-media">
         {/* Clicking a tile does nothing: the highlight always marks what is on screen. It stays
             focusable for arrow-key moves, and Enter sets it as the wallpaper. */}
-        <div className="wallpaper-select" data-grid-select="" tabIndex={tabIndex} role="group"
+        <div className="wallpaper-select" data-grid-select="" tabIndex={tabIndex} role="button"
+          aria-disabled={!canApply || active || !!applying} aria-keyshortcuts="Enter"
           aria-label={active ? `${title}, current wallpaper` : title}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && canApply && !active && !applying) { event.preventDefault(); onApply(id); }

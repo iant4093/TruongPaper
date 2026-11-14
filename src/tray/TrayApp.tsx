@@ -142,13 +142,15 @@ export const TrayApp: React.FC = () => {
             style={{ padding: '5px 12px', fontSize: 12 }}
             onClick={async () => {
               // Bring the main studio window forward, then dismiss this popover.
-              const studio = await WebviewWindow.getByLabel('main');
-              if (studio) {
-                await studio.unminimize().catch(() => {});
-                await studio.show();
-                await studio.setFocus();
-              }
-              await getCurrentWebviewWindow().hide();
+              try {
+                const studio = await WebviewWindow.getByLabel('main');
+                if (studio) {
+                  await studio.unminimize().catch(() => {});
+                  await studio.show();
+                  await studio.setFocus();
+                }
+                await getCurrentWebviewWindow().hide();
+              } catch (error) { setActionError(String(error)); }
             }}
           >
             Studio

@@ -5,6 +5,7 @@ import { Dropdown } from './Dropdown';
 import React, { useState } from 'react';
 import { Save } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import { toast } from '../store/feedback';
 
 export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) => {
   const presets = useAppStore((s) => s.presetsByWallpaper[wallpaperId]) ?? [];
@@ -33,7 +34,7 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
         options={[['', 'Preset: Default'], ...presets.map((preset) => [preset.presetId, `Preset: ${preset.name}`] as const)]}
         onChange={(presetId) => {
           setSelected(presetId);
-          if (presetId) void applyPreset(wallpaperId, presetId);
+          if (presetId) applyPreset(wallpaperId, presetId).catch((err) => toast.error(err, 'Could not apply the preset'));
         }}
       />
       <form onSubmit={onSave} className="preset-save">

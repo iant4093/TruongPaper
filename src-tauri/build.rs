@@ -12,6 +12,7 @@ const APP_COMMANDS: &[&str] = &[
     "photo_trigger_refill",
     "photo_retry_now",
     "photo_add_album",
+    "photo_list_albums",
     "photo_toggle_album",
     "photo_remove_album",
     "photo_set_filter",
@@ -30,6 +31,7 @@ const APP_COMMANDS: &[&str] = &[
     "steam_submit_2fa_code",
     "steam_logout",
     "steam_cancel_login",
+    "steam_cancel_download",
     "steam_account",
     "steam_sync_local_folders",
     "library_list_wallpapers",
@@ -43,6 +45,7 @@ const APP_COMMANDS: &[&str] = &[
     "monitor_update_adjustments",
     "wallpaper_save_preset",
     "wallpaper_apply_preset",
+    "wallpaper_list_presets",
     "playback_set_paused",
     "playback_next",
     "monitor_set_volume",
@@ -56,6 +59,7 @@ const APP_COMMANDS: &[&str] = &[
     "runtime_get_memory_usage",
     "backup_export",
     "backup_import",
+    "playlist_export",
 ];
 
 fn attributes() -> tauri_build::Attributes {

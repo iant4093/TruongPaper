@@ -219,6 +219,7 @@ pub fn run() {
             commands::photo::photo_trigger_refill,
             commands::photo::photo_retry_now,
             commands::photo::photo_add_album,
+            commands::photo::photo_list_albums,
             commands::photo::photo_toggle_album,
             commands::photo::photo_remove_album,
             commands::photo::photo_set_filter,
@@ -238,6 +239,7 @@ pub fn run() {
             commands::steam::steam_submit_2fa_code,
             commands::steam::steam_logout,
             commands::steam::steam_cancel_login,
+            commands::steam::steam_cancel_download,
             commands::steam::steam_account,
             commands::steam::steam_sync_local_folders,
             commands::library::library_list_wallpapers,
@@ -252,6 +254,7 @@ pub fn run() {
             commands::monitor::monitor_update_adjustments,
             commands::library::wallpaper_save_preset,
             commands::library::wallpaper_apply_preset,
+            commands::backup::wallpaper_list_presets,
             commands::monitor::playback_set_paused,
             controls::playback_next,
             commands::monitor::monitor_set_volume,
@@ -266,6 +269,7 @@ pub fn run() {
             commands::runtime::runtime_get_memory_usage,
             commands::backup::backup_export,
             commands::backup::backup_import,
+            commands::backup::playlist_export,
         ])
         .build(context)
         .expect("error while building TruongPaper Tauri application");
@@ -326,7 +330,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 50, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 54, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

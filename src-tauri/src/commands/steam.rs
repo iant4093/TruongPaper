@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use truongpaper_steam::{
     core_assets_bootstrap_args, core_assets_bootstrapped, fetch_workshop_preview,
     find_local_we_core_assets_dir, parse_workshop_url_or_id, password_login_args,
@@ -37,7 +37,7 @@ const SIDECAR_NAME: &str = "DepotDownloader";
 #[derive(Default)]
 pub struct SteamSession {
     working_dir: PathBuf,
-    downloads: Mutex<HashSet<String>>,
+    downloads: Mutex<HashMap<String, Arc<Notify>>>,
     two_fa_tx: Mutex<Option<(u64, mpsc::Sender<String>)>>,
     tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// Task ids of sign-in runs, so a closed sign-in window can stop its QR session.
@@ -51,9 +51,23 @@ pub struct SteamSession {
 const SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 const SIGN_IN_CANCELLED: &str = "Steam sign-in was cancelled.";
 
+/// A download whose sidecar prints nothing for this long is stuck and gets killed.
+const DOWNLOAD_INACTIVITY: std::time::Duration = std::time::Duration::from_secs(180);
+const DOWNLOAD_CANCELLED: &str = "Download cancelled.";
+
+/// Limits for one sidecar run. `Default` means none.
+#[derive(Default)]
+struct SidecarLimits {
+    /// Kill the process when no event arrives for this long.
+    inactivity: Option<std::time::Duration>,
+    /// Kill the process when notified.
+    cancel: Option<Arc<Notify>>,
+}
+
 struct DownloadGuard<'a> {
-    downloads: &'a Mutex<HashSet<String>>,
+    downloads: &'a Mutex<HashMap<String, Arc<Notify>>>,
     id: String,
+    cancel: Arc<Notify>,
 }
 
 impl Drop for DownloadGuard<'_> {
@@ -64,13 +78,30 @@ impl Drop for DownloadGuard<'_> {
 
 impl SteamSession {
     fn track_download(&self, id: &str) -> Result<DownloadGuard<'_>, String> {
-        if !self.downloads.lock().insert(id.to_owned()) {
-            return Err("This wallpaper is already downloading.".into());
+        let cancel = Arc::new(Notify::new());
+        {
+            let mut downloads = self.downloads.lock();
+            if downloads.contains_key(id) {
+                return Err("This wallpaper is already downloading.".into());
+            }
+            downloads.insert(id.to_owned(), Arc::clone(&cancel));
         }
         Ok(DownloadGuard {
             downloads: &self.downloads,
             id: id.to_owned(),
+            cancel,
         })
+    }
+
+    /// Stops a running download. Returns false when none is running for `id`.
+    pub fn cancel_download(&self, id: &str) -> bool {
+        match self.downloads.lock().get(id) {
+            Some(cancel) => {
+                cancel.notify_one();
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn new(working_dir: PathBuf) -> Self {
@@ -179,6 +210,28 @@ fn resolve_sidecar() -> Result<PathBuf, String> {
         })
 }
 
+struct Stalled;
+
+/// Next event, or `Stalled` when nothing arrives within `limit`.
+async fn recv_within<T>(
+    rx: &mut mpsc::Receiver<T>,
+    limit: Option<std::time::Duration>,
+) -> Result<Option<T>, Stalled> {
+    match limit {
+        Some(limit) => tokio::time::timeout(limit, rx.recv())
+            .await
+            .map_err(|_| Stalled),
+        None => Ok(rx.recv().await),
+    }
+}
+
+async fn wait_cancel(cancel: Option<&Notify>) {
+    match cancel {
+        Some(cancel) => cancel.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Runs DepotDownloader with `args`, feeding every [`SidecarEvent`] to `on_event` on the
 /// calling task. The process is killed if the app shuts down (`SteamSession::abort_all`).
 async fn run_sidecar(
@@ -186,6 +239,7 @@ async fn run_sidecar(
     args: Vec<String>,
     signing_in: bool,
     password: Option<String>,
+    limits: SidecarLimits,
     mut on_event: impl FnMut(SidecarEvent) + Send,
 ) -> Result<(), String> {
     let bin = resolve_sidecar()?;
@@ -210,7 +264,26 @@ async fn run_sidecar(
         .map_err(|e| e.to_string())
     });
     let id = session.register(task.abort_handle(), signing_in.then_some(two_fa_tx));
-    while let Some(ev) = event_rx.recv().await {
+    loop {
+        let next = tokio::select! {
+            next = recv_within(&mut event_rx, limits.inactivity) => next,
+            () = wait_cancel(limits.cancel.as_deref()) => {
+                task.abort();
+                let _ = task.await;
+                session.unregister(id);
+                return Err(DOWNLOAD_CANCELLED.into());
+            }
+        };
+        let ev = match next {
+            Ok(Some(ev)) => ev,
+            Ok(None) => break,
+            Err(Stalled) => {
+                task.abort();
+                let _ = task.await;
+                session.unregister(id);
+                return Err("The download stopped responding. Try again.".into());
+            }
+        };
         if signing_in && ev == SidecarEvent::Authenticated {
             // The token is saved before Steam confirms the session. End the
             // manifest probe here so sign-in does not depend on a depot license.
@@ -378,7 +451,16 @@ async fn bootstrap_core_assets_if_needed(session: Arc<SteamSession>, root: PathB
             return;
         }
     };
-    if let Err(err) = run_sidecar(&session, args, false, None, |_| {}).await {
+    if let Err(err) = run_sidecar(
+        &session,
+        args,
+        false,
+        None,
+        SidecarLimits::default(),
+        |_| {},
+    )
+    .await
+    {
         tracing::warn!("core assets bootstrap failed: {err}");
     }
 }
@@ -411,7 +493,7 @@ pub async fn steam_download_workshop_item(
     source: Option<WorkshopDownloadSource>,
 ) -> Result<String, String> {
     let workshop_id = parse_workshop_url_or_id(&url_or_id).map_err(|e| e.to_string())?;
-    let _download = state.steam.track_download(&workshop_id)?;
+    let download_guard = state.steam.track_download(&workshop_id)?;
     let username = match source.unwrap_or(WorkshopDownloadSource::Steam) {
         WorkshopDownloadSource::Steam => Some(saved_username(&state.steam)?),
         WorkshopDownloadSource::GgNetwork => None,
@@ -422,6 +504,8 @@ pub async fn steam_download_workshop_item(
         Err(_) => workshop_id.clone(),
     };
     let out_dir = state.workshop_dir().join(&workshop_id);
+    // A failed first download must not leave a half-filled folder for the next library scan.
+    let existed = out_dir.exists();
     emit_progress(&app, &workshop_id, &title, 0.0, "downloading", None);
 
     let download = async {
@@ -432,7 +516,11 @@ pub async fn steam_download_workshop_item(
             let args =
                 pubfile_download_args(&workshop_id, username, &out_dir, DEFAULT_MAX_DOWNLOADS)
                     .map_err(|e| e.to_string())?;
-            run_sidecar(&state.steam, args, false, None, |ev| match &ev {
+            let limits = SidecarLimits {
+                inactivity: Some(DOWNLOAD_INACTIVITY),
+                cancel: Some(Arc::clone(&download_guard.cancel)),
+            };
+            run_sidecar(&state.steam, args, false, None, limits, |ev| match &ev {
                 SidecarEvent::ProgressPercent(pct) => {
                     emit_progress(&app, &workshop_id, &title, *pct, "downloading", None);
                 }
@@ -440,15 +528,17 @@ pub async fn steam_download_workshop_item(
             })
             .await?;
         } else {
-            truongpaper_steam::guest_download::download_guest_workshop(
+            let guest = truongpaper_steam::guest_download::download_guest_workshop(
                 &workshop_id,
                 &out_dir,
                 |pct| {
                     emit_progress(&app, &workshop_id, &title, pct, "downloading", None);
                 },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            );
+            tokio::select! {
+                res = guest => res.map_err(|e| e.to_string())?,
+                () = download_guard.cancel.notified() => return Err(DOWNLOAD_CANCELLED.to_string()),
+            }
         }
 
         let wallpaper_id = format!("workshop:{workshop_id}");
@@ -473,28 +563,53 @@ pub async fn steam_download_workshop_item(
             Ok(wallpaper_id)
         }
         Err(err) => {
+            if !existed {
+                let dir = out_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
+            }
             emit_progress(&app, &workshop_id, &title, 0.0, "error", Some(err.clone()));
             Err(err)
         }
     }
 }
 
+/// Stops a running Workshop download by id (`steam_download_workshop_item` then fails with
+/// "Download cancelled."). A no-op when nothing is downloading it.
+#[tauri::command]
+pub async fn steam_cancel_download(
+    state: State<'_, AppState>,
+    url_or_id: String,
+) -> Result<(), String> {
+    let workshop_id = parse_workshop_url_or_id(&url_or_id).map_err(|e| e.to_string())?;
+    state.steam.cancel_download(&workshop_id);
+    Ok(())
+}
+
 /// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves and returns the account name.
 #[tauri::command]
 pub async fn steam_login_qr(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let mut account = None;
-    let run = run_sidecar(&state.steam, qr_login_args(), true, None, |ev| match &ev {
-        SidecarEvent::LoggedInUsername(user) => account = Some(user.clone()),
-        other => emit_auth(&app, other),
-    });
-    let result = tokio::time::timeout(SIGN_IN_TIMEOUT, run).await;
-    if result.is_err() {
-        state.steam.cancel_logins();
-        return Err(
-            "The QR code expired. Close this window and sign in again for a new code.".into(),
-        );
-    }
-    result.unwrap()?;
+    let run = run_sidecar(
+        &state.steam,
+        qr_login_args(),
+        true,
+        None,
+        SidecarLimits::default(),
+        |ev| match &ev {
+            SidecarEvent::LoggedInUsername(user) => account = Some(user.clone()),
+            other => emit_auth(&app, other),
+        },
+    );
+    let result = match tokio::time::timeout(SIGN_IN_TIMEOUT, run).await {
+        Ok(result) => result,
+        Err(_) => {
+            state.steam.cancel_logins();
+            return Err(
+                "The QR code expired. Close this window and sign in again for a new code.".into(),
+            );
+        }
+    };
+    result?;
     let account = account.ok_or_else(|| "Steam signed in, but the downloader did not report the account name. Try Username & 2FA.".to_string())?;
     state.steam.set_account(Some(&account))?;
     Ok(account)
@@ -523,9 +638,14 @@ pub async fn steam_login_credentials(
 ) -> Result<String, String> {
     validate_password(&password).map_err(|e| e.to_string())?;
     let args = password_login_args(&username).map_err(|e| e.to_string())?;
-    let run = run_sidecar(&state.steam, args, true, Some(password), |ev| {
-        emit_auth(&app, &ev)
-    });
+    let run = run_sidecar(
+        &state.steam,
+        args,
+        true,
+        Some(password),
+        SidecarLimits::default(),
+        |ev| emit_auth(&app, &ev),
+    );
     match tokio::time::timeout(SIGN_IN_TIMEOUT, run).await {
         Ok(result) => result?,
         Err(_) => {
@@ -588,6 +708,29 @@ pub async fn steam_guest_availability(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn silent_channel_is_reported_as_stalled() {
+        let (tx, mut rx) = mpsc::channel::<u8>(4);
+        let limit = Some(std::time::Duration::from_millis(30));
+        assert!(matches!(recv_within(&mut rx, limit).await, Err(Stalled)));
+        tx.send(7).await.unwrap();
+        assert!(matches!(recv_within(&mut rx, limit).await, Ok(Some(7))));
+        drop(tx);
+        assert!(matches!(recv_within(&mut rx, limit).await, Ok(None)));
+    }
+
+    #[test]
+    fn cancel_download_only_hits_running_ids() {
+        let session = SteamSession::default();
+        assert!(!session.cancel_download("1"));
+        let guard = session.track_download("1").unwrap();
+        assert!(session.track_download("1").is_err());
+        assert!(session.cancel_download("1"));
+        drop(guard);
+        assert!(!session.cancel_download("1"));
+        assert!(session.track_download("1").is_ok());
+    }
 
     #[test]
     fn sidecar_candidate_order() {

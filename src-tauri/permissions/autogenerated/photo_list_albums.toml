@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-photo-list-albums"
+description = "Enables the photo_list_albums command without any pre-configured scope."
+commands.allow = ["photo_list_albums"]
+
+[[permission]]
+identifier = "deny-photo-list-albums"
+description = "Denies the photo_list_albums command without any pre-configured scope."
+commands.deny = ["photo_list_albums"]

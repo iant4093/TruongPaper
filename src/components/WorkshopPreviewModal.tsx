@@ -1,12 +1,14 @@
 // src/components/WorkshopPreviewModal.tsx
 // §2.1 Floating Liquid Glass "Workshop Preview & Download" modal driven by
 // `steam_inspect_url` + `steam-download://progress` events.
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { MonitorSmartphone, X } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { formatBytes, workshopTypeFromTags } from '../lib/format';
 import { Badge, Thumb } from './ui';
+import { useModalFocus } from '../lib/useModalFocus';
+import { toast } from '../store/feedback';
 import type { WorkshopDownloadSource } from '../types/ipc';
 
 export const WorkshopPreviewModal: React.FC = () => {
@@ -42,6 +44,8 @@ export const WorkshopPreviewModal: React.FC = () => {
   };
 
   const open = !!preview && !authModalOpen;
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useModalFocus(open, dialogRef, closeWorkshopPreview);
   const progress = preview ? downloadsById[preview.workshopId] : undefined;
   const error = downloadError ?? (!starting && progress?.state === 'error' ? progress.error : null);
   const installed = preview ? wallpapers.find((w) => w.workshopId === preview.workshopId) : undefined;
@@ -55,7 +59,9 @@ export const WorkshopPreviewModal: React.FC = () => {
         <motion.div
           key="workshop-preview"
           role="dialog"
+          aria-modal="true"
           aria-label="Workshop Preview"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) closeWorkshopPreview(); }}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -71,6 +77,7 @@ export const WorkshopPreviewModal: React.FC = () => {
         >
           <motion.div
             className="panel"
+            ref={dialogRef}
             initial={{ scale: 0.96, y: 12 }}
             animate={{ scale: 1, y: 0 }}
             exit={{ scale: 0.96, y: 12 }}
@@ -145,7 +152,8 @@ export const WorkshopPreviewModal: React.FC = () => {
                       onClick={() => {
                         selectWallpaper(installed.wallpaperId);
                         void applyMonitorSource(monitorId, { kind: 'workshop', wallpaperId: installed.wallpaperId }).then(
-                          closeWorkshopPreview
+                          closeWorkshopPreview,
+                          (err) => toast.error(err, 'Could not set the wallpaper'),
                         );
                       }}
                     >

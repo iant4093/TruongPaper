@@ -966,6 +966,9 @@ pub struct SceneScriptEngine {
     registrations: RefCell<HashMap<String, Registration>>,
     /// Slots disabled by the breaker since the last re-enable.
     off_slots: RefCell<Vec<String>>,
+    /// Slots disabled for being too slow (overruns, slow strikes). A property change does not
+    /// make them faster, so [`Self::reenable_disabled_slots`] leaves them off.
+    slow_off: RefCell<std::collections::HashSet<String>>,
     /// End of the total script-load budget while one is running ([`Self::begin_load`]).
     load_deadline: Cell<Option<Instant>>,
     breaker: RefCell<Breaker>,
@@ -1036,6 +1039,7 @@ impl SceneScriptEngine {
             error_disable_after: Cell::new(ERROR_DISABLE_AFTER),
             registrations: RefCell::new(HashMap::new()),
             off_slots: RefCell::new(Vec::new()),
+            slow_off: RefCell::new(std::collections::HashSet::new()),
             load_deadline: Cell::new(None),
             breaker: RefCell::new(Breaker::default()),
             handlers: Cell::new([None; 4]),
@@ -1090,13 +1094,18 @@ impl SceneScriptEngine {
         });
     }
 
-    /// Registers again every slot the breaker disabled (frame-budget overruns, slow frames or
-    /// throwing updates), e.g. after `applyUserProperties`. Returns `(slot, initial value)` of
-    /// the slots that came back; a slot whose script fails to start stays off.
+    /// Registers again every slot the breaker disabled for throwing updates, e.g. after
+    /// `applyUserProperties`. Slots disabled for being slow stay off: re-running them would only
+    /// repeat the jank. Returns `(slot, initial value)` of the slots that came back; a slot whose
+    /// script fails to start stays off.
     pub fn reenable_disabled_slots(&self) -> Vec<(String, String)> {
         let off = std::mem::take(&mut *self.off_slots.borrow_mut());
         let mut back = Vec::new();
         for slot in off {
+            if self.slow_off.borrow().contains(&slot) {
+                self.off_slots.borrow_mut().push(slot);
+                continue;
+            }
             let Some(r) = self.registrations.borrow().get(&slot).cloned() else {
                 continue;
             };
@@ -1643,6 +1652,7 @@ impl SceneScriptEngine {
                         "script '{slot}' took over {SLOW_SLOT_MS} ms for {SLOW_STRIKES} frames in a row; disabled"
                     );
                     self.disable_slot(&slot);
+                    self.slow_off.borrow_mut().insert(slot.clone());
                 }
                 for slot in failed {
                     tracing::warn!(
@@ -1699,6 +1709,7 @@ impl SceneScriptEngine {
                 "script '{slot}' overran the frame budget {OVERRUN_STRIKES} frames in a row; disabled"
             );
             self.disable_slot(&slot);
+            self.slow_off.borrow_mut().insert(slot);
         }
     }
 

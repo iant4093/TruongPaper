@@ -424,6 +424,35 @@ fn sibling_dir(workshop_root: &Path, name: &str) -> PathBuf {
     workshop_root.parent().unwrap_or(workshop_root).join(name)
 }
 
+/// Cleans up after an install that did not finish: a `workshop-backup/<id>` whose item is gone
+/// is moved back (the app stopped mid-swap), any other backup is deleted, and staging folders
+/// no running download owns are deleted. Errors are ignored; the next download tries again.
+fn recover_install_leftovers(workshop_root: &Path, active: &[String]) {
+    let entries = |dir: PathBuf| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .collect::<Vec<_>>()
+    };
+    for entry in entries(sibling_dir(workshop_root, "workshop-backup")) {
+        let target = workshop_root.join(entry.file_name());
+        if target.exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        } else {
+            let _ = std::fs::create_dir_all(workshop_root);
+            let _ = std::fs::rename(entry.path(), &target);
+        }
+    }
+    for entry in entries(sibling_dir(workshop_root, "workshop-staging")) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !active.contains(&name) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Replaces `target` with the finished `staged` folder. The old `target` is kept in `backup`
 /// until the swap succeeds and restored if it does not.
 fn install_staged(staged: &Path, target: &Path, backup: &Path) -> std::io::Result<()> {
@@ -554,6 +583,10 @@ pub async fn steam_download_workshop_item(
     // complete, so a failed or cancelled (re)download never leaves a half-written item.
     let staging_dir = staging_dir_for(&state.workshop_dir(), &workshop_id);
     let backup_dir = backup_dir_for(&state.workshop_dir(), &workshop_id);
+    // Tidy what a crash or a locked file left behind before this download looks at the folders.
+    let active: Vec<String> = state.steam.downloads.lock().keys().cloned().collect();
+    let root = state.workshop_dir();
+    let _ = tokio::task::spawn_blocking(move || recover_install_leftovers(&root, &active)).await;
     let existed = out_dir.exists();
     let staging = staging_dir.clone();
     let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(staging)).await;
@@ -802,6 +835,34 @@ mod tests {
         drop(guard);
         assert!(!session.cancel_download("1"));
         assert!(session.track_download("1").is_ok());
+    }
+
+    #[test]
+    fn leftovers_are_restored_or_removed() {
+        let base = std::env::temp_dir().join(format!("tp-leftover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("workshop");
+        std::fs::create_dir_all(root.join("kept")).unwrap();
+        for d in [
+            "workshop-backup/lost",
+            "workshop-backup/kept",
+            "workshop-staging/old",
+            "workshop-staging/live",
+        ] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        recover_install_leftovers(&root, &["live".to_string()]);
+        assert!(
+            root.join("lost").is_dir(),
+            "a backup whose item vanished comes back"
+        );
+        assert!(!base.join("workshop-backup/kept").exists());
+        assert!(!base.join("workshop-staging/old").exists());
+        assert!(
+            base.join("workshop-staging/live").is_dir(),
+            "a running download keeps its staging"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

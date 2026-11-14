@@ -185,6 +185,8 @@ let applySeq = 0;
 let settingsSeq = 0;
 /** Writes not yet confirmed; `settings://changed` must not flicker the optimistic value. */
 let settingsInFlight = 0;
+/** Last span-unsupported message, so one load on several displays shows it once. */
+let lastSpanToast = { key: '', at: 0 };
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -469,7 +471,12 @@ export const useAppStore = create<AppState>((set, get) => {
             : state);
         }),
         // Web, video and application wallpapers cannot span; the backend says so once per load.
-        listen<{ monitorId: string; wallpaperId: string | null; message: string }>('wallpaper://span-unsupported', () => {
+        listen<{ monitorId: string; wallpaperId: string | null; message: string }>('wallpaper://span-unsupported', (event) => {
+          // The backend sends one per display; show the message once per wallpaper.
+          const key = event.payload?.wallpaperId ?? '';
+          const now = Date.now();
+          if (key === lastSpanToast.key && now - lastSpanToast.at < 3000) return;
+          lastSpanToast = { key, at: now };
           toast.info("This wallpaper type can't span displays, so it stays on one display.");
         }),
         // Every load reports its own list, so it replaces the previous one (an empty list clears it).

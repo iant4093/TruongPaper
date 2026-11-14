@@ -280,10 +280,15 @@ pub struct FaultLedger {
     current: Option<String>,
     errors: HashMap<String, Vec<Instant>>,
     panics: HashMap<String, u32>,
-    blocked: HashSet<String>,
+    /// Blocked scenes and when they were blocked. A block expires after [`FAULT_BLOCK_FOR`], so a
+    /// one-off driver hiccup does not hide a wallpaper until the app restarts.
+    blocked: HashMap<String, Instant>,
     /// Blocked since the last [`Self::take_newly_blocked`].
     fresh: Vec<String>,
 }
+
+/// How long a blocked scene stays blocked.
+const FAULT_BLOCK_FOR: Duration = Duration::from_secs(10 * 60);
 
 impl FaultLedger {
     pub fn set_current(&mut self, key: Option<&str>) {
@@ -293,20 +298,29 @@ impl FaultLedger {
     }
 
     pub fn is_blocked(&self, key: &str) -> bool {
-        self.blocked.contains(key)
+        self.blocked_at(key, Instant::now())
+    }
+
+    fn blocked_at(&self, key: &str, now: Instant) -> bool {
+        self.blocked
+            .get(key)
+            .is_some_and(|t| now.saturating_duration_since(*t) < FAULT_BLOCK_FOR)
     }
 
     fn block(&mut self, key: &str) {
-        if self.blocked.insert(key.to_string()) {
+        let now = Instant::now();
+        if !self.blocked_at(key, now) {
+            self.blocked.insert(key.to_string(), now);
             self.fresh.push(key.to_string());
         }
         self.errors.remove(key);
+        self.panics.remove(key);
     }
 
     /// An uncaptured GPU error happened. Returns the scene it was blamed on when this blocked it.
     pub fn note_error(&mut self, now: Instant) -> Option<String> {
         let key = self.current.clone()?;
-        if self.blocked.contains(&key) {
+        if self.blocked_at(&key, now) {
             return None;
         }
         let log = self.errors.entry(key.clone()).or_default();
@@ -324,7 +338,7 @@ impl FaultLedger {
         let key = self.current.take()?;
         let n = self.panics.entry(key.clone()).or_insert(0);
         *n += 1;
-        if *n >= FAULT_PANIC_LIMIT && !self.blocked.contains(&key) {
+        if *n >= FAULT_PANIC_LIMIT && !self.is_blocked(&key) {
             self.block(&key);
             return Some(key);
         }

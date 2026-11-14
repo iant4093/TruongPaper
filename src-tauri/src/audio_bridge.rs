@@ -39,7 +39,7 @@ pub fn set_tick_hz(hz: f32) {
 
 static BRIDGE: Mutex<Option<AudioBridge>> = parking_lot::const_mutex(None);
 
-fn start() -> AudioBridge {
+fn start() -> Option<AudioBridge> {
     let all_paused = Arc::new(AtomicBool::new(false));
     let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
     // `Arc<ArcSwap<AudioSpectrumFrame>>`; the type comes from the worker signature (the
@@ -49,15 +49,17 @@ fn start() -> AudioBridge {
         Arc::clone(&latest),
         Arc::clone(&gain),
         Arc::clone(&all_paused),
-    );
+    )
+    .map_err(|error| tracing::warn!("could not start the audio analyzer thread: {error}"))
+    .ok()?;
     worker.set_tick_hz(f32::from_bits(TICK_HZ.load(Ordering::Relaxed)));
     tracing::info!("system audio loopback worker started");
-    AudioBridge {
+    Some(AudioBridge {
         read: Box::new(move || latest.load_full()),
         all_paused,
         gain,
         _worker: worker,
-    }
+    })
 }
 
 /// Sanitized analyzer gain for `UniversalAdjustments::audio_sensitivity`.
@@ -88,7 +90,9 @@ pub fn set_demand(demand: Option<f32>) {
             if running.is_some() {
                 return;
             }
-            let bridge = start();
+            let Some(bridge) = start() else {
+                return;
+            };
             bridge.gain.store(gain, Ordering::Relaxed);
             let loser = {
                 let mut current = BRIDGE.lock();

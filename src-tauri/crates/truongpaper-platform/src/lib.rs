@@ -41,13 +41,14 @@ pub const VIDEO_WALLPAPER_HOST_HTML: &str = include_str!("video-wallpaper-host.h
 pub const WEB_WALLPAPER_PRELOAD_JS: &str = include_str!("web-wallpaper-preload.js");
 
 /// WebView2 `AdditionalBrowserArguments` that keep Web/Video wallpapers playing behind the
-/// desktop icons without a user gesture (spec section 6.3).
+/// desktop icons without a user gesture (spec section 6.3). Site isolation stays on: the pages
+/// are untrusted Workshop content.
 pub const WEBVIEW2_WALLPAPER_BROWSER_ARGS: &str = "--autoplay-policy=no-user-gesture-required \
 --disable-background-timer-throttling \
 --disable-backgrounding-occluded-windows \
 --disable-background-media-suspend \
 --disable-renderer-backgrounding \
---disable-features=WebContentsOcclusion,IsolateOrigins,site-per-process";
+--disable-features=WebContentsOcclusion";
 
 /// `WKAudiovisualMediaTypeNone`: value for `WKWebViewConfiguration.mediaTypesRequiringUserActionForPlayback`
 /// (spec section 6.3). Also set `preferences.javaScriptCanOpenWindowsAutomatically = false`.
@@ -122,6 +123,21 @@ mod tests {
         assert_eq!(parse_http_byte_range("bytes=-", 10), None);
         assert_eq!(parse_http_byte_range("items=0-1", 10), None);
         assert_eq!(parse_http_byte_range("bytes=5", 10), None);
+    }
+
+    #[test]
+    fn webview2_args_keep_site_isolation_on() {
+        assert!(!WEBVIEW2_WALLPAPER_BROWSER_ARGS.contains("site-per-process"));
+        assert!(!WEBVIEW2_WALLPAPER_BROWSER_ARGS.contains("IsolateOrigins"));
+        assert!(!WEBVIEW2_WALLPAPER_BROWSER_ARGS.contains("--disable-web-security"));
+        assert!(
+            WEBVIEW2_WALLPAPER_BROWSER_ARGS.contains("--autoplay-policy=no-user-gesture-required")
+        );
+        let disabled = WEBVIEW2_WALLPAPER_BROWSER_ARGS
+            .split("--disable-features=")
+            .nth(1)
+            .unwrap();
+        assert_eq!(disabled, "WebContentsOcclusion");
     }
 
     #[test]

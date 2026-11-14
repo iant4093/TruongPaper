@@ -23,7 +23,6 @@
     "autostart:default",
     "updater:default",
     "process:allow-restart",
-    "shell:default",
     "shell:allow-open",
     "allow-photo-get-status",
     "allow-photo-fetch-public-catalog",

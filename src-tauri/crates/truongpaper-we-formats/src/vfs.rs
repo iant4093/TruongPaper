@@ -105,6 +105,25 @@ fn open_file_asset(path: &Path) -> IoResult<VfsAsset<'static>> {
     Ok(VfsAsset::File(file, size))
 }
 
+/// Opens `root/rel` when it is a regular file whose canonical path stays inside the canonical
+/// `root`. `Ok(None)` means no such file; a symlink or junction that points outside `root` is
+/// `PermissionDenied`, so untrusted wallpaper folders cannot read arbitrary local files.
+fn open_contained(root: &Path, rel: &str) -> IoResult<Option<VfsAsset<'static>>> {
+    let candidate = root.join(rel);
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let real = candidate.canonicalize()?;
+    let real_root = root.canonicalize()?;
+    if !real.starts_with(&real_root) {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("Rejected link escaping the wallpaper folder: {rel}"),
+        ));
+    }
+    open_file_asset(&real).map(Some)
+}
+
 impl WeVirtualFileSystem {
     pub fn mount(wallpaper_dir: PathBuf, core_assets_dir: PathBuf) -> Self {
         let scene_pkg = MappedPkg::open(&wallpaper_dir.join("scene.pkg")).ok();
@@ -184,9 +203,8 @@ impl WeVirtualFileSystem {
         let rel = Self::sanitize_virtual_path(virtual_path)?;
 
         // Layer 1: loose file in the wallpaper directory.
-        let loose_path = self.wallpaper_dir.join(&rel);
-        if loose_path.is_file() {
-            return open_file_asset(&loose_path);
+        if let Some(asset) = open_contained(&self.wallpaper_dir, &rel)? {
+            return Ok(asset);
         }
 
         // Layer 2: scene.pkg.
@@ -204,16 +222,14 @@ impl WeVirtualFileSystem {
         }
 
         // Layer 4a: core Wallpaper Engine assets directory.
-        let core_path = self.core_assets_dir.join(&rel);
-        if core_path.is_file() {
-            return open_file_asset(&core_path);
+        if let Some(asset) = open_contained(&self.core_assets_dir, &rel)? {
+            return Ok(asset);
         }
 
         // Layer 4b: bundled clean-room core assets.
         if let Some(bundled) = &self.bundled_assets_dir {
-            let bundled_path = bundled.join(&rel);
-            if bundled_path.is_file() {
-                return open_file_asset(&bundled_path);
+            if let Some(asset) = open_contained(bundled, &rel)? {
+                return Ok(asset);
             }
         }
 
@@ -369,6 +385,39 @@ mod tests {
         let vfs = WeVirtualFileSystem::mount(tmp.0.clone(), tmp.0.join("core"));
         assert!(vfs.scene_pkg.is_none() && vfs.gifscene_pkg.is_none());
         assert!(vfs.exists("shaders/commands/copy.vert"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_the_wallpaper_dir_is_denied() {
+        let tmp = TempDir::new("symlink");
+        let (wall, outside) = (tmp.0.join("wall"), tmp.0.join("outside"));
+        fs::create_dir_all(wall.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        fs::write(wall.join("real.txt"), b"ok").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), wall.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, wall.join("sub/dir")).unwrap();
+        std::os::unix::fs::symlink(wall.join("real.txt"), wall.join("inner.txt")).unwrap();
+
+        let vfs = WeVirtualFileSystem::mount(wall.clone(), tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("real.txt").unwrap(), b"ok");
+        // A link that stays inside the folder is fine.
+        assert_eq!(vfs.read_bytes("inner.txt").unwrap(), b"ok");
+        for p in ["link.txt", "sub/dir/secret.txt"] {
+            assert_eq!(
+                vfs.read_bytes(p).unwrap_err().kind(),
+                ErrorKind::PermissionDenied,
+                "{p}"
+            );
+        }
+        assert!(!vfs.exists("link.txt"));
+
+        // The mounted folder itself may be reached through a symlink.
+        let alias = tmp.0.join("alias");
+        std::os::unix::fs::symlink(&wall, &alias).unwrap();
+        let vfs = WeVirtualFileSystem::mount(alias, tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("real.txt").unwrap(), b"ok");
     }
 
     #[test]

@@ -80,6 +80,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "https://\\w+.*"
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4NTMyRDQ1NTdDOTYxMTcKUldRWFljbFhSUzFUNkZ5Wm43anhwUmdYWUgvYTdsR3ZWUWU4Y3c4aDNpUmx0TFBjUkZuTHFJZ1QK",
       "endpoints": [

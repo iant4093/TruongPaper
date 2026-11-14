@@ -942,7 +942,9 @@ mod platform {
     impl DesktopSurfaces {
         pub fn new() -> Self {
             let (tx, rx) = channel();
-            win_desktop::spawn_desktop_lifecycle_watcher(tx);
+            if let Err(error) = win_desktop::spawn_desktop_lifecycle_watcher(tx) {
+                tracing::warn!("desktop lifecycle watcher not started: {error}");
+            }
             Self {
                 hwnds: Vec::new(),
                 events: rx,
@@ -1097,12 +1099,21 @@ mod platform {
 
 /// `MacVideoDecoder` as a [`VideoFrameSource`] (BGRA frames, row stride may be padded).
 #[cfg(target_os = "macos")]
-struct MacVideoSource(truongpaper_platform::mac_video::MacVideoDecoder);
+struct MacVideoSource {
+    decoder: truongpaper_platform::mac_video::MacVideoDecoder,
+    /// Pixel buffer handed back by the renderer after an upload, reused for the next frame.
+    pool: Vec<u8>,
+}
 
 #[cfg(target_os = "macos")]
 impl VideoFrameSource for MacVideoSource {
     fn latest_frame(&mut self) -> Option<truongpaper_renderer::VideoFrame> {
-        let (width, height, stride, data) = self.0.copy_latest_bgra_frame()?;
+        let mut data = std::mem::take(&mut self.pool);
+        let Some((width, height, stride)) = self.decoder.copy_latest_bgra_frame_into(&mut data)
+        else {
+            self.pool = data;
+            return None;
+        };
         Some(truongpaper_renderer::VideoFrame {
             width,
             height,
@@ -1114,17 +1125,21 @@ impl VideoFrameSource for MacVideoSource {
 
     fn apply_settings(&mut self, settings: VideoPlaybackSettings) {
         let s = settings.clamped();
-        self.0.set_rate(s.speed);
-        self.0.set_volume(s.effective_volume());
-        self.0.set_muted(s.is_effectively_muted());
+        self.decoder.set_rate(s.speed);
+        self.decoder.set_volume(s.effective_volume());
+        self.decoder.set_muted(s.is_effectively_muted());
     }
 
     fn set_paused(&mut self, paused: bool) {
         if paused {
-            self.0.pause();
+            self.decoder.pause();
         } else {
-            self.0.play();
+            self.decoder.play();
         }
+    }
+
+    fn recycle_frame(&mut self, frame: truongpaper_renderer::VideoFrame) {
+        self.pool = frame.data;
     }
 }
 
@@ -1166,7 +1181,10 @@ fn open_embedded_videos(
         #[cfg(target_os = "macos")]
         match truongpaper_platform::mac_video::MacVideoDecoder::open(&mp4) {
             Ok(decoder) => {
-                let mut source = MacVideoSource(decoder);
+                let mut source = MacVideoSource {
+                    decoder,
+                    pool: Vec::new(),
+                };
                 // Muted until the render loop makes this monitor the scene's sound owner.
                 source.apply_settings(VideoPlaybackSettings {
                     muted: true,

@@ -310,45 +310,48 @@ unsafe extern "system" fn lifecycle_wndproc(
 /// and `WM_DISPLAYCHANGE` / `SPI_SETWORKAREA` (monitor hotplug, resolution, or DPI scaling changes).
 ///
 /// Only the first call installs the sender; later calls are ignored.
-pub fn spawn_desktop_lifecycle_watcher(tx: Sender<DesktopLifecycleEvent>) {
+pub fn spawn_desktop_lifecycle_watcher(tx: Sender<DesktopLifecycleEvent>) -> std::io::Result<()> {
     if LIFECYCLE_TX.set(tx).is_err() {
-        return;
+        return Ok(());
     }
-    std::thread::spawn(|| unsafe {
-        let msg_id = RegisterWindowMessageW(w!("TaskbarCreated"));
-        let _ = TASKBAR_CREATED_MSG.set(msg_id);
+    std::thread::Builder::new()
+        .name("truongpaper-lifecycle".into())
+        .spawn(|| unsafe {
+            let msg_id = RegisterWindowMessageW(w!("TaskbarCreated"));
+            let _ = TASKBAR_CREATED_MSG.set(msg_id);
 
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-        let class_name = w!("TruongPaperLifecycleWatcher");
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(lifecycle_wndproc),
-            hInstance: hinstance.into(),
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        RegisterClassExW(&wc);
+            let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+            let class_name = w!("TruongPaperLifecycleWatcher");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(lifecycle_wndproc),
+                hInstance: hinstance.into(),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            RegisterClassExW(&wc);
 
-        // Must be a top-level WS_POPUP window (NOT HWND_MESSAGE) to receive TaskbarCreated and WM_DISPLAYCHANGE broadcasts
-        if let Ok(_hwnd) = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            class_name,
-            w!(""),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(hinstance.into()),
-            None,
-        ) {
-            let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                let _ = TranslateMessage(&msg);
-                let _ = DispatchMessageW(&msg);
+            // Must be a top-level WS_POPUP window (NOT HWND_MESSAGE) to receive TaskbarCreated and WM_DISPLAYCHANGE broadcasts
+            if let Ok(_hwnd) = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class_name,
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            ) {
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    let _ = DispatchMessageW(&msg);
+                }
             }
-        }
-    });
+        })?;
+    Ok(())
 }

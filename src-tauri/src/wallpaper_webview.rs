@@ -78,6 +78,23 @@ pub fn pause_script(kind: WebviewKind, paused: bool) -> String {
     }
 }
 
+/// `true` for the only pages a wallpaper window may navigate to: our own `wpe://localhost`
+/// (`WKWebView`) and `http(s)://wpe.localhost` (`WebView2`) origins, plus `about:blank`.
+///
+/// `subframes_possible` widens this for engines whose navigation callback also fires for
+/// iframes (`WKWebView`; `WebView2` only reports top-level navigations): ordinary web, `data:`
+/// and `blob:` documents stay allowed there so embedded players keep working, while every other
+/// scheme (`file:`, `tel:`, app-launching schemes) is refused.
+fn wallpaper_navigation_allowed(url: &tauri::Url, subframes_possible: bool) -> bool {
+    match url.scheme() {
+        "wpe" => url.host_str() == Some("localhost"),
+        "http" | "https" => subframes_possible || url.host_str() == Some("wpe.localhost"),
+        "about" => url.as_str() == "about:blank",
+        "data" | "blob" => subframes_possible,
+        _ => false,
+    }
+}
+
 pub fn web_volume_script(volume: f32, muted: bool) -> String {
     let level = if muted || !volume.is_finite() {
         0.0
@@ -395,6 +412,8 @@ pub async fn show(
     #[cfg(target_os = "macos")]
     let kind = spec.kind;
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::CustomProtocol(url))
+        // Wallpaper pages are untrusted: no popups or extra windows.
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("TruongPaper Wallpaper")
         .decorations(false)
         .skip_taskbar(true)
@@ -443,8 +462,13 @@ pub async fn show(
                     }
                     return false;
                 }
-                true
+                wallpaper_navigation_allowed(url, true)
             });
+    }
+    // WebView2 reports top-level navigations only, so the strict form applies.
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.on_navigation(|url| wallpaper_navigation_allowed(url, false));
     }
     if spec.kind == WebviewKind::Web {
         builder = builder
@@ -930,6 +954,49 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
 mod tests {
     use super::*;
     use crate::models::UniversalAdjustments;
+
+    #[test]
+    fn navigation_is_limited_to_our_own_origin() {
+        let url = |s: &str| tauri::Url::parse(s).unwrap();
+        // Top-level (WebView2): only the app origin.
+        for ok in [
+            "wpe://localhost/index.html",
+            "http://wpe.localhost/index.html?x=1",
+            "https://wpe.localhost/a/b.html",
+            "about:blank",
+        ] {
+            assert!(wallpaper_navigation_allowed(&url(ok), false), "{ok}");
+        }
+        for bad in [
+            "https://example.com/",
+            "http://wpe.localhost.evil.example/",
+            "wpe://evil/index.html",
+            "file:///etc/passwd",
+            "data:text/html,hi",
+            "blob:https://wpe.localhost/1",
+            "about:srcdoc",
+            "tel:123",
+        ] {
+            assert!(!wallpaper_navigation_allowed(&url(bad), false), "{bad}");
+        }
+        // WKWebView also reports iframe navigations: embeds work, local files and app schemes
+        // stay blocked.
+        for ok in [
+            "https://player.example/embed",
+            "data:text/html,hi",
+            "wpe://localhost/x",
+        ] {
+            assert!(wallpaper_navigation_allowed(&url(ok), true), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "tel:123",
+            "wpe://evil/x",
+            "javascript:alert(1)",
+        ] {
+            assert!(!wallpaper_navigation_allowed(&url(bad), true), "{bad}");
+        }
+    }
 
     #[test]
     fn bridge_ticks_fast_only_for_live_web_pages() {

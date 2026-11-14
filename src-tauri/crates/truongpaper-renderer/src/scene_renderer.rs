@@ -945,6 +945,51 @@ struct GpuPuppet {
     scratch: Vec<LayerVertex>,
 }
 
+/// Whether a base shader stage is one of the bundled `genericimage*` shaders, which sample
+/// `g_Texture0` once and multiply it by the layer tint (linear, so the draw size does not change
+/// the result).
+fn is_stock_tint_shader(src: &str) -> bool {
+    src.trim_start()
+        .starts_with("// TruongPaper clean-room base shader for image layers")
+}
+
+/// The composite blend of a plan that is only `DrawBase` into FBO A followed by `Composite` of
+/// FBO A (no effect pass, no copy, no full-frame binding).
+fn plain_image_blend(plan: &EffectChainPlan) -> Option<BlendMode> {
+    match plan.steps.as_slice() {
+        [EffectStep::DrawBase {
+            into: RenderTargetId::FboA,
+        }, EffectStep::Composite {
+            source: RenderTargetId::FboA,
+            blending,
+        }] if !plan.uses_full_frame_buffer => Some(*blending),
+        _ => None,
+    }
+}
+
+/// Whether any step of `plan` writes, reads or samples the target `id`. Targets nothing uses
+/// (typically FBO B of a layer without effects) are not allocated.
+fn plan_uses_target(plan: &EffectChainPlan, id: &RenderTargetId) -> bool {
+    plan.steps.iter().any(|step| match step {
+        EffectStep::DrawBase { into } => into == id,
+        EffectStep::Pass(p) => {
+            &p.target == id
+                || p.textures
+                    .values()
+                    .any(|b| matches!(b, TextureBinding::Target(t) if t == id))
+        }
+        EffectStep::Copy { source, target } => source == id || target == id,
+        EffectStep::Composite { source, .. } => source == id,
+    }) || {
+        // A pass that failed to compile falls back to a copy from the other ping-pong buffer.
+        matches!(id, RenderTargetId::FboA | RenderTargetId::FboB)
+            && plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, EffectStep::Pass(p) if p.swaps))
+    }
+}
+
 struct GpuEffectLayer {
     plan: EffectChainPlan,
     targets: HashMap<RenderTargetId, GpuTarget>,
@@ -957,6 +1002,9 @@ struct GpuEffectLayer {
     is_composition: bool,
     samples_scene: bool,
     fullscreen: bool,
+    /// A plain image layer (no effect passes) drawn straight into the destination with this
+    /// blend, instead of through FBO A and a composite pass. No FBO is allocated for it.
+    direct: Option<BlendMode>,
     /// Composition layers with child layers: the children render into this group target
     /// (layer-local space) instead of the scene, and it is the layer's base image.
     group: Option<GpuGroup>,
@@ -2725,6 +2773,17 @@ impl SceneRenderer {
             self.layers.push(gpu);
         }
         self.build_groups(device, graph);
+        let (mut image_layers, mut direct_layers, mut fbos) = (0usize, 0usize, 0usize);
+        for gpu in self.layers.iter().flatten() {
+            if let GpuLayer::Effects(fx) = gpu {
+                image_layers += 1;
+                direct_layers += usize::from(fx.direct.is_some());
+                fbos += fx.targets.len();
+            }
+        }
+        tracing::debug!(
+            "scene layers: {image_layers} effect/image, {direct_layers} drawn directly, {fbos} layer FBOs"
+        );
 
         let bloom =
             BloomPlan::from_general(&graph.scene.general, &graph.user_props, graph.scene_size);
@@ -2898,6 +2957,78 @@ impl SceneRenderer {
         self.group_owner = owner;
     }
 
+    /// The blend a plain image layer can be drawn with straight into its destination (see
+    /// [`GpuEffectLayer::direct`]), or `None` when it needs the FBO round trip. The result must
+    /// match the two-pass render, so every case that the FBO changes is refused: another layer
+    /// reading the output, a backdrop blend, a puppet, a base texture that is resampled to the
+    /// layer size, and a tint above 1 (the 8-bit FBO clamps it, the HDR scene does not).
+    fn direct_draw_blend(
+        &self,
+        vfs: &WeVirtualFileSystem,
+        layer: &SceneLayer,
+        plan: &EffectChainPlan,
+        is_composition: bool,
+        fullscreen: bool,
+        samples_scene: bool,
+    ) -> Option<BlendMode> {
+        // Debug switch for A/B pixel checks of the direct path.
+        if std::env::var_os("TRUONGPAPER_NO_DIRECT_DRAW").is_some() {
+            return None;
+        }
+        let SceneLayerKind::Image {
+            texture_paths,
+            material,
+            puppet_path: None,
+            ..
+        } = &layer.kind
+        else {
+            return None;
+        };
+        // A base shader runs per output pixel. Drawn at screen size instead of texture size, only
+        // a shader that samples the image once and scales it linearly gives the same result
+        // (a flow-map shader, for one, does not), so custom base shaders keep the FBO.
+        if let Some(mpass) = material.as_ref().and_then(|m| m.passes.first()) {
+            let (vert, frag) = shader_stage_paths(&mpass.shader);
+            let stock = |path: &str| {
+                vfs.read_bytes(path)
+                    .is_ok_and(|b| is_stock_tint_shader(&String::from_utf8_lossy(&b)))
+            };
+            if !(stock(&vert) && stock(&frag)) {
+                return None;
+            }
+        }
+        if is_composition
+            || fullscreen
+            || samples_scene
+            || is_color_blend_mode(layer.color_blend_mode)
+            || layer
+                .id
+                .is_some_and(|id| self.layer_outputs.contains_key(&id))
+            || texture_paths
+                .iter()
+                .flatten()
+                .any(|p| p == RT_FULL_FRAME_BUFFER)
+        {
+            return None;
+        }
+        let tint = layer.color * layer.brightness;
+        if !(tint.max_element() <= 1.0 && tint.min_element() >= 0.0 && layer.alpha <= 1.0) {
+            return None;
+        }
+        let tex0 = texture_paths
+            .first()
+            .cloned()
+            .flatten()
+            .and_then(|p| self.textures.get(&p));
+        if let Some(t) = tex0 {
+            // The FBO has the layer size; a differently sized image is resampled into it first.
+            if t.resolution.z != plan.width as f32 || t.resolution.w != plan.height as f32 {
+                return None;
+            }
+        }
+        plain_image_blend(plan)
+    }
+
     fn load_effect_layer(
         &mut self,
         device: &wgpu::Device,
@@ -2946,9 +3077,15 @@ impl SceneRenderer {
             self.ensure_composite_pipeline(device, fbo.format, BlendMode::Normal);
         }
 
+        let direct =
+            self.direct_draw_blend(vfs, layer, &plan, is_composition, fullscreen, samples_scene);
+
         // Phase 2 (immutable): targets, passes, bind groups.
         let mut targets = HashMap::new();
         for fbo in plan.all_fbos() {
+            if direct.is_some() || !plan_uses_target(&plan, &fbo.id) {
+                continue;
+            }
             let label = format!("{}:{:?}", layer.key(), fbo.id);
             targets.insert(fbo.id.clone(), {
                 let (fw, fh) = self.budget_fbo(device, fbo.width, fbo.height, fbo.format);
@@ -3015,8 +3152,12 @@ impl SceneRenderer {
                     &bindings,
                     tex0_format,
                     RenderTargetId::FboA,
-                    FBO_FORMAT,
-                    BlendMode::Normal,
+                    if direct.is_some() {
+                        HDR_FORMAT
+                    } else {
+                        FBO_FORMAT
+                    },
+                    direct.unwrap_or(BlendMode::Normal),
                 ) {
                     Ok(mut p) => {
                         p.sprite = tex0.and_then(|t| t.sprite.clone());
@@ -3218,6 +3359,7 @@ impl SceneRenderer {
             is_composition,
             samples_scene,
             fullscreen,
+            direct,
             group: None,
         })
     }
@@ -3968,6 +4110,68 @@ impl SceneRenderer {
         }
     }
 
+    /// Draws a plain image layer straight into `dest` (see [`GpuEffectLayer::direct`]).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_direct(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        fx: &GpuEffectLayer,
+        layer: &SceneLayer,
+        base_values: &UniformValues,
+        matrices: &PassMatrices,
+        blend: BlendMode,
+        dest: &GpuTarget,
+    ) {
+        self.mark_drawn(dest);
+        let vb = &fx.base_quad;
+        if let Some(base) = &fx.base {
+            let local =
+                layer_local_projection(Vec2::new(fx.plan.width as f32, fx.plan.height as f32));
+            // The base shader sees the scene projection where the FBO path gave it the layer's
+            // own; everything else it reads is what the FBO path passed.
+            let values = UniformValues {
+                matrices: PassMatrices {
+                    model_view_projection: matrices.model_view_projection,
+                    model_view_projection_inverse: matrices.model_view_projection_inverse,
+                    model: Mat4::IDENTITY,
+                    model_inverse: Mat4::IDENTITY,
+                    view_projection: local,
+                },
+                alpha: layer.alpha,
+                color: layer.color,
+                brightness: layer.brightness,
+                ..base_values.clone()
+            };
+            Self::write_we_uniforms(queue, base, &values, None);
+            run_pass(encoder, "scene_layer_direct", &dest.view, None, |rp| {
+                rp.set_pipeline(&base.pipeline);
+                rp.set_bind_group(0, &base.uniform_bind_group, &[]);
+                rp.set_bind_group(1, &base.texture_bind_group, &[]);
+                rp.set_vertex_buffer(0, vb.slice(..));
+                rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                rp.draw_indexed(0..6, 0, 0..1);
+            });
+        } else if let Some(draw) = &fx.base_copy {
+            queue.write_buffer(
+                &draw.uniform,
+                0,
+                bytemuck::bytes_of(&SimpleUniforms::new(
+                    matrices.model_view_projection,
+                    (layer.color * layer.brightness).extend(layer.alpha),
+                )),
+            );
+            let pipeline = &self.composite_pipelines[&(HDR_FORMAT, blend)];
+            run_pass(encoder, "scene_layer_direct_copy", &dest.view, None, |rp| {
+                rp.set_pipeline(pipeline);
+                rp.set_bind_group(0, &draw.bind_group, &[]);
+                rp.set_vertex_buffer(0, vb.slice(..));
+                rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
+                rp.draw_indexed(0..6, 0, 0..1);
+            });
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_effect_layer(
         &self,
@@ -3983,6 +4187,21 @@ impl SceneRenderer {
         dest: &GpuTarget,
     ) {
         let layer = &graph.layers[li];
+        if let Some(blend) = fx.direct {
+            if graph.effective_visible(li) {
+                self.draw_direct(
+                    queue,
+                    encoder,
+                    fx,
+                    layer,
+                    base_values,
+                    matrices,
+                    blend,
+                    dest,
+                );
+            }
+            return;
+        }
         let into_scene = std::ptr::eq(dest, &self.scene);
         let color_blend = is_color_blend_mode(layer.color_blend_mode)
             && graph.effective_visible(li)
@@ -4323,6 +4542,93 @@ impl SceneRenderer {
 #[cfg(test)]
 mod perf_tests {
     use super::*;
+    use crate::effect_chain::FboDesc;
+
+    fn plan(steps: Vec<EffectStep>) -> EffectChainPlan {
+        let fbo = |id| FboDesc {
+            id,
+            width: 8,
+            height: 8,
+            format: FBO_FORMAT,
+        };
+        EffectChainPlan {
+            width: 8,
+            height: 8,
+            ping_pong: [fbo(RenderTargetId::FboA), fbo(RenderTargetId::FboB)],
+            fbos: Vec::new(),
+            steps,
+            uses_full_frame_buffer: false,
+            warnings: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn plain_steps(blending: BlendMode) -> Vec<EffectStep> {
+        vec![
+            EffectStep::DrawBase {
+                into: RenderTargetId::FboA,
+            },
+            EffectStep::Composite {
+                source: RenderTargetId::FboA,
+                blending,
+            },
+        ]
+    }
+
+    #[test]
+    fn plain_image_plans_draw_directly_with_their_blend() {
+        assert_eq!(
+            plain_image_blend(&plan(plain_steps(BlendMode::Additive))),
+            Some(BlendMode::Additive)
+        );
+        let mut full_frame = plan(plain_steps(BlendMode::Normal));
+        full_frame.uses_full_frame_buffer = true;
+        assert_eq!(plain_image_blend(&full_frame), None);
+        // Anything between the base draw and the composite needs the FBO.
+        let mut steps = plain_steps(BlendMode::Normal);
+        steps.insert(
+            1,
+            EffectStep::Copy {
+                source: RenderTargetId::FboA,
+                target: RenderTargetId::FboB,
+            },
+        );
+        assert_eq!(plain_image_blend(&plan(steps)), None);
+        // Compositing FBO B, or no composite at all, is not a plain draw.
+        let mut steps = plain_steps(BlendMode::Normal);
+        steps[1] = EffectStep::Composite {
+            source: RenderTargetId::FboB,
+            blending: BlendMode::Normal,
+        };
+        assert_eq!(plain_image_blend(&plan(steps)), None);
+        assert_eq!(plain_image_blend(&plan(Vec::new())), None);
+    }
+
+    #[test]
+    fn only_bundled_generic_image_shaders_draw_directly() {
+        let ours = "// TruongPaper clean-room base shader for image layers (\"genericimage\").\nvoid main() {}";
+        assert!(is_stock_tint_shader(ours));
+        assert!(!is_stock_tint_shader(
+            "uniform sampler2D g_Texture1;\nvoid main() {}"
+        ));
+        assert!(!is_stock_tint_shader(""));
+    }
+
+    #[test]
+    fn unused_ping_pong_targets_are_not_allocated() {
+        let p = plan(plain_steps(BlendMode::Normal));
+        assert!(plan_uses_target(&p, &RenderTargetId::FboA));
+        assert!(!plan_uses_target(&p, &RenderTargetId::FboB));
+        let mut steps = plain_steps(BlendMode::Normal);
+        steps.insert(
+            1,
+            EffectStep::Copy {
+                source: RenderTargetId::FboA,
+                target: RenderTargetId::FboB,
+            },
+        );
+        assert!(plan_uses_target(&plan(steps), &RenderTargetId::FboB));
+    }
 
     #[test]
     fn sprite_indices_follow_the_quad_pattern() {

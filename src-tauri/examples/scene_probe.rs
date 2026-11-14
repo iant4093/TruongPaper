@@ -292,6 +292,7 @@ async fn render() -> anyhow::Result<()> {
     // render() + finish + submit (the GPU wait is excluded). Warm-up: first 10% of frames.
     let bench = std::env::var("PROBE_BENCH").is_ok();
     let (mut bench_render, mut bench_submit, mut bench_n) = (0.0f64, 0.0f64, 0u32);
+    let mut bench_step = 0.0f64;
     for i in 0..frame_count {
         let mut encoder = device.create_command_encoder(&Default::default());
         let audio = if synth_audio {
@@ -299,7 +300,9 @@ async fn render() -> anyhow::Result<()> {
         } else {
             [0.0; 64]
         };
+        let t_step = std::time::Instant::now();
         runtime.step(1.0 / 30.0, [0.5, 0.5], false, &audio, &audio);
+        let step_ms = t_step.elapsed().as_secs_f64() * 1000.0;
         if i == 1 {
             if let Some(json) = pending_props.take() {
                 runtime.apply_user_properties(&json)?;
@@ -349,14 +352,16 @@ async fn render() -> anyhow::Result<()> {
         if bench && i >= frame_count / 10 {
             bench_render += render_ms;
             bench_submit += submit_ms;
+            bench_step += step_ms;
             bench_n += 1;
         }
     }
     if bench && bench_n > 0 {
         eprintln!(
-            "BENCH frames={bench_n} render_ms={:.4} render_submit_ms={:.4}",
+            "BENCH frames={bench_n} render_ms={:.4} render_submit_ms={:.4} step_ms={:.4}",
             bench_render / bench_n as f64,
-            bench_submit / bench_n as f64
+            bench_submit / bench_n as f64,
+            bench_step / bench_n as f64
         );
     }
     // PROBE_TRACE=a,b: prints local/world state of layers whose name contains a filter.

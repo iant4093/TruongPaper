@@ -1,9 +1,9 @@
 // src/components/views/SettingsView.tsx
 // Settings: performance, power policy, startup, Steam account & signed auto-updates (docs/06 §5).
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, LogIn, LogOut, RefreshCw, Upload } from 'lucide-react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { useAppStore } from '../../store/useAppStore';
+import { errorMessage, useAppStore } from '../../store/useAppStore';
 import { confirmAction, toast } from '../../store/feedback';
 import { plural } from '../../lib/format';
 import {
@@ -46,17 +46,20 @@ const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = (
   const [next, setNext] = useState(nextHotkey);
   const [pause, setPause] = useState(pauseHotkey);
   const [status, setStatus] = useState<{ error: boolean; text: string } | null>(null);
-  useEffect(() => { setNext(nextHotkey); setPause(pauseHotkey); }, [nextHotkey, pauseHotkey]);
   const dirty = next !== nextHotkey || pause !== pauseHotkey;
+  /** True once the user typed; a settings event then must not overwrite the draft. */
+  const editedRef = useRef(false);
+  useEffect(() => { if (!editedRef.current) { setNext(nextHotkey); setPause(pauseHotkey); } }, [nextHotkey, pauseHotkey]);
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     setStatus(null);
     try {
       await updateSettings({ nextHotkey: next.trim(), pauseHotkey: pause.trim() });
+      editedRef.current = false;
       setStatus({ error: false, text: 'Shortcuts saved' });
       toast.success('Shortcuts saved');
     } catch (err) {
-      setStatus({ error: true, text: err instanceof Error ? err.message : String(err) });
+      setStatus({ error: true, text: errorMessage(err) });
     }
   };
   return (
@@ -65,11 +68,11 @@ const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = (
       <form className="card" style={{ padding: 16 }} onSubmit={(e) => void save(e)}>
         <label className="settings-field">
           <span>Next wallpaper</span>
-          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+Right" value={next} onChange={(e) => setNext(e.target.value)} />
+          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+Right" value={next} onChange={(e) => { editedRef.current = true; setNext(e.target.value); }} />
         </label>
         <label className="settings-field">
           <span>Pause / resume</span>
-          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+P" value={pause} onChange={(e) => setPause(e.target.value)} />
+          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+P" value={pause} onChange={(e) => { editedRef.current = true; setPause(e.target.value); }} />
         </label>
         <div className="view-subtitle" style={{ marginBottom: 10 }}>
           Type a combination such as CmdOrCtrl+Alt+Right. Work anywhere, even when TruongPaper is in the background. Leave empty to turn off.

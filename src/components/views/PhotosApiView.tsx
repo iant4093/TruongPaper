@@ -101,7 +101,9 @@ export const PhotosApiView: React.FC = () => {
   const [albumInput, setAlbumInput] = useState('');
   const [albumMsg, setAlbumMsg] = useState<string | null>(null);
   const [cacheDraft, setCacheDraft] = useState<number | null>(null);
-  const [photoActionPending, setPhotoActionPending] = useState(false);
+  // A counter, so the first action to finish does not re-enable buttons while another still runs.
+  const [pendingActions, setPendingActions] = useState(0);
+  const photoActionPending = pendingActions > 0;
   const [favoritesShown, setFavoritesShown] = useState(TILE_PAGE);
   const [queueShown, setQueueShown] = useState(TILE_PAGE);
   const favoritesSection = useRef<HTMLElement>(null);
@@ -119,14 +121,14 @@ export const PhotosApiView: React.FC = () => {
   const favorites = photoStatus?.favoritePhotos ?? [];
 
   const runPhotoAction = async (action: () => Promise<void>, done?: string) => {
-    setPhotoActionPending(true);
+    setPendingActions((n) => n + 1);
     try {
       await action();
       if (done) toast.success(done);
     } catch (error) {
       toast.error(error);
     } finally {
-      setPhotoActionPending(false);
+      setPendingActions((n) => n - 1);
     }
   };
 

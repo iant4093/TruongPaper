@@ -17,6 +17,7 @@ export const SteamAuthModal: React.FC = () => {
   const [tab, setTab] = useState<'qr' | 'password'>('qr');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [verifying, setVerifying] = useState(false);
   const [twoFaCode, setTwoFaCode] = useState('');
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -179,7 +180,8 @@ export const SteamAuthModal: React.FC = () => {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void submitSteam2FaCode(twoFaCode);
+                  setVerifying(true);
+                  void Promise.resolve(submitSteam2FaCode(twoFaCode)).finally(() => setVerifying(false));
                 }}
                 style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
               >
@@ -195,8 +197,9 @@ export const SteamAuthModal: React.FC = () => {
                   style={{ width: '100%', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 16 }}
                   autoFocus
                   required
+                  disabled={verifying}
                 />
-                <button type="submit" className="button button-primary">
+                <button type="submit" className="button button-primary" disabled={verifying}>
                   Verify code
                 </button>
               </form>

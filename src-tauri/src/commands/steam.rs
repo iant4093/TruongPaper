@@ -382,6 +382,15 @@ impl SteamSession {
     }
 }
 
+/// A cancelled download is not a failure: the UI drops it instead of showing a red card.
+fn progress_state_for_error(err: &str) -> &'static str {
+    if err == DOWNLOAD_CANCELLED {
+        "cancelled"
+    } else {
+        "error"
+    }
+}
+
 fn emit_progress(
     app: &AppHandle,
     workshop_id: &str,
@@ -567,7 +576,9 @@ pub async fn steam_download_workshop_item(
                 let dir = out_dir.clone();
                 let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
             }
-            emit_progress(&app, &workshop_id, &title, 0.0, "error", Some(err.clone()));
+            let state = progress_state_for_error(&err);
+            let detail = (state == "error").then(|| err.clone());
+            emit_progress(&app, &workshop_id, &title, 0.0, state, detail);
             Err(err)
         }
     }
@@ -708,6 +719,12 @@ pub async fn steam_guest_availability(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cancel_is_reported_as_cancelled_not_error() {
+        assert_eq!(progress_state_for_error(DOWNLOAD_CANCELLED), "cancelled");
+        assert_eq!(progress_state_for_error("disk full"), "error");
+    }
 
     #[tokio::test]
     async fn silent_channel_is_reported_as_stalled() {

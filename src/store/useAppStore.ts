@@ -60,6 +60,8 @@ export function currentWallpaperForMonitor(
   return { wallpaper, photo };
 }
 
+export interface LoadOptions { light?: boolean }
+
 export interface AppState {
   photoStatus: PhotoStatus | null;
   publicCatalog: PublicCatalogAlbum[];
@@ -67,6 +69,8 @@ export interface AppState {
   wallpapers: WallpaperItem[];
   /** False until the first `refreshAll` finishes. */
   loaded: boolean;
+  /** The last `refreshAll` failed (cleared by the next success). */
+  loadFailed: boolean;
   monitors: MonitorInfo[];
   selectedMonitorId: string | null;
   selectedWallpaperId: string | null;
@@ -101,8 +105,9 @@ export interface AppState {
   steamAccount: string | null;
   /** True while a sign-in runs. QR and 2FA events from other runs are ignored. */
   steamSigningIn: boolean;
-  initAppListeners: () => Promise<UnlistenFn>;
-  refreshAll: () => Promise<void>;
+  /** `light` is for the tray popover: no playlists, albums, presets or migration. */
+  initAppListeners: (options?: LoadOptions) => Promise<UnlistenFn>;
+  refreshAll: (options?: LoadOptions) => Promise<void>;
   /** Cheap refresh for the tray popover: only the display list and photo status. */
   refreshLive: () => Promise<void>;
   rotateNextPhoto: (monitorId?: string) => Promise<void>;
@@ -176,6 +181,8 @@ let steamLoginRun = 0;
 let applySeq = 0;
 /** Counts settings writes so only the newest one may overwrite local settings. */
 let settingsSeq = 0;
+/** Writes not yet confirmed; `settings://changed` must not flicker the optimistic value. */
+let settingsInFlight = 0;
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -209,6 +216,28 @@ export function mergeNewWallpapers(current: WallpaperItem[], listed: WallpaperIt
 
 export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+/** `listed` replaces only the item `id`; every other item keeps its local state. */
+export function replaceWallpaper(current: WallpaperItem[], listed: WallpaperItem[], id: string): WallpaperItem[] {
+  const fresh = listed.find((w) => w.wallpaperId === id);
+  if (!fresh) return current;
+  return current.some((w) => w.wallpaperId === id)
+    ? current.map((w) => (w.wallpaperId === id ? fresh : w))
+    : [...current, fresh];
+}
+
+/** A cancelled download is dropped, not shown as a failure. */
+export const isCancelMessage = (err: unknown) => /^download cancelled/i.test(errorMessage(err));
+
+export function isCancelledDownload(d: { state: string; error?: string | null }): boolean {
+  return d.state === 'cancelled' || (d.state === 'error' && /^download cancelled/i.test(d.error ?? ''));
+}
+
+/** Starting a download clears finished cards only; unread failures stay. */
+export function pruneDownloads<T extends { state: string }>(downloads: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(Object.entries(downloads).filter(([, d]) => d.state === 'downloading' || d.state === 'error'));
+}
+
+
 /** Presets by wallpaper from the backend; one failed list must not break a refresh. */
 export function presetsFrom(raw: unknown): Record<string, WallpaperPreset[]> {
   return raw && typeof raw === 'object' ? (raw as Record<string, WallpaperPreset[]>) : {};
@@ -223,6 +252,9 @@ export function legacyAlbumsToMigrate(local: SavedAlbum[], backend: SavedAlbum[]
   return local.filter((a) => a && typeof a.albumSlug === 'string' && !known.has(a.albumSlug));
 }
 
+/** Only one migration runs at a time, however many refreshes start it. */
+let migrating: Promise<void> | null = null;
+
 export const useAppStore = create<AppState>((set, get) => {
   let previewRequest = 0;
   const refreshPhotoStatus = async () => {
@@ -233,7 +265,12 @@ export const useAppStore = create<AppState>((set, get) => {
   const setSavedAlbums = (savedAlbums: SavedAlbum[]) => set({ savedAlbums });
 
   /** One-time move of albums kept only in localStorage into the backend. */
-  const migrateLegacyLists = async (backendAlbums: SavedAlbum[]) => {
+  const migrateLegacyLists = (backendAlbums: SavedAlbum[]): Promise<void> => {
+    if (migrating) return migrating;
+    migrating = runMigration(backendAlbums).finally(() => { migrating = null; });
+    return migrating;
+  };
+  const runMigration = async (backendAlbums: SavedAlbum[]) => {
     if (readJson<boolean>(MIGRATED_KEY, false)) return;
     const legacy = legacyAlbumsToMigrate(readJson<SavedAlbum[]>(LEGACY_ALBUMS_KEY, []), backendAlbums);
     let failed = false;
@@ -241,12 +278,15 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         await invoke<SavedAlbum>('photo_add_album', { urlOrSlug: album.albumSlug, displayName: album.displayName });
         if (album.isEnabled === false) await invoke('photo_toggle_album', { albumSlug: album.albumSlug, enabled: false });
-      } catch {
-        failed = true; // offline or budget reached: keep the old copy and try next launch
+      } catch (error) {
+        // An album deleted upstream will never succeed, so it must not block the flag.
+        if (!/not found/i.test(errorMessage(error))) failed = true; // offline or budget reached: try next launch
       }
     }
     if (failed) return;
     writeJson(MIGRATED_KEY, true);
+    // Presets need no import: older builds saved each one through `wallpaper_save_preset`
+    // (the backend table) and only mirrored it into localStorage, so the key is a stale copy.
     try {
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem(LEGACY_ALBUMS_KEY);
@@ -258,12 +298,63 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   };
 
+  /** Studio loads everything; the tray popover (`light`) only what it shows. */
+  const loadAll = async (light: boolean) => {
+      if (light) {
+        const [photoStatus, monitors, wallpapers, settings] = await Promise.all([
+          invoke<PhotoStatus>('photo_get_status'),
+          invoke<MonitorInfo[]>('monitors_list'),
+          invoke<WallpaperItem[]>('library_list_wallpapers'),
+          invoke<AppSettings>('settings_get'),
+        ]);
+        set((state) => ({
+          loaded: true,
+          photoStatus,
+          monitors,
+          wallpapers,
+          settings,
+          selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
+            ? state.selectedMonitorId
+            : monitors[0]?.monitorId ?? null,
+        }));
+        return;
+      }
+      const [photoStatus, monitors, wallpapers, settings, playlists, steamAccount, savedAlbums, presets] = await Promise.all([
+        invoke<PhotoStatus>('photo_get_status'),
+        invoke<MonitorInfo[]>('monitors_list'),
+        invoke<WallpaperItem[]>('library_list_wallpapers'),
+        invoke<AppSettings>('settings_get'),
+        invoke<Playlist[]>('playlist_list').catch(() => [] as Playlist[]),
+        invoke<string | null>('steam_account').catch(() => null),
+        invoke<SavedAlbum[]>('photo_list_albums').catch(() => null),
+        invoke<Record<string, WallpaperPreset[]>>('wallpaper_list_presets').catch(() => null),
+      ]);
+      set((state) => ({
+        loaded: true,
+        savedAlbums: savedAlbums ?? state.savedAlbums,
+        presetsByWallpaper: presets ? presetsFrom(presets) : state.presetsByWallpaper,
+        steamAccount,
+        photoStatus,
+        monitors,
+        // A display can disappear between refreshes, so drop a stale selection.
+        selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
+          ? state.selectedMonitorId
+          : monitors[0]?.monitorId ?? null,
+        wallpapers,
+        selectedWallpaperId: wallpapers.some((w) => w.wallpaperId === state.selectedWallpaperId) ? state.selectedWallpaperId : null,
+        settings,
+        playlists,
+      }));
+      if (savedAlbums) void migrateLegacyLists(savedAlbums);
+  };
+
   return {
     photoStatus: null,
     publicCatalog: [],
     savedAlbums: [],
     wallpapers: [],
     loaded: false,
+    loadFailed: false,
     monitors: [],
     selectedMonitorId: readSelectedMonitor(),
     selectedWallpaperId: null,
@@ -301,34 +392,14 @@ export const useAppStore = create<AppState>((set, get) => {
     steamAuthError: null,
     steamAccount: null,
     steamSigningIn: false,
-    refreshAll: async () => {
-      const [photoStatus, monitors, wallpapers, settings, playlists, steamAccount, savedAlbums, presets] = await Promise.all([
-        invoke<PhotoStatus>('photo_get_status'),
-        invoke<MonitorInfo[]>('monitors_list'),
-        invoke<WallpaperItem[]>('library_list_wallpapers'),
-        invoke<AppSettings>('settings_get'),
-        invoke<Playlist[]>('playlist_list').catch(() => [] as Playlist[]),
-        invoke<string | null>('steam_account').catch(() => null),
-        invoke<SavedAlbum[]>('photo_list_albums').catch(() => null),
-        invoke<Record<string, WallpaperPreset[]>>('wallpaper_list_presets').catch(() => null),
-      ]);
-      set((state) => ({
-        loaded: true,
-        savedAlbums: savedAlbums ?? state.savedAlbums,
-        presetsByWallpaper: presets ? presetsFrom(presets) : state.presetsByWallpaper,
-        steamAccount,
-        photoStatus,
-        monitors,
-        // A display can disappear between refreshes, so drop a stale selection.
-        selectedMonitorId: monitors.some((m) => m.monitorId === state.selectedMonitorId)
-          ? state.selectedMonitorId
-          : monitors[0]?.monitorId ?? null,
-        wallpapers,
-        selectedWallpaperId: wallpapers.some((w) => w.wallpaperId === state.selectedWallpaperId) ? state.selectedWallpaperId : null,
-        settings,
-        playlists,
-      }));
-      if (savedAlbums) void migrateLegacyLists(savedAlbums);
+    refreshAll: async (options) => {
+      try {
+        await loadAll(options?.light ?? false);
+        if (get().loadFailed) set({ loadFailed: false });
+      } catch (error) {
+        set({ loadFailed: true });
+        throw error;
+      }
     },
 
     refreshLive: async () => {
@@ -345,7 +416,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }));
     },
 
-    initAppListeners: async () => {
+    initAppListeners: async (options) => {
       let pendingDisplayUpdates: Array<() => void> | null = [];
       const updateDisplay = (update: () => void) => {
         if (pendingDisplayUpdates) pendingDisplayUpdates.push(update);
@@ -415,6 +486,7 @@ export const useAppStore = create<AppState>((set, get) => {
           updateDisplay(() => set({ photoStatus: event.payload }));
         }),
         listen<AppSettings>('settings://changed', ({ payload }) => {
+          if (settingsInFlight > 0) return; // the write's own refresh publishes the final state
           updateDisplay(() => set({ settings: payload }));
         }),
         listen<PlaybackPauseChanged>('playback://pause-changed', ({ payload }) => {
@@ -427,6 +499,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
         listen<SteamDownloadProgress>('steam-download://progress', (event) => {
           const prog = event.payload;
+          if (isCancelledDownload(prog)) {
+            // The user stopped it: forget the card instead of showing a failure.
+            set((state) => {
+              const { [prog.workshopId]: _gone, ...rest } = state.downloadsById;
+              return { downloadsById: rest };
+            });
+            return;
+          }
           const previous = get().downloadsById[prog.workshopId];
           // Whole-percent steps are enough for the bar; skipping the rest avoids re-rendering on every chunk.
           if (previous && previous.state === prog.state && Math.floor(previous.progressPercent) === Math.floor(prog.progressPercent)) return;
@@ -434,9 +514,11 @@ export const useAppStore = create<AppState>((set, get) => {
             downloadsById: { ...state.downloadsById, [prog.workshopId]: prog },
           }));
           if (prog.state === 'completed') {
-            // Add only new items, so an edit still in flight is not overwritten.
+            // Add new items and refresh this one (a re-download); other edits in flight stay.
             void invoke<WallpaperItem[]>('library_list_wallpapers').then((listed) =>
-              set((state) => ({ wallpapers: mergeNewWallpapers(state.wallpapers, listed) }))
+              set((state) => ({
+                wallpapers: replaceWallpaper(mergeNewWallpapers(state.wallpapers, listed), listed, `workshop:${prog.workshopId}`),
+              }))
             ).catch(() => {});
           }
         }),
@@ -476,7 +558,7 @@ export const useAppStore = create<AppState>((set, get) => {
         throw rejected.reason;
       }
       try {
-        await get().refreshAll();
+        await get().refreshAll(options);
         for (const update of pendingDisplayUpdates) update();
         pendingDisplayUpdates = null;
       } catch (error) {
@@ -582,16 +664,17 @@ export const useAppStore = create<AppState>((set, get) => {
 
     downloadWorkshopItem: async (urlOrId, source) => {
       // Finished downloads are hidden by the list, so drop them here to keep the map small.
+      // Failures stay until the user retries or dismisses them.
       set((state) => {
-        const live = Object.fromEntries(Object.entries(state.downloadsById).filter(([, d]) => d.state === 'downloading'));
+        const live = pruneDownloads(state.downloadsById);
         return Object.keys(live).length === Object.keys(state.downloadsById).length ? state : { downloadsById: live };
       });
       await invoke<string>('steam_download_workshop_item', source ? { urlOrId, source } : { urlOrId });
     },
 
     syncLocalSteamFolders: async () => {
-      const wallpapers = await invoke<WallpaperItem[]>('steam_sync_local_folders');
-      set({ wallpapers });
+      const listed = await invoke<WallpaperItem[]>('steam_sync_local_folders');
+      set((state) => ({ wallpapers: mergeNewWallpapers(state.wallpapers, listed) }));
     },
 
     // --- GGNetwork availability & local import (self-contained) ---
@@ -824,7 +907,7 @@ export const useAppStore = create<AppState>((set, get) => {
       } else {
         // Not in the local list: take the applied values from the backend instead.
         const listed = await invoke<WallpaperItem[]>('library_list_wallpapers');
-        set({ wallpapers: listed });
+        set((state) => ({ wallpapers: replaceWallpaper(state.wallpapers, listed, wallpaperId) }));
       }
     },
 
@@ -845,6 +928,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     updateSettings: async (partial) => {
       const seq = ++settingsSeq;
+      settingsInFlight++;
       const before = get().settings;
       // Show the change at once; the backend value replaces it when the write returns.
       if (before) set({ settings: { ...before, ...partial } });
@@ -856,9 +940,11 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (error) {
         if (seq === settingsSeq) {
           try { set({ settings: await invoke<AppSettings>('settings_get') }); }
-          catch { if (before) set({ settings: before }); }
+          catch { /* keep the optimistic value; the error is shown by the caller */ }
         }
         throw error;
+      } finally {
+        settingsInFlight--;
       }
     },
 

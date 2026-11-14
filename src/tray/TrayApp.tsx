@@ -36,7 +36,7 @@ export const TrayApp: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     let cleanup: (() => void) | undefined;
-    void initAppListeners()
+    void initAppListeners({ light: true })
       .then((fn) => {
         if (cancelled) fn();
         else cleanup = fn;

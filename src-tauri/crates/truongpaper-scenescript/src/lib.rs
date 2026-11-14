@@ -558,9 +558,10 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
         if (mode === 1) g.input.cursorLeftDown = true; else if (mode === 2) g.input.cursorLeftDown = false;
         if (call) g.__callAll(cb, { x, y, worldPosition: new Vec3(x, y, 0) });
     };
-    // Lock the host internals. The objects stay mutable where scripts legitimately write to them
-    // (`shared`, `engine.*`, layer objects); only the bindings and pure helpers are fixed.
-    for (const n of ['Vec2', 'Vec3', 'Vec4', 'Mat4', 'engine', 'input', 'thisScene', 'console', 'shared',
+    // Lock the host internals (`__*`) only. Public globals (`shared`, `console`, `engine`,
+    // `Vec3`, ...) stay writable: real Workshop scripts reassign them at module top level
+    // (`shared = shared || {}`, `console = {...}`), which Wallpaper Engine allows.
+    for (const n of [
         '__log', '__callAll', '__fireTimers', '__step', '__sync', '__register', '__collectLayers',
         '__disable', '__hasHandler', '__cursor', '__layerStubs', '__animStub', '__videoStub',
         '__localMatrix', '__WEMath', '__WEColor', '__layers', '__scripts', '__parents', '__audioBuffers']) {
@@ -2266,14 +2267,18 @@ mod tests {
             "L",
             "export function update() {
                 let r = [];
-                for (const n of ['__layers', '__scripts', '__log', '__step', 'engine', 'Vec3']) {
+                for (const n of ['__layers', '__scripts', '__log', '__step']) {
                     try { globalThis[n] = {}; r.push('w'); } catch (err) { r.push('x'); }
+                }
+                // Public globals stay writable: Workshop scripts reassign them.
+                for (const n of ['shared', 'console']) {
+                    try { globalThis[n] = globalThis[n]; r.push('w'); } catch (err) { r.push('x'); }
                 }
                 try { __WEMath.PI = 3; r.push('w'); } catch (err) { r.push('x'); }
                 return r.join('');
             }",
         );
-        assert_eq!(out, "xxxxxxx");
+        assert_eq!(out, "xxxxwwx");
     }
 
     #[test]

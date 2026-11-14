@@ -51,6 +51,9 @@ pub struct ParticleFile {
     pub flags: u32,
     /// Sprite-sheet animation cycles per particle lifetime (`sequencemultiplier`).
     pub sequence_multiplier: f32,
+    /// `animationmode: "randomframe"`: each particle shows one random sheet frame for its whole
+    /// life instead of playing the sequence.
+    pub random_frame: bool,
     /// Child systems that follow this system's particles.
     pub children: Vec<ParticleChildSpec>,
     /// The parsed file of each entry of `children` (`None` when it could not be loaded); filled
@@ -279,6 +282,10 @@ impl ParticleFile {
                 .collect(),
             flags: json_u32(v, "flags", 0),
             sequence_multiplier: json_f32(v, "sequencemultiplier", 1.0),
+            random_frame: v
+                .get("animationmode")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("randomframe")),
             children: json_array(v, "children")
                 .iter()
                 .map(ParticleChildSpec::from_json)

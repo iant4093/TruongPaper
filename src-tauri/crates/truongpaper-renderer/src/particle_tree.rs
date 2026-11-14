@@ -274,8 +274,13 @@ impl ParticleSystemInstance {
             let norm_age = (p.age / p.lifetime.max(0.0001)).clamp(0.0, 1.0);
             // Sprite sheets play through their frames `sequencemultiplier` times per lifetime.
             let frame = sheet.map(|s| {
-                let t = (norm_age * self.spec.sequence_multiplier).rem_euclid(1.0);
-                ((t * s.frame_count() as f32) as usize, s)
+                let n = s.frame_count().max(1);
+                if self.spec.random_frame {
+                    (random_frame_index(p.id, n), s)
+                } else {
+                    let t = (norm_age * self.spec.sequence_multiplier).rem_euclid(1.0);
+                    (((t * n as f32) as usize).min(n - 1), s)
+                }
             });
             for uv in UVS {
                 let corner = uv;
@@ -734,5 +739,32 @@ mod tests {
         sys.particles[0].position.x = f32::NAN;
         sys.step(0.01, Vec3::ZERO);
         assert!(sys.particles.iter().all(|p| p.position.is_finite()));
+    }
+}
+
+/// A stable pseudo-random sheet frame for particle `id` (`animationmode: "randomframe"`).
+fn random_frame_index(id: u64, frames: usize) -> usize {
+    let mut x = id.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    (x % frames.max(1) as u64) as usize
+}
+
+#[cfg(test)]
+mod random_frame_tests {
+    use super::random_frame_index;
+
+    #[test]
+    fn random_frames_are_stable_in_range_and_spread() {
+        let picks: Vec<usize> = (0..64).map(|id| random_frame_index(id, 8)).collect();
+        assert!(picks.iter().all(|&f| f < 8));
+        assert_eq!(random_frame_index(5, 8), random_frame_index(5, 8));
+        let mut seen = [false; 8];
+        for f in picks {
+            seen[f] = true;
+        }
+        assert!(seen.iter().filter(|s| **s).count() >= 6);
+        assert_eq!(random_frame_index(3, 1), 0);
     }
 }

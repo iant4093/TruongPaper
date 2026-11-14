@@ -194,6 +194,7 @@ pub const TEXT_UNITS_PER_POINT: f32 = 300.0 / 72.0;
 pub struct FontMetrics<'a> {
     font: &'a FontVec,
     scale: PxScale,
+    pointsize: f32,
 }
 
 impl<'a> FontMetrics<'a> {
@@ -201,6 +202,7 @@ impl<'a> FontMetrics<'a> {
         Self {
             font,
             scale: PxScale::from(text_px_scale(font, pointsize)),
+            pointsize,
         }
     }
 }
@@ -220,6 +222,10 @@ pub fn text_px_scale(font: &FontVec, pointsize: f32) -> f32 {
 impl TextMetrics for FontMetrics<'_> {
     fn advance(&self, c: char) -> f32 {
         let f = self.font.as_scaled(self.scale);
+        if let Some(fb) = fallback_font_for(self.font, c) {
+            let fs = fb.as_scaled(PxScale::from(text_px_scale(fb, self.pointsize)));
+            return fs.h_advance(fs.glyph_id(c));
+        }
         f.h_advance(f.glyph_id(c))
     }
     fn ascent(&self) -> f32 {
@@ -232,6 +238,11 @@ impl TextMetrics for FontMetrics<'_> {
         self.font.as_scaled(self.scale).line_gap()
     }
     fn kern(&self, left: char, right: char) -> f32 {
+        if fallback_font_for(self.font, left).is_some()
+            || fallback_font_for(self.font, right).is_some()
+        {
+            return 0.0;
+        }
         let f = self.font.as_scaled(self.scale);
         f.kern(f.glyph_id(left), f.glyph_id(right))
     }
@@ -326,6 +337,19 @@ pub fn rasterize(
         let mut x = line.x;
         let mut prev: Option<ab_glyph::GlyphId> = None;
         for c in line.text.chars() {
+            if let Some(fb) = fallback_font_for(font, c) {
+                // The scene's font lacks this glyph (CJK): draw it from a system font.
+                let fscale = PxScale::from(text_px_scale(fb, style.pointsize));
+                let fs = fb.as_scaled(fscale);
+                let id = fs.glyph_id(c);
+                prev = None;
+                let glyph = id.with_scale_and_position(fscale, point(x, line.baseline));
+                x += fs.h_advance(id);
+                if let Some(outlined) = fb.outline_glyph(glyph) {
+                    blit(&mut bitmap, &outlined);
+                }
+                continue;
+            }
             let id = scaled.glyph_id(c);
             if let Some(p) = prev {
                 x += scaled.kern(p, id);
@@ -336,20 +360,64 @@ pub fn rasterize(
             let Some(outlined) = font.outline_glyph(glyph) else {
                 continue;
             };
-            let bounds = outlined.px_bounds();
-            outlined.draw(|gx, gy, coverage| {
-                let px = bounds.min.x as i64 + gx as i64;
-                let py = bounds.min.y as i64 + gy as i64;
-                if px < 0 || py < 0 || px >= width as i64 || py >= height as i64 {
-                    return;
-                }
-                let idx = ((py as u32 * width + px as u32) * 4 + 3) as usize;
-                let a = (coverage.clamp(0.0, 1.0) * 255.0).round() as u16;
-                bitmap.rgba[idx] = (bitmap.rgba[idx] as u16 + a).min(255) as u8;
-            });
+            blit(&mut bitmap, &outlined);
         }
     }
     bitmap
+}
+
+/// Adds an outlined glyph's coverage into the bitmap's alpha channel.
+fn blit(bitmap: &mut TextBitmap, outlined: &ab_glyph::OutlinedGlyph) {
+    let (width, height) = (bitmap.width, bitmap.height);
+    let bounds = outlined.px_bounds();
+    outlined.draw(|gx, gy, coverage| {
+        let px = bounds.min.x as i64 + gx as i64;
+        let py = bounds.min.y as i64 + gy as i64;
+        if px < 0 || py < 0 || px >= width as i64 || py >= height as i64 {
+            return;
+        }
+        let idx = ((py as u32 * width + px as u32) * 4 + 3) as usize;
+        let a = (coverage.clamp(0.0, 1.0) * 255.0).round() as u16;
+        bitmap.rgba[idx] = (bitmap.rgba[idx] as u16 + a).min(255) as u8;
+    });
+}
+
+/// CJK-capable system fonts tried, in order, for characters a scene's font lacks.
+const CJK_FALLBACK_FONTS: &[&str] = &[
+    "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\YuGothR.ttc",
+    r"C:\Windows\Fonts\yugothic.ttf",
+    r"C:\Windows\Fonts\msgothic.ttc",
+    r"C:\Windows\Fonts\simsun.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+];
+
+fn cjk_fallback_fonts() -> &'static [FontVec] {
+    static FONTS: std::sync::OnceLock<Vec<FontVec>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        CJK_FALLBACK_FONTS
+            .iter()
+            .filter_map(|p| std::fs::read(p).ok().and_then(font_from_bytes))
+            .collect()
+    })
+}
+
+/// True for characters worth a fallback lookup (not whitespace, controls or ASCII).
+fn wants_fallback(c: char) -> bool {
+    !c.is_ascii() && !c.is_whitespace() && !c.is_control()
+}
+
+/// A system font that has a glyph for `c`, when `font` has none.
+fn fallback_font_for(font: &FontVec, c: char) -> Option<&'static FontVec> {
+    if !wants_fallback(c) || font.glyph_id(c).0 != 0 {
+        return None;
+    }
+    cjk_fallback_fonts().iter().find(|f| f.glyph_id(c).0 != 0)
 }
 
 /// Inputs that determine a rasterized bitmap.
@@ -744,5 +812,30 @@ mod tests {
         let ratio = font.height_unscaled() / font.units_per_em().unwrap();
         assert!((h - em * ratio).abs() < 0.5, "{h} vs {}", em * ratio);
         assert!((37.0..38.0).contains(&em));
+    }
+
+    #[test]
+    fn cjk_text_falls_back_to_a_system_font() {
+        assert!(!wants_fallback('a') && !wants_fallback(' ') && wants_fallback('\u{3042}'));
+        let Some(cjk) = cjk_fallback_fonts().first() else {
+            return; // no CJK system font on this machine
+        };
+        if cjk.glyph_id('\u{3042}').0 == 0 {
+            return;
+        }
+        let vfs = WeVirtualFileSystem::mount(
+            std::env::temp_dir().join("truongpaper-text-none"),
+            std::env::temp_dir().join("truongpaper-text-none-core"),
+        );
+        let Ok(font) = load_font(&vfs, None) else {
+            return;
+        };
+        let style = TextStyle {
+            pointsize: 24.0,
+            ..TextStyle::default()
+        };
+        let (w, h) = bitmap_size(&font, "\u{3042}\u{3044}", &style, (0.0, 0.0));
+        let bmp = rasterize(&font, "\u{3042}\u{3044}", w, h, &style);
+        assert!(bmp.rgba.chunks_exact(4).any(|p| p[3] > 128));
     }
 }

@@ -263,12 +263,21 @@ fn bundled_rain_sprites_are_hairline_streaks() {
             mip,
         )
         .unwrap();
+        // A sprite sheet of short drops: WE rain presets pick frames (`randomframe`).
+        let (_, _, frames) = tex.sprite_frames.as_ref().expect("rain sheet has frames");
+        assert_eq!(frames.len(), 8, "rain{n}: frame count");
+        let cell = frames[0].width as usize;
+        assert!(frames
+            .iter()
+            .all(|f| f.width == cell as f32 && f.height == cell as f32));
         let (w, h) = (mip.width as usize, mip.height as usize);
-        let mid = h * 3 / 5;
-        let row = &rgba[mid * w * 4..(mid + 1) * w * 4];
+        assert_eq!((w, h), (cell * 4, cell * 2), "rain{n}: sheet layout");
+        let mid = cell * 3 / 5;
+        let row = &rgba[mid * w * 4..(mid * w + cell) * 4];
+        let w = cell;
         let covered = row.chunks(4).filter(|p| p[3] > 32).count();
         let peak = rgba.chunks(4).map(|p| p[3]).max().unwrap();
-        assert!(peak <= 140, "rain{n}: peak alpha {peak} too strong");
+        assert!(peak <= 200, "rain{n}: peak alpha {peak} too strong");
         assert!(covered >= 1, "rain{n}: streak vanished");
         assert!(
             covered * 100 <= w * 6,

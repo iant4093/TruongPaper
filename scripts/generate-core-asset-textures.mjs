@@ -26,7 +26,7 @@ function i32(v) {
 }
 
 /** One-mip RGBA8888 `.tex` file. */
-function texFile(width, height, rgba, flags = 0) {
+function texFile(width, height, rgba, flags = 0, trailer = null) {
   return Buffer.concat([
     cstr('TEXV0005'),
     cstr('TEXI0001'),
@@ -47,6 +47,7 @@ function texFile(width, height, rgba, flags = 0) {
     i32(0),
     i32(rgba.length),
     Buffer.from(rgba),
+    ...(trailer ? [trailer] : []),
   ]);
 }
 
@@ -332,13 +333,52 @@ for (let n = 0; n <= 6; n++) {
     return Math.max(core, ray);
   });
 }
-// Rain: hairline vertical streaks with soft alpha. Scenes scale a rain sprite to hundreds of
-// pixels (raindownpour draws them 800-1600 px tall), so the streak must stay a few pixels wide
-// or the additive layers read as wide white light bars.
+// Rain: a 4x2 sprite sheet of short drops (rain0..5). WE rain presets use `randomframe` with
+// particles 800-1600 units tall, so every frame is one thin streak with a fading tail, of a
+// different length and slant, centred in a square cell. The frame table is TEXS0003.
+function spriteSheet(cols, rows, cell, alphaAt, flags = CLAMP_UVS) {
+  const w = cols * cell;
+  const h = rows * cell;
+  const px = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const f = Math.floor(y / cell) * cols + Math.floor(x / cell);
+      const u = (((x % cell) + 0.5) / cell) * 2 - 1;
+      const v = (((y % cell) + 0.5) / cell) * 2 - 1;
+      const a = Math.min(1, Math.max(0, alphaAt(f, u, v)));
+      px.set([255, 255, 255, Math.round(a * 255)], (y * w + x) * 4);
+    }
+  }
+  const frames = [];
+  for (let f = 0; f < cols * rows; f++) {
+    frames.push([(f % cols) * cell, Math.floor(f / cols) * cell]);
+  }
+  const head = Buffer.concat([cstr('TEXS0003'), i32(frames.length), i32(w), i32(h)]);
+  const body = frames.map(([fx, fy]) => {
+    const b = Buffer.alloc(32);
+    b.writeInt32LE(0, 0); // image id
+    b.writeFloatLE(0.1, 4); // frame time
+    [fx, fy, cell, 0, 0, cell].forEach((val, i) => b.writeFloatLE(val, 8 + i * 4));
+    return b;
+  });
+  return texFile(w, h, px, flags | 4, Buffer.concat([head, ...body]));
+}
 for (let n = 0; n <= 5; n++) {
-  const wdt = 0.006 + 0.0015 * n;
-  particleFiles[`nature/rain${n}.tex`] = sprite(512, 128, (u, v) =>
-    Math.exp(-((u / wdt) ** 2) * 2) * smooth(-1, -0.4, v) * (1 - smooth(0.5, 1, v)) * 0.3 * (0.6 + 0.4 * smooth(-0.4, 0.5, v)));
+  const wdt = 0.011 + 0.001 * n;
+  particleFiles[`nature/rain${n}.tex`] = spriteSheet(4, 2, 128, (f, u, v) => {
+    const rand = rng(900 + n * 16 + f);
+    const len = 0.8 + 0.15 * rand(); // half-length of the drop
+    // Same axis in every frame: systems that cycle the sheet instead of picking one random
+    // frame (randomframe) then only change the drop's length, never its position.
+    const cx = 0;
+    const slant = 0;
+    const off = 0;
+    const x = u - cx - slant * (v - off) * 6;
+    const t = (v - off) / len; // -1 tail .. 1 head
+    if (Math.abs(t) > 1) return 0;
+    const fade = smooth(-1, 0.3, t) * (1 - smooth(0.85, 1, t));
+    return Math.exp(-((x / wdt) ** 2) * 2) * fade * 0.6;
+  });
 }
 // Leaves: white silhouettes with a midrib; shape varies with n.
 for (let n = 0; n <= 10; n++) {
@@ -587,6 +627,38 @@ const gradientFiles = {};
   }
   gradientFiles['blend_gradient.tex'] = texFile(w, h, px, CLAMP_UVS);
 }
+
+// Colour ramps (materials/gradient/...), sampled along x. Our own palettes.
+function ramp(stops) {
+  const w = 256;
+  const h = 4;
+  const px = new Uint8Array(w * h * 4);
+  for (let x = 0; x < w; x++) {
+    const t = x / (w - 1);
+    let i = 0;
+    while (i < stops.length - 2 && t > stops[i + 1][0]) i++;
+    const [t0, c0] = stops[i];
+    const [t1, c1] = stops[i + 1];
+    const k = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
+    const c = c0.map((v, j) => Math.round(v + (c1[j] - v) * k));
+    for (let y = 0; y < h; y++) px.set([c[0], c[1], c[2], 255], (y * w + x) * 4);
+  }
+  return texFile(w, h, px, CLAMP_UVS);
+}
+gradientFiles['gradient_fire.tex'] = ramp([
+  [0, [0, 0, 0]],
+  [0.25, [120, 10, 0]],
+  [0.5, [235, 70, 5]],
+  [0.75, [255, 190, 40]],
+  [1, [255, 255, 220]],
+]);
+gradientFiles['gradient_iridescent.tex'] = ramp(
+  Array.from({ length: 9 }, (_, i) => {
+    const t = i / 8;
+    const c = [0, 2, 4].map((o) => Math.round(150 + 105 * Math.cos(6.28318 * (t + o / 6))));
+    return [t, c];
+  }),
+);
 
 // Tileable cell patterns (materials/pattern/...), used by caustics-style effects. `voronoi`
 // is a soft glow that peaks on the cell borders; `voronoi_local` is the same network with

@@ -4,6 +4,7 @@ pub mod commands;
 pub mod controls;
 pub mod db;
 pub mod desktop_host;
+pub mod gpu_select;
 pub mod host;
 pub mod models;
 mod photo_preview;
@@ -270,6 +271,7 @@ pub fn run() {
             commands::playlist::playlist_delete,
             commands::settings::settings_get,
             commands::settings::settings_update,
+            commands::settings::gpu_list_adapters,
             commands::updater::update_feed_status,
             commands::updater::runtime_shutdown_for_update,
             commands::runtime::runtime_get_memory_usage,
@@ -336,7 +338,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 54, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 55, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 

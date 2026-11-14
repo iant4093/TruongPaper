@@ -289,6 +289,7 @@ export function createMockBackend(
     multiMonitorMode: 'independent',
     nextHotkey: 'CmdOrCtrl+Alt+Right',
     pauseHotkey: 'CmdOrCtrl+Alt+P',
+    renderGpu: 'integrated',
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });
@@ -637,6 +638,10 @@ export function createMockBackend(
     },
     steam_logout: () => { steamAccount = null; return null; },
     steam_cancel_download: () => true,
+    gpu_list_adapters: () => [
+      { name: 'AMD Radeon(TM) Graphics', kind: 'integrated', inUse: settings.renderGpu !== 'dedicated' && settings.renderGpu !== 'adapter:NVIDIA GeForce RTX 4080' },
+      { name: 'NVIDIA GeForce RTX 4080', kind: 'dedicated', inUse: settings.renderGpu === 'dedicated' || settings.renderGpu === 'adapter:NVIDIA GeForce RTX 4080' },
+    ],
     playlist_export: () => null,
     steam_cancel_login: () => { cancelSteamLogin?.(); cancelSteamLogin = null; return null; },
     steam_account: () => steamAccount,

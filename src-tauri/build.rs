@@ -54,6 +54,7 @@ const APP_COMMANDS: &[&str] = &[
     "playlist_delete",
     "settings_get",
     "settings_update",
+    "gpu_list_adapters",
     "update_feed_status",
     "runtime_shutdown_for_update",
     "runtime_get_memory_usage",

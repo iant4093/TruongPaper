@@ -2779,12 +2779,67 @@ struct Gpu {
     queue: wgpu::Queue,
 }
 
-fn create_gpu(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> Option<Gpu> {
+/// Creates the device on the GPU `render_gpu` picks (see [`crate::gpu_select`]), trying the
+/// next best adapter when one fails, and records the GPU list on `host` for Settings.
+fn create_gpu(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'static>,
+    render_gpu: &str,
+    host: &WallpaperHost,
+) -> Option<Gpu> {
+    use crate::gpu_select::{rank_adapters, unique_adapters, GpuKind, GpuPreference};
+    let mut adapters: Vec<wgpu::Adapter> = instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .into_iter()
+        .filter(|a| {
+            let info = a.get_info();
+            info.device_type != wgpu::DeviceType::Cpu
+                && info.backend != wgpu::Backend::Gl
+                && a.is_surface_supported(surface)
+        })
+        .collect();
+    // DX12 before Vulkan on Windows: the NVIDIA Vulkan driver crashed destroying swapchains on
+    // desktop child windows (GPU switch, display change, quit). Vulkan stays as the fallback.
+    adapters.sort_by_key(|a| match a.get_info().backend {
+        wgpu::Backend::Dx12 | wgpu::Backend::Metal => 0,
+        wgpu::Backend::Vulkan => 1,
+        _ => 2,
+    });
+    let described: Vec<(String, GpuKind)> = adapters
+        .iter()
+        .map(|a| {
+            let info = a.get_info();
+            (info.name, GpuKind::from_device_type(info.device_type))
+        })
+        .collect();
+    let pref = GpuPreference::from_setting(render_gpu);
+    // Each GPU appears once per backend; a GPU that fails on one backend is tried on the next.
+    let mut adapters: Vec<Option<wgpu::Adapter>> = adapters.into_iter().map(Some).collect();
+    for i in rank_adapters(&described, &pref) {
+        let Some(adapter) = adapters[i].take() else {
+            continue;
+        };
+        if let Some(gpu) = open_device(adapter) {
+            host.set_gpu_adapters(unique_adapters(&described, Some(&described[i].0)));
+            return Some(gpu);
+        }
+    }
+    // Nothing enumerated (or every device failed): let wgpu choose, as before.
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
+        power_preference: match pref {
+            GpuPreference::Dedicated => wgpu::PowerPreference::HighPerformance,
+            _ => wgpu::PowerPreference::LowPower,
+        },
         force_fallback_adapter: false,
         compatible_surface: Some(surface),
     }))?;
+    let name = adapter.get_info().name;
+    let gpu = open_device(adapter)?;
+    host.set_gpu_adapters(unique_adapters(&described, Some(&name)));
+    Some(gpu)
+}
+
+fn open_device(adapter: wgpu::Adapter) -> Option<Gpu> {
     let limits = wgpu::Limits::default().using_resolution(adapter.limits());
     match pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
@@ -2811,7 +2866,10 @@ fn create_gpu(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> Op
             })
         }
         Err(err) => {
-            tracing::warn!("wgpu device request failed: {err}");
+            tracing::warn!(
+                "wgpu device request on {:?} failed: {err}",
+                adapter.get_info().name
+            );
             None
         }
     }
@@ -2826,6 +2884,8 @@ enum RunEnd {
     SetupFailed,
     /// The wgpu device was lost; everything must be recreated.
     DeviceLost,
+    /// The GPU setting changed; rebuild at once on the newly chosen adapter.
+    GpuChanged,
 }
 
 /// Sleeps `total` in short slices, returning early on shutdown.
@@ -2846,11 +2906,17 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
         tracing::warn!("no desktop wallpaper host on this OS; desktop renderer not attached");
         return;
     }
-    let instance = Arc::new(wgpu::Instance::new(wgpu::InstanceDescriptor::default()));
     let mut desktop = platform::DesktopSurfaces::new();
     let mut backoff = INITIAL_BACKOFF;
     while !host.is_shutting_down() {
         let started = Instant::now();
+        // A fresh instance per run: reusing a Vulkan instance after its device on another GPU
+        // was destroyed crashed in the NVIDIA driver when switching GPUs.
+        // `WGPU_BACKEND=dx12|vulkan|metal` forces a backend for testing.
+        let instance = Arc::new(wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::util::backend_bits_from_env().unwrap_or_default(),
+            ..Default::default()
+        }));
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             run_renderer(&app, &host, &settings, &instance, &mut desktop)
         }));
@@ -2861,6 +2927,11 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
             Ok(RunEnd::Shutdown) => break,
             Ok(RunEnd::SetupFailed) => tracing::warn!("desktop renderer setup failed"),
             Ok(RunEnd::DeviceLost) => tracing::warn!("wgpu device lost; recreating the renderer"),
+            Ok(RunEnd::GpuChanged) => {
+                tracing::info!("GPU setting changed; recreating the renderer");
+                backoff = INITIAL_BACKOFF;
+                continue;
+            }
             Err(_) => {
                 tracing::error!("desktop render thread panicked; restarting it");
                 if let Some(key) = with_faults(FaultLedger::note_panic) {
@@ -2899,7 +2970,10 @@ fn run_renderer(
         tracing::warn!("no desktop surfaces were created; desktop renderer not attached");
         return RunEnd::SetupFailed;
     };
-    let Some(gpu) = create_gpu(instance, &first.surface) else {
+    // A request that arrives before this point is already honored by this setup.
+    let _ = host.take_renderer_restart();
+    let render_gpu = settings.lock().render_gpu.clone();
+    let Some(gpu) = create_gpu(instance, &first.surface, &render_gpu, host) else {
         tracing::warn!("no compatible wgpu adapter; desktop renderer not attached");
         drop(targets);
         return RunEnd::SetupFailed;
@@ -2957,6 +3031,9 @@ fn run_renderer(
         }
         if device_lost.load(Ordering::Acquire) {
             break RunEnd::DeviceLost;
+        }
+        if host.take_renderer_restart() {
+            break RunEnd::GpuChanged;
         }
         let loop_start = Instant::now();
         desktop.pump();
@@ -3237,8 +3314,17 @@ fn run_renderer(
     };
 
     // Surfaces must be gone before the platform windows are torn down.
+    tracing::debug!("renderer stopping ({end:?}): dropping surfaces");
+    // Let queued work and presents finish first: destroying a swapchain with a present still in
+    // flight crashed the NVIDIA Vulkan driver when switching GPUs.
+    if end != RunEnd::DeviceLost {
+        let _ = gpu.device.poll(wgpu::Maintain::Wait);
+    }
     monitors.clear();
+    let _ = gpu.device.poll(wgpu::Maintain::Wait);
+    tracing::debug!("renderer stopping: dropping the device");
     drop(gpu);
+    tracing::debug!("renderer stopped");
     end
 }
 

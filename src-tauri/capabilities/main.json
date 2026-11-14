@@ -73,6 +73,7 @@
     "allow-playlist-delete",
     "allow-settings-get",
     "allow-settings-update",
+    "allow-gpu-list-adapters",
     "allow-update-feed-status",
     "allow-runtime-shutdown-for-update",
     "allow-backup-export",

@@ -409,6 +409,17 @@ pub struct AppSettings {
     /// Global shortcut (Tauri accelerator) for "Pause / Resume"; empty = disabled.
     #[serde(default = "default_pause_hotkey")]
     pub pause_hotkey: String,
+    /// GPU that draws photos and scenes: `"integrated"` (default, leaves a dedicated GPU free
+    /// for games), `"dedicated"`, or `"adapter:<name>"` for one specific adapter. A choice
+    /// that is not present falls back to the next best GPU.
+    #[serde(default = "default_render_gpu")]
+    pub render_gpu: String,
+}
+
+pub const DEFAULT_RENDER_GPU: &str = "integrated";
+
+fn default_render_gpu() -> String {
+    DEFAULT_RENDER_GPU.into()
 }
 
 pub const DEFAULT_NEXT_HOTKEY: &str = "CmdOrCtrl+Alt+Right";
@@ -446,6 +457,7 @@ impl Default for AppSettings {
             multi_monitor_mode: default_multi_monitor_mode(),
             next_hotkey: default_next_hotkey(),
             pause_hotkey: default_pause_hotkey(),
+            render_gpu: default_render_gpu(),
         }
     }
 }

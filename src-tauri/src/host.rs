@@ -206,6 +206,10 @@ pub struct WallpaperHost {
     pending_photos: Mutex<HashMap<String, (u64, Arc<RgbaImageData>)>>,
     render_events: Mutex<Vec<RenderEvent>>,
     shutting_down: AtomicBool,
+    /// Set when the GPU setting changes: the render thread rebuilds on the new adapter.
+    restart_renderer: AtomicBool,
+    /// GPUs the renderer found, with the one in use (for Settings).
+    gpu_adapters: Mutex<Vec<crate::gpu_select::GpuAdapterInfo>>,
     /// Bumped on every state change the render loop or the webview bridge must react to; they
     /// sleep on `wake_cv` instead of polling.
     epoch: AtomicU64,
@@ -313,6 +317,25 @@ impl WallpaperHost {
 
     pub fn set_live_renderer_attached(&self, attached: bool) {
         self.live_renderer.store(attached, Ordering::Release);
+    }
+
+    /// Asks the render thread to rebuild on the adapter the GPU setting now picks.
+    pub fn request_renderer_restart(&self) {
+        self.restart_renderer.store(true, Ordering::Release);
+        self.bump();
+    }
+
+    /// `true` once after [`Self::request_renderer_restart`].
+    pub fn take_renderer_restart(&self) -> bool {
+        self.restart_renderer.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn set_gpu_adapters(&self, adapters: Vec<crate::gpu_select::GpuAdapterInfo>) {
+        *self.gpu_adapters.lock() = adapters;
+    }
+
+    pub fn gpu_adapters(&self) -> Vec<crate::gpu_select::GpuAdapterInfo> {
+        self.gpu_adapters.lock().clone()
     }
 
     /// `true` after [`Self::shutdown`]: the render thread and webview manager exit.

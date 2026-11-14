@@ -216,6 +216,9 @@ for (let n = 1; n <= 8; n++) {
   const core = 0.1 * n;
   particleFiles[`halo_${n}.tex`] = sprite(128, 128, (u, v) => {
     const r = Math.hypot(u, v);
+    // halo_4 is the stock glow sprite of neon scenes (Pac-Man scales it to 1200 px): a short,
+    // steep falloff keeps the visible glow near the subject instead of a screen-wide wash.
+    if (n === 4) return Math.pow(1 - smooth(0, 1, r), 5) * 0.5;
     const glow = Math.pow(1 - smooth(0, 1, r), 1.5) * (0.6 - 0.04 * n);
     const disk = 1 - smooth(core * 0.5, core * 0.5 + 0.25, r);
     return Math.max(glow, disk * (n > 4 ? 0.9 : 0.5));
@@ -591,8 +594,13 @@ for (let n = 1; n <= 3; n++) {
     const t = v * 0.5 + 0.5; // 0 top .. 1 bottom
     const half = 0.65 * Math.pow(t, 0.7) * (1 - 0.3 * t);
     const wobble = (noise[y * 128 + Math.min(127, x * 2)] - 0.5) * 0.25 * (1 - t);
-    const across = 1 - smooth(half * 0.4, half + 0.001, Math.abs(u + wobble));
-    return across * smooth(0, 0.2, t) * (1 - smooth(0.9, 1, t) * 0.6) * (0.6 + 0.4 * t);
+    // Soft, peaked cross-section (not a flat plateau) so overlapping additive flames keep
+    // internal gradation instead of saturating into one orange block; noise breaks up the body
+    // into licks of flame.
+    const d = Math.abs(u + wobble) / (half + 0.001);
+    const across = Math.pow(Math.max(0, 1 - d), 1.5);
+    const lick = 0.35 + 0.65 * noise[(y * 128 + Math.min(127, x * 2 + 17 * n)) % (128 * 128)];
+    return across * smooth(0, 0.25, t) * (1 - smooth(0.85, 1, t)) * (0.4 + 0.6 * t) * lick;
   });
 }
 // Stock scenes reference the flame sprites as particle/fire/fireN: same shapes under that path.

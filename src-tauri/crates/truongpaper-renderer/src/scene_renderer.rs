@@ -410,50 +410,60 @@ fn texture_index(name: &str, suffix: &str) -> Option<usize> {
 
 /// Built-in uniform values (`WE_BUILTIN_UNIFORMS`) as flat column-major floats.
 pub fn builtin_uniform_floats(name: &str, v: &UniformValues) -> Option<Vec<f32>> {
+    let mut out = Vec::new();
+    builtin_uniform_into(name, v, &mut out).then_some(out)
+}
+
+/// Like [`builtin_uniform_floats`], but writes into `out` (cleared first) so a caller can reuse
+/// one buffer for every field. Returns false for an unknown name.
+pub fn builtin_uniform_into(name: &str, v: &UniformValues, out: &mut Vec<f32>) -> bool {
+    out.clear();
     let m = &v.matrices;
-    let cols = |x: Mat4| x.to_cols_array().to_vec();
-    Some(match name {
+    match name {
         "g_ModelViewProjectionMatrix" | "g_EffectModelViewProjectionMatrix" => {
-            cols(m.model_view_projection)
+            out.extend_from_slice(&m.model_view_projection.to_cols_array())
         }
-        "g_ModelViewProjectionMatrixInverse" => cols(m.model_view_projection_inverse),
-        "g_ModelMatrix" => cols(m.model),
-        "g_ModelMatrixInverse" => cols(m.model_inverse),
-        "g_ViewProjectionMatrix" => cols(m.view_projection),
-        "g_Time" => vec![v.time],
-        "g_Daytime" => vec![v.daytime],
-        "g_PointerPosition" => v.pointer.to_array().to_vec(),
-        "g_PointerPositionLast" => v.pointer_last.to_array().to_vec(),
-        "g_ParallaxPosition" => v.parallax_position.to_array().to_vec(),
+        "g_ModelViewProjectionMatrixInverse" => {
+            out.extend_from_slice(&m.model_view_projection_inverse.to_cols_array())
+        }
+        "g_ModelMatrix" => out.extend_from_slice(&m.model.to_cols_array()),
+        "g_ModelMatrixInverse" => out.extend_from_slice(&m.model_inverse.to_cols_array()),
+        "g_ViewProjectionMatrix" => out.extend_from_slice(&m.view_projection.to_cols_array()),
+        "g_Time" => out.push(v.time),
+        "g_Daytime" => out.push(v.daytime),
+        "g_PointerPosition" => out.extend_from_slice(&v.pointer.to_array()),
+        "g_PointerPositionLast" => out.extend_from_slice(&v.pointer_last.to_array()),
+        "g_ParallaxPosition" => out.extend_from_slice(&v.parallax_position.to_array()),
         // Effect passes draw in texture space with no extra rotation.
         "g_EffectTextureProjectionMatrix" | "g_EffectTextureProjectionMatrixInverse" => {
-            cols(Mat4::IDENTITY)
+            out.extend_from_slice(&Mat4::IDENTITY.to_cols_array())
         }
-        "g_TexelSize" => v.texel_size.to_array().to_vec(),
-        "g_TexelSizeHalf" => (v.texel_size * 0.5).to_array().to_vec(),
-        "g_Alpha" | "g_UserAlpha" => vec![v.alpha],
-        "g_Brightness" => vec![v.brightness],
-        "g_Color" | "g_CompositeColor" => v.color.to_array().to_vec(),
-        "g_Color4" => v.color.extend(v.alpha).to_array().to_vec(),
-        "g_LightAmbientColor" => v.ambient_color.to_array().to_vec(),
-        "g_LightSkylightColor" => v.skylight_color.to_array().to_vec(),
-        "g_OrientationUp" | "g_ViewUp" => vec![0.0, 1.0, 0.0],
-        "g_OrientationRight" | "g_ViewRight" => vec![1.0, 0.0, 0.0],
-        "g_OrientationForward" => vec![0.0, 0.0, 1.0],
-        "g_EyePosition" => vec![0.0, 0.0, 1000.0],
-        "g_Texture0Rotation" => v.texture0_rotation.to_array().to_vec(),
-        "g_Texture0Translation" => v.texture0_translation.to_array().to_vec(),
-        "g_AudioSpectrum16Left" => downsample_spectrum(&v.audio_left, 16),
-        "g_AudioSpectrum16Right" => downsample_spectrum(&v.audio_right, 16),
-        "g_AudioSpectrum32Left" => downsample_spectrum(&v.audio_left, 32),
-        "g_AudioSpectrum32Right" => downsample_spectrum(&v.audio_right, 32),
-        "g_AudioSpectrum64Left" => v.audio_left.to_vec(),
-        "g_AudioSpectrum64Right" => v.audio_right.to_vec(),
-        other => {
-            let n = texture_index(other, "Resolution")?;
-            v.texture_resolutions[n].to_array().to_vec()
-        }
-    })
+        "g_TexelSize" => out.extend_from_slice(&v.texel_size.to_array()),
+        "g_TexelSizeHalf" => out.extend_from_slice(&(v.texel_size * 0.5).to_array()),
+        "g_Alpha" | "g_UserAlpha" => out.push(v.alpha),
+        "g_Brightness" => out.push(v.brightness),
+        "g_Color" | "g_CompositeColor" => out.extend_from_slice(&v.color.to_array()),
+        "g_Color4" => out.extend_from_slice(&v.color.extend(v.alpha).to_array()),
+        "g_LightAmbientColor" => out.extend_from_slice(&v.ambient_color.to_array()),
+        "g_LightSkylightColor" => out.extend_from_slice(&v.skylight_color.to_array()),
+        "g_OrientationUp" | "g_ViewUp" => out.extend_from_slice(&[0.0, 1.0, 0.0]),
+        "g_OrientationRight" | "g_ViewRight" => out.extend_from_slice(&[1.0, 0.0, 0.0]),
+        "g_OrientationForward" => out.extend_from_slice(&[0.0, 0.0, 1.0]),
+        "g_EyePosition" => out.extend_from_slice(&[0.0, 0.0, 1000.0]),
+        "g_Texture0Rotation" => out.extend_from_slice(&v.texture0_rotation.to_array()),
+        "g_Texture0Translation" => out.extend_from_slice(&v.texture0_translation.to_array()),
+        "g_AudioSpectrum16Left" => out.extend(downsample_spectrum(&v.audio_left, 16)),
+        "g_AudioSpectrum16Right" => out.extend(downsample_spectrum(&v.audio_right, 16)),
+        "g_AudioSpectrum32Left" => out.extend(downsample_spectrum(&v.audio_left, 32)),
+        "g_AudioSpectrum32Right" => out.extend(downsample_spectrum(&v.audio_right, 32)),
+        "g_AudioSpectrum64Left" => out.extend_from_slice(&v.audio_left),
+        "g_AudioSpectrum64Right" => out.extend_from_slice(&v.audio_right),
+        other => match texture_index(other, "Resolution") {
+            Some(n) => out.extend_from_slice(&v.texture_resolutions[n].to_array()),
+            None => return false,
+        },
+    }
+    true
 }
 
 /// Number to floats: numbers, booleans, `"x y z"` strings, numeric arrays and `{ "value": .. }`.
@@ -585,16 +595,42 @@ pub fn pack_uniform_block(
     size: usize,
     values: &UniformValues,
 ) -> Vec<u8> {
-    let mut buf = vec![0u8; size.max(16)];
+    let mut buf = Vec::new();
+    let mut floats = Vec::new();
+    pack_uniform_block_into(
+        fields,
+        size,
+        values,
+        &values.constants,
+        &mut buf,
+        &mut floats,
+    );
+    buf
+}
+
+/// [`pack_uniform_block`] with the material constants passed separately and the output and float
+/// scratch buffers reused by the caller, so a frame allocates nothing here.
+pub fn pack_uniform_block_into(
+    fields: &[ReflectedUniformField],
+    size: usize,
+    values: &UniformValues,
+    constants: &HashMap<String, Vec<f32>>,
+    buf: &mut Vec<u8>,
+    floats: &mut Vec<f32>,
+) {
+    buf.clear();
+    buf.resize(size.max(16), 0);
     for field in fields {
         let base = field.name.split('[').next().unwrap_or(&field.name).trim();
         let array_len = field
             .name
             .split_once('[')
             .and_then(|(_, rest)| rest.trim_end_matches(']').trim().parse::<usize>().ok());
-        let Some(data) =
-            builtin_uniform_floats(base, values).or_else(|| values.constants.get(base).cloned())
-        else {
+        let data: &[f32] = if builtin_uniform_into(base, values, floats) {
+            floats
+        } else if let Some(c) = constants.get(base) {
+            c
+        } else {
             continue;
         };
         let ty = field.glsl_type.as_str();
@@ -608,7 +644,7 @@ pub fn pack_uniform_block(
                     break;
                 };
                 for (c, v) in elem.iter().take(per).enumerate() {
-                    put_scalar(&mut buf, off + 16 * i + 4 * c, *v, is_int);
+                    put_scalar(buf, off + 16 * i + 4 * c, *v, is_int);
                 }
             }
         } else if ty == "mat3" {
@@ -616,17 +652,16 @@ pub fn pack_uniform_block(
             for col in 0..3 {
                 for row in 0..3 {
                     if let Some(v) = data.get(col * src_stride + row) {
-                        put_scalar(&mut buf, off + 16 * col + 4 * row, *v, false);
+                        put_scalar(buf, off + 16 * col + 4 * row, *v, false);
                     }
                 }
             }
         } else {
             for (c, v) in data.iter().take(comps).enumerate() {
-                put_scalar(&mut buf, off + 4 * c, *v, is_int);
+                put_scalar(buf, off + 4 * c, *v, is_int);
             }
         }
     }
-    buf
 }
 
 // ------------------------------------------------------------------------------------------
@@ -827,9 +862,19 @@ struct SimpleDraw {
     bind_group: wgpu::BindGroup,
 }
 
+/// Scratch buffers and the last uploaded bytes of one pass's uniform block.
+#[derive(Default)]
+struct UniformUpload {
+    /// Bytes currently in the GPU buffer (empty until the first upload).
+    last: Vec<u8>,
+    bytes: Vec<u8>,
+    floats: Vec<f32>,
+}
+
 struct GpuPass {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
+    upload: std::sync::Mutex<UniformUpload>,
     uniform_bind_group: wgpu::BindGroup,
     texture_bind_group: wgpu::BindGroup,
     uniform_fields: Vec<ReflectedUniformField>,
@@ -914,14 +959,34 @@ struct GpuParticleSet {
     blending: BlendMode,
     /// Indices written by the last `update`.
     index_count: u32,
+    /// Sprite sets use the fixed quad pattern, written once at load; only ropes upload indices.
+    rope: bool,
     /// Set for `REFRACT` materials: the sprite shows the scene behind it.
     refract: Option<GpuRefract>,
 }
 
 /// Normal map and strength of a refracting particle material.
 struct GpuRefract {
-    normal_path: Option<String>,
-    params: wgpu::Buffer,
+    /// Normal map, scene copy and strength; built once at load. `None` when the normal map is
+    /// missing (nothing to draw).
+    group: Option<wgpu::BindGroup>,
+}
+
+/// A solid layer: the quad is built at load and rewritten only if the layer size changes.
+struct GpuSolid {
+    draw: SimpleDraw,
+    quad: wgpu::Buffer,
+    size: std::sync::Mutex<Vec2>,
+}
+
+/// Index pattern `[0,1,2,0,2,3] + 4i` of `quads` sprite quads (`quads * 4` must fit in `u16`).
+fn sprite_quad_indices(quads: usize) -> Vec<u16> {
+    let mut out = Vec::with_capacity(quads * 6);
+    for q in 0..quads {
+        let b = (q * 4) as u16;
+        out.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+    }
+    out
 }
 
 /// `ui_editor_properties_refract_amount` of a material pass (the stock default is 0.05).
@@ -940,6 +1005,8 @@ struct GpuParticles {
     plan: Vec<DrawSetPlan>,
     /// Sprite sheet of each plan entry's texture.
     sheets: Vec<Option<std::sync::Arc<SpriteSheet>>>,
+    /// Per-frame geometry scratch, parallel to `plan` (keeps its capacity between frames).
+    geo: Vec<SetGeometry>,
 }
 
 /// A rasterized text layer: the bitmap is rebuilt only when the string or style changes.
@@ -962,7 +1029,7 @@ enum GpuLayer {
     Model(Box<GpuModel>),
     Text(Box<GpuText>),
     Effects(Box<GpuEffectLayer>),
-    Solid(SimpleDraw),
+    Solid(Box<GpuSolid>),
     Particles(Box<GpuParticles>),
 }
 
@@ -977,6 +1044,8 @@ pub struct SceneRenderer {
     target_format: wgpu::TextureFormat,
     scene: GpuTarget,
     full_frame: GpuTarget,
+    /// True when `scene` has changed since the last copy into `full_frame` this frame.
+    full_frame_stale: std::sync::atomic::AtomicBool,
     simple_layout: wgpu::BindGroupLayout,
     ubo_layout: wgpu::BindGroupLayout,
     composite_module: wgpu::ShaderModule,
@@ -1463,6 +1532,7 @@ impl SceneRenderer {
             composite_pipelines: HashMap::new(),
             particle_pipelines: HashMap::new(),
             particle_refract: None,
+            full_frame_stale: std::sync::atomic::AtomicBool::new(true),
             clamp_sampler,
             repeat_sampler,
             white,
@@ -2033,6 +2103,7 @@ impl SceneRenderer {
             pixel_space: vertex_wants_pixel_positions(&vert),
             pipeline,
             uniform_buffer,
+            upload: std::sync::Mutex::new(UniformUpload::default()),
             uniform_bind_group,
             texture_bind_group,
             uniform_fields: compiled.uniform_fields,
@@ -2173,13 +2244,24 @@ impl SceneRenderer {
                         &mut warnings,
                     )
                     .map(|l| GpuLayer::Effects(Box::new(l))),
-                SceneLayerKind::Solid { .. } => Some(GpuLayer::Solid(Self::make_simple_draw_raw(
-                    device,
-                    &self.simple_layout,
-                    &self.white.view,
-                    &self.clamp_sampler,
-                    SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
-                ))),
+                SceneLayerKind::Solid { .. } => {
+                    let size = layer.transform.size;
+                    Some(GpuLayer::Solid(Box::new(GpuSolid {
+                        draw: Self::make_simple_draw_raw(
+                            device,
+                            &self.simple_layout,
+                            &self.white.view,
+                            &self.clamp_sampler,
+                            SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE),
+                        ),
+                        quad: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_solid_quad"),
+                            contents: bytemuck::cast_slice(&layer_quad_vertices(size, [1.0, 1.0])),
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        }),
+                        size: std::sync::Mutex::new(size),
+                    })))
+                }
                 SceneLayerKind::Particle { spec, path } => 'particle: {
                     // A system draws through its own renderer and through its child systems
                     // (a glow, trail and body following one emitter), each with its own
@@ -2236,16 +2318,44 @@ impl SceneRenderer {
                                 self.ensure_texture(device, queue, vfs, p, &mut warnings);
                             }
                             self.ensure_refract_pipeline(device);
-                            GpuRefract {
-                                normal_path,
-                                params: device.create_buffer_init(
-                                    &wgpu::util::BufferInitDescriptor {
-                                        label: Some("scene_particle_refract_params"),
-                                        contents: bytemuck::cast_slice(&[amount, 0.0f32, 0.0, 0.0]),
-                                        usage: wgpu::BufferUsages::UNIFORM,
-                                    },
-                                ),
-                            }
+                            let params =
+                                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("scene_particle_refract_params"),
+                                    contents: bytemuck::cast_slice(&[amount, 0.0f32, 0.0, 0.0]),
+                                    usage: wgpu::BufferUsages::UNIFORM,
+                                });
+                            let normal_view = normal_path
+                                .as_ref()
+                                .and_then(|p| self.textures.get(p))
+                                .map(|t| &t.view);
+                            let group = match (&self.particle_refract, normal_view) {
+                                (Some((layout, _)), Some(normal_view)) => {
+                                    Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                        label: Some("scene_particle_refract_bg"),
+                                        layout,
+                                        entries: &[
+                                            wgpu::BindGroupEntry {
+                                                binding: 0,
+                                                resource: wgpu::BindingResource::TextureView(
+                                                    normal_view,
+                                                ),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 1,
+                                                resource: wgpu::BindingResource::TextureView(
+                                                    &self.full_frame.view,
+                                                ),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 2,
+                                                resource: params.as_entire_binding(),
+                                            },
+                                        ],
+                                    }))
+                                }
+                                _ => None,
+                            };
+                            GpuRefract { group }
                         });
                         self.ensure_particle_pipeline(device, blending);
                         if let Some(p) = &tex_path {
@@ -2281,7 +2391,16 @@ impl SceneRenderer {
                             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
+                        let rope = plan[pi].rope;
+                        if !rope {
+                            queue.write_buffer(
+                                &index_buffer,
+                                0,
+                                bytemuck::cast_slice(&sprite_quad_indices(capacity)),
+                            );
+                        }
                         sets.push(GpuParticleSet {
+                            rope,
                             draw,
                             vertex_buffer,
                             index_buffer,
@@ -2307,6 +2426,13 @@ impl SceneRenderer {
                     Some(GpuLayer::Particles(Box::new(GpuParticles {
                         sets,
                         set_plan,
+                        geo: plan
+                            .iter()
+                            .map(|e| SetGeometry {
+                                skip_sprite_indices: !e.rope,
+                                ..SetGeometry::default()
+                            })
+                            .collect(),
                         plan,
                         sheets,
                     })))
@@ -3029,6 +3155,33 @@ impl SceneRenderer {
         }
     }
 
+    /// Marks `scene` as changed when `dest` is the scene, so the next `full_frame` copy runs.
+    fn mark_drawn(&self, dest: &GpuTarget) {
+        if std::ptr::eq(dest, &self.scene) {
+            self.full_frame_stale
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Copies the scene into `full_frame` unless it already holds the current scene.
+    fn copy_scene_to_full_frame(&self, encoder: &mut wgpu::CommandEncoder) {
+        if !self
+            .full_frame_stale
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        encoder.copy_texture_to_texture(
+            self.scene.texture.as_image_copy(),
+            self.full_frame.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.scene.width,
+                height: self.scene.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     fn write_we_uniforms(
         queue: &wgpu::Queue,
         pass: &GpuPass,
@@ -3042,17 +3195,36 @@ impl SceneRenderer {
             values.texture0_rotation = rot;
             values.texture0_translation = tr;
         }
-        values.constants = match live {
+        let live_constants;
+        let constants = match live {
             // Script-driven `constantshadervalues` replace the baked value every frame.
             Some(live) if !live.is_empty() => {
                 let mut raw = pass.raw_constants.clone();
                 raw.extend(live.iter().map(|(k, v)| (k.clone(), v.clone())));
-                map_material_constants(&pass.metadata, &raw)
+                live_constants = map_material_constants(&pass.metadata, &raw);
+                &live_constants
             }
-            _ => pass.constants.clone(),
+            _ => &pass.constants,
         };
-        let bytes = pack_uniform_block(&pass.uniform_fields, pass.uniform_size, &values);
-        queue.write_buffer(&pass.uniform_buffer, 0, &bytes);
+        let mut up = pass.upload.lock().unwrap_or_else(|e| e.into_inner());
+        let UniformUpload {
+            last,
+            bytes,
+            floats,
+        } = &mut *up;
+        pack_uniform_block_into(
+            &pass.uniform_fields,
+            pass.uniform_size,
+            &values,
+            constants,
+            bytes,
+            floats,
+        );
+        // Static constants and an unchanged matrix leave the block identical to last frame.
+        if *bytes != *last {
+            queue.write_buffer(&pass.uniform_buffer, 0, bytes);
+            std::mem::swap(last, bytes);
+        }
     }
 
     /// Draws `graph` into `target_view`: clears to `clearcolor`, runs every visible layer through
@@ -3069,6 +3241,9 @@ impl SceneRenderer {
         camera: &CameraState,
         frame: &FrameUniformInputs,
     ) {
+        // The scene is cleared below, so `full_frame` is out of date at the start of a frame.
+        self.full_frame_stale
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let pointer_last = self.last_pointer;
         self.last_pointer = frame.pointer;
         let daytime = std::time::SystemTime::now()
@@ -3217,23 +3392,34 @@ impl SceneRenderer {
                 }
                 Some(GpuLayer::Particles(ps)) => {
                     if let Some(sys) = graph.particle_system(li) {
-                        let mut geo = vec![SetGeometry::default(); ps.plan.len()];
-                        sys.gather_geometry(&ps.plan, &ps.sheets, &mut geo);
+                        let geo = &mut ps.geo;
+                        for g in geo.iter_mut() {
+                            g.vertices.clear();
+                            g.indices.clear();
+                        }
+                        sys.gather_geometry(&ps.plan, &ps.sheets, geo);
                         for (set, &pi) in ps.sets.iter_mut().zip(&ps.set_plan) {
                             let g = &mut geo[pi];
                             g.fit(set.capacity);
-                            set.index_count = g.indices.len() as u32;
+                            // Sprite indices are the fixed pattern already in the buffer.
+                            set.index_count = if set.rope {
+                                g.indices.len()
+                            } else {
+                                g.vertices.len() / 4 * 6
+                            } as u32;
                             if !g.vertices.is_empty() {
                                 queue.write_buffer(
                                     &set.vertex_buffer,
                                     0,
                                     bytemuck::cast_slice(&g.vertices),
                                 );
-                                queue.write_buffer(
-                                    &set.index_buffer,
-                                    0,
-                                    bytemuck::cast_slice(&g.indices),
-                                );
+                                if set.rope {
+                                    queue.write_buffer(
+                                        &set.index_buffer,
+                                        0,
+                                        bytemuck::cast_slice(&g.indices),
+                                    );
+                                }
                             }
                         }
                     }
@@ -3357,6 +3543,7 @@ impl SceneRenderer {
                     bytemuck::cast_slice(&layer_quad_vertices(t.quad_size, [1.0, 1.0])),
                 );
                 let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
+                self.mark_drawn(dest);
                 run_pass(encoder, "scene_text", &dest.view, None, |rp| {
                     rp.set_pipeline(pipeline);
                     rp.set_bind_group(0, &t.draw.bind_group, &[]);
@@ -3370,6 +3557,7 @@ impl SceneRenderer {
                 if !graph.effective_visible(li) || layer.alpha <= 0.0 {
                     return;
                 }
+                self.mark_drawn(dest);
                 res.draw(
                     queue,
                     encoder,
@@ -3385,7 +3573,8 @@ impl SceneRenderer {
                     },
                 );
             }
-            GpuLayer::Solid(draw) => {
+            GpuLayer::Solid(solid) => {
+                let draw = &solid.draw;
                 queue.write_buffer(
                     &draw.uniform,
                     0,
@@ -3394,86 +3583,64 @@ impl SceneRenderer {
                         (layer.color * layer.brightness).extend(layer.alpha),
                     )),
                 );
+                {
+                    let mut size = solid.size.lock().unwrap_or_else(|e| e.into_inner());
+                    if *size != layer.transform.size {
+                        *size = layer.transform.size;
+                        queue.write_buffer(
+                            &solid.quad,
+                            0,
+                            bytemuck::cast_slice(&layer_quad_vertices(*size, [1.0, 1.0])),
+                        );
+                    }
+                }
                 let pipeline = &self.composite_pipelines[&(HDR_FORMAT, BlendMode::Translucent)];
-                let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_solid_quad"),
-                    contents: bytemuck::cast_slice(&layer_quad_vertices(
-                        layer.transform.size,
-                        [1.0, 1.0],
-                    )),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+                self.mark_drawn(dest);
                 run_pass(encoder, "scene_solid", &dest.view, None, |rp| {
                     rp.set_pipeline(pipeline);
                     rp.set_bind_group(0, &draw.bind_group, &[]);
-                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.set_vertex_buffer(0, solid.quad.slice(..));
                     rp.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint16);
                     rp.draw_indexed(0..6, 0, 0..1);
                 });
             }
             GpuLayer::Particles(ps) => {
+                let uniforms = SimpleUniforms::new(
+                    matrices.model_view_projection,
+                    (layer.color * layer.brightness).extend(layer.alpha),
+                );
                 for set in &ps.sets {
+                    if set.index_count != 0 {
+                        queue.write_buffer(&set.draw.uniform, 0, bytemuck::bytes_of(&uniforms));
+                    }
+                }
+                let sets = &ps.sets;
+                let mut idx = 0;
+                while idx < sets.len() {
+                    let set = &sets[idx];
                     if set.index_count == 0 {
+                        idx += 1;
                         continue;
                     }
-                    queue.write_buffer(
-                        &set.draw.uniform,
-                        0,
-                        bytemuck::bytes_of(&SimpleUniforms::new(
-                            matrices.model_view_projection,
-                            (layer.color * layer.brightness).extend(layer.alpha),
-                        )),
-                    );
                     if let Some(refract) = &set.refract {
+                        idx += 1;
                         // The scene copy only matches the scene target; group targets skip it.
                         if !std::ptr::eq(dest, &self.scene) {
                             continue;
                         }
-                        let Some((layout, pipeline)) = &self.particle_refract else {
+                        let Some((_, pipeline)) = &self.particle_refract else {
                             continue;
                         };
                         // No normal map means no bend, so there is nothing to draw.
-                        let Some(normal_view) = refract
-                            .normal_path
-                            .as_ref()
-                            .and_then(|p| self.textures.get(p))
-                            .map(|t| &t.view)
-                        else {
+                        let Some(group) = &refract.group else {
                             continue;
                         };
-                        encoder.copy_texture_to_texture(
-                            self.scene.texture.as_image_copy(),
-                            self.full_frame.texture.as_image_copy(),
-                            wgpu::Extent3d {
-                                width: self.scene.width,
-                                height: self.scene.height,
-                                depth_or_array_layers: 1,
-                            },
-                        );
-                        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("scene_particle_refract_bg"),
-                            layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(normal_view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &self.full_frame.view,
-                                    ),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: refract.params.as_entire_binding(),
-                                },
-                            ],
-                        });
+                        self.copy_scene_to_full_frame(encoder);
+                        self.mark_drawn(dest);
                         run_pass(encoder, "scene_particles_refract", &dest.view, None, |rp| {
                             rp.set_pipeline(pipeline);
                             rp.set_bind_group(0, &set.draw.bind_group, &[]);
-                            rp.set_bind_group(1, &group, &[]);
+                            rp.set_bind_group(1, group, &[]);
                             rp.set_vertex_buffer(0, set.vertex_buffer.slice(..));
                             rp.set_index_buffer(
                                 set.index_buffer.slice(..),
@@ -3483,14 +3650,25 @@ impl SceneRenderer {
                         });
                         continue;
                     }
-                    let pipeline = &self.particle_pipelines[&set.blending];
+                    // Consecutive plain sets draw into the same target: one pass for the run.
+                    let mut end = idx + 1;
+                    while end < sets.len() && sets[end].refract.is_none() {
+                        end += 1;
+                    }
+                    self.mark_drawn(dest);
                     run_pass(encoder, "scene_particles", &dest.view, None, |rp| {
-                        rp.set_pipeline(pipeline);
-                        rp.set_bind_group(0, &set.draw.bind_group, &[]);
-                        rp.set_vertex_buffer(0, set.vertex_buffer.slice(..));
-                        rp.set_index_buffer(set.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        rp.draw_indexed(0..set.index_count, 0, 0..1);
+                        for set in sets[idx..end].iter().filter(|s| s.index_count != 0) {
+                            rp.set_pipeline(&self.particle_pipelines[&set.blending]);
+                            rp.set_bind_group(0, &set.draw.bind_group, &[]);
+                            rp.set_vertex_buffer(0, set.vertex_buffer.slice(..));
+                            rp.set_index_buffer(
+                                set.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            rp.draw_indexed(0..set.index_count, 0, 0..1);
+                        }
                     });
+                    idx = end;
                 }
             }
         }
@@ -3519,18 +3697,11 @@ impl SceneRenderer {
         if into_scene
             && (fx.plan.uses_full_frame_buffer || fx.samples_scene || color_blend || backdrop)
         {
-            encoder.copy_texture_to_texture(
-                self.scene.texture.as_image_copy(),
-                self.full_frame.texture.as_image_copy(),
-                wgpu::Extent3d {
-                    width: self.scene.width,
-                    height: self.scene.height,
-                    depth_or_array_layers: 1,
-                },
-            );
+            self.copy_scene_to_full_frame(encoder);
         }
         let layer_size = Vec2::new(fx.plan.width as f32, fx.plan.height as f32);
         let local = layer_local_projection(layer_size);
+        let local_inverse = local.inverse();
         if let Some(group) = &fx.group {
             if graph.effective_visible(li) {
                 let capture = composition_capture_matrix(
@@ -3587,7 +3758,7 @@ impl SceneRenderer {
         let local_values = UniformValues {
             matrices: PassMatrices {
                 model_view_projection: local,
-                model_view_projection_inverse: local.inverse(),
+                model_view_projection_inverse: local_inverse,
                 model: Mat4::IDENTITY,
                 model_inverse: Mat4::IDENTITY,
                 view_projection: local,
@@ -3713,25 +3884,24 @@ impl SceneRenderer {
                     let Some(view) = target_view(&pass.target) else {
                         continue;
                     };
-                    let pixel_values = UniformValues {
+                    let pixel_values = pass.pixel_space.then(|| UniformValues {
                         matrices: PassMatrices {
                             model_view_projection: local,
-                            model_view_projection_inverse: local.inverse(),
+                            model_view_projection_inverse: local_inverse,
                             view_projection: local,
                             ..effect_values.matrices
                         },
                         ..effect_values.clone()
-                    };
+                    });
                     Self::write_we_uniforms(
                         queue,
                         pass,
-                        if pass.pixel_space {
-                            &pixel_values
-                        } else {
-                            &effect_values
-                        },
+                        pixel_values.as_ref().unwrap_or(&effect_values),
                         graph.effect_constant_overrides(li, pass.effect_index, pass.pass_index),
                     );
+                    if matches!(pass.target, RenderTargetId::Scene) {
+                        self.mark_drawn(dest);
+                    }
                     run_pass(encoder, "scene_effect_pass", view, transparent, |rp| {
                         rp.set_pipeline(&pass.pipeline);
                         rp.set_bind_group(0, &pass.uniform_bind_group, &[]);
@@ -3762,6 +3932,9 @@ impl SceneRenderer {
                         0,
                         bytemuck::bytes_of(&SimpleUniforms::new(Mat4::IDENTITY, Vec4::ONE)),
                     );
+                    if matches!(target, RenderTargetId::Scene) {
+                        self.mark_drawn(dest);
+                    }
                     run_pass(encoder, "scene_effect_copy", view, transparent, |rp| {
                         rp.set_pipeline(pipeline);
                         rp.set_bind_group(0, &draw.bind_group, &[]);
@@ -3816,6 +3989,7 @@ impl SceneRenderer {
                     } else {
                         &self.composite_pipelines[&(HDR_FORMAT, blend)]
                     };
+                    self.mark_drawn(dest);
                     run_pass(encoder, "scene_layer_composite", &dest.view, None, |rp| {
                         rp.set_pipeline(pipeline);
                         rp.set_bind_group(0, &draw.bind_group, &[]);
@@ -3838,6 +4012,68 @@ impl SceneRenderer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn sprite_indices_follow_the_quad_pattern() {
+        assert!(sprite_quad_indices(0).is_empty());
+        assert_eq!(
+            sprite_quad_indices(2),
+            vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]
+        );
+        let max = sprite_quad_indices(16_000);
+        assert_eq!(max.len(), 96_000);
+        assert_eq!(*max.last().unwrap(), 63_999);
+    }
+
+    #[test]
+    fn builtin_into_matches_builtin_floats_and_reuses_the_buffer() {
+        let v = UniformValues {
+            time: 2.5,
+            alpha: 0.5,
+            ..UniformValues::default()
+        };
+        let mut buf = vec![9.0; 40];
+        for name in [
+            "g_Time",
+            "g_Color4",
+            "g_ModelViewProjectionMatrix",
+            "g_AudioSpectrum16Left",
+            "g_Texture1Resolution",
+        ] {
+            assert!(builtin_uniform_into(name, &v, &mut buf));
+            assert_eq!(
+                Some(buf.clone()),
+                builtin_uniform_floats(name, &v),
+                "{name}"
+            );
+        }
+        assert!(!builtin_uniform_into("g_Nope", &v, &mut buf));
+        assert_eq!(builtin_uniform_floats("g_Nope", &v), None);
+    }
+
+    #[test]
+    fn pack_into_reuses_buffers_and_matches_pack() {
+        let fields = vec![ReflectedUniformField {
+            name: "g_Time".into(),
+            glsl_type: "float".into(),
+            byte_offset: 4,
+            byte_size: 4,
+        }];
+        let v = UniformValues {
+            time: 3.0,
+            ..UniformValues::default()
+        };
+        let want = pack_uniform_block(&fields, 32, &v);
+        let (mut buf, mut floats) = (vec![7u8; 100], Vec::new());
+        pack_uniform_block_into(&fields, 32, &v, &v.constants, &mut buf, &mut floats);
+        assert_eq!(buf, want);
+        assert_eq!(&buf[4..8], &3.0f32.to_ne_bytes());
     }
 }
 

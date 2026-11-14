@@ -260,6 +260,10 @@ async fn render() -> anyhow::Result<()> {
     // PROBE_AUDIO=sine: synthetic 64-band spectrum that moves per frame, to check that
     // audio-reactive layers and scripts respond (silence otherwise).
     let synth_audio = std::env::var("PROBE_AUDIO").is_ok_and(|v| v == "sine");
+    // PROBE_BENCH=1: print the average CPU ms per frame spent in render() and in
+    // render() + finish + submit (the GPU wait is excluded). Warm-up: first 10% of frames.
+    let bench = std::env::var("PROBE_BENCH").is_ok();
+    let (mut bench_render, mut bench_submit, mut bench_n) = (0.0f64, 0.0f64, 0u32);
     for i in 0..frame_count {
         let mut encoder = device.create_command_encoder(&Default::default());
         let audio = if synth_audio {
@@ -278,6 +282,7 @@ async fn render() -> anyhow::Result<()> {
                 }
             }
         }
+        let t_render = std::time::Instant::now();
         renderer.render(
             &device,
             &queue,
@@ -309,8 +314,22 @@ async fn render() -> anyhow::Result<()> {
                 target.size(),
             );
         }
+        let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
         queue.submit(Some(encoder.finish()));
+        let submit_ms = t_render.elapsed().as_secs_f64() * 1000.0;
         device.poll(wgpu::Maintain::Wait);
+        if bench && i >= frame_count / 10 {
+            bench_render += render_ms;
+            bench_submit += submit_ms;
+            bench_n += 1;
+        }
+    }
+    if bench && bench_n > 0 {
+        eprintln!(
+            "BENCH frames={bench_n} render_ms={:.4} render_submit_ms={:.4}",
+            bench_render / bench_n as f64,
+            bench_submit / bench_n as f64
+        );
     }
     // PROBE_TRACE=a,b: prints local/world state of layers whose name contains a filter.
     if let Ok(filter) = std::env::var("PROBE_TRACE") {

@@ -92,6 +92,12 @@ pub fn parse_static_mdl(bytes: &[u8]) -> IoResult<StaticMdl> {
     let vlen = u32_at(bytes, header + 4).unwrap_or(0) as usize;
     let vstart = header + 8;
     let count = vlen / STATIC_VERTEX_STRIDE;
+    if vstart
+        .checked_add(count * STATIC_VERTEX_STRIDE)
+        .is_none_or(|e| e > bytes.len())
+    {
+        return Err(bad("vertex block exceeds file"));
+    }
     let mut vertices = Vec::with_capacity(count);
     for i in 0..count {
         let o = vstart + i * STATIC_VERTEX_STRIDE;
@@ -105,7 +111,12 @@ pub fn parse_static_mdl(bytes: &[u8]) -> IoResult<StaticMdl> {
     }
     let ilen_at = vstart + vlen;
     let ilen = u32_at(bytes, ilen_at).unwrap_or(0) as usize;
-    let indices: Vec<u32> = bytes[ilen_at + 4..ilen_at + 4 + ilen]
+    let index_bytes = ilen_at
+        .checked_add(4)
+        .and_then(|from| Some(from..from.checked_add(ilen)?))
+        .and_then(|range| bytes.get(range))
+        .ok_or_else(|| bad("index block exceeds file"))?;
+    let indices: Vec<u32> = index_bytes
         .chunks_exact(2)
         .map(|c| u32::from(u16::from_le_bytes([c[0], c[1]])))
         .collect();
@@ -199,5 +210,19 @@ mod tests {
         let n = b.len();
         b[n - 7 - 6] = 9; // index 9 >= 3 vertices
         assert!(parse_static_mdl(&b).is_err());
+    }
+
+    #[test]
+    fn hostile_lengths_are_errors_not_panics() {
+        let good = build("MDLV0023", true);
+        // Index block length claims more bytes than the file holds.
+        let ilen_at = good.len() - 7 - 6 - 4;
+        let mut b = good.clone();
+        b[ilen_at..ilen_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_static_mdl(&b).is_err());
+        // Every truncation either parses or errors; none may panic.
+        for n in 0..good.len() {
+            let _ = parse_static_mdl(&good[..n]);
+        }
     }
 }

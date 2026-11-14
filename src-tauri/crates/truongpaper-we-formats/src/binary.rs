@@ -15,6 +15,11 @@ fn invalid(msg: impl Into<String>) -> Error {
 const MAX_MIPMAP_BYTES: usize = 1 << 30;
 /// Hard cap for LZ4 decompression output (256 MiB).
 const MAX_LZ4_DECOMPRESSED_BYTES: usize = 256 << 20;
+/// Most images, and most mipmaps per image, one TEX may declare.
+const MAX_TEX_IMAGES: usize = 64;
+const MAX_TEX_MIPMAPS: usize = 32;
+/// Most decoded payload bytes (all images and mipmaps together) one TEX may hold (512 MiB).
+const MAX_TEX_TOTAL_BYTES: usize = 512 << 20;
 /// Largest accepted TEX dimension in pixels.
 const MAX_TEX_DIMENSION: i32 = 16_384;
 
@@ -297,6 +302,10 @@ fn read_count(r: &mut Cursor<&[u8]>, what: &str) -> IoResult<usize> {
 }
 
 pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
+    parse_tex_with_budget(bytes, MAX_TEX_TOTAL_BYTES)
+}
+
+fn parse_tex_with_budget(bytes: &[u8], total_budget: usize) -> IoResult<ParsedTex> {
     let mut r = Cursor::new(bytes);
 
     let magic1 = r.read_n_string(16)?;
@@ -338,11 +347,22 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
 
     let container_magic = r.read_n_string(16)?;
     let image_count = read_count(&mut r, "image")?;
+    if image_count > MAX_TEX_IMAGES {
+        return Err(invalid(format!(
+            "TEX declares {image_count} images (limit {MAX_TEX_IMAGES})"
+        )));
+    }
+    let mut budget_left = total_budget;
     let (container_version, free_image_format) = read_container(&mut r, &container_magic)?;
 
     let mut images = Vec::with_capacity(image_count.min(1024));
     for _ in 0..image_count {
         let mipmap_count = read_count(&mut r, "mipmap")?;
+        if mipmap_count > MAX_TEX_MIPMAPS {
+            return Err(invalid(format!(
+                "TEX image declares {mipmap_count} mipmaps (limit {MAX_TEX_MIPMAPS})"
+            )));
+        }
         let mut mipmaps = Vec::with_capacity(mipmap_count.min(64));
 
         for _ in 0..mipmap_count {
@@ -375,8 +395,19 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
                     format!("Mipmap payload of {byte_count} bytes exceeds file size"),
                 ));
             }
-            let mut payload = vec![0u8; byte_count];
-            r.read_exact(&mut payload)?;
+            // Borrow the payload from the input; only a stored (non-LZ4) payload is copied.
+            let start = r.position() as usize;
+            let payload: &[u8] = &bytes[start..start + byte_count];
+            r.set_position((start + byte_count) as u64);
+            // Charge the decoded size before allocating it.
+            let charge = if is_lz4 {
+                decompressed_len.max(0) as usize
+            } else {
+                byte_count
+            };
+            budget_left = budget_left
+                .checked_sub(charge)
+                .ok_or_else(|| invalid("TEX payloads exceed the total size limit"))?;
 
             let raw_bytes = if is_lz4 {
                 if decompressed_len < 0
@@ -397,10 +428,10 @@ pub fn parse_tex(bytes: &[u8]) -> IoResult<ParsedTex> {
                         )));
                     }
                 }
-                lz4_flex::block::decompress(&payload, decompressed_len as usize)
+                lz4_flex::block::decompress(payload, decompressed_len as usize)
                     .map_err(|e| invalid(e.to_string()))?
             } else {
-                payload
+                payload.to_vec()
             };
 
             mipmaps.push(TexMipmap {
@@ -852,6 +883,33 @@ mod tests {
         }
         b.extend(nstr("TEXB0002"));
         assert!(parse_tex(&b).is_err());
+    }
+
+    #[test]
+    fn tex_rejects_huge_image_and_mipmap_counts() {
+        let mut b = tex_header(0, 0);
+        b.extend(nstr("TEXB0001"));
+        b.extend(i32le(i32::MAX)); // image count
+        assert!(parse_tex(&b).is_err());
+
+        let mut b = tex_header(0, 0);
+        b.extend(nstr("TEXB0001"));
+        b.extend(i32le(1));
+        b.extend(i32le(i32::MAX)); // mipmap count
+        assert!(parse_tex(&b).is_err());
+    }
+
+    #[test]
+    fn tex_total_payload_budget_is_enforced() {
+        let mut b = tex_header(0, 0);
+        b.extend(nstr("TEXB0001"));
+        b.extend(i32le(1));
+        b.extend(i32le(3));
+        for _ in 0..3 {
+            b.extend(mip_v1(2, 1, &[0u8; 8]));
+        }
+        assert!(parse_tex_with_budget(&b, 24).is_ok());
+        assert!(parse_tex_with_budget(&b, 23).is_err());
     }
 
     #[test]

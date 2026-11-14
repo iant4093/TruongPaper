@@ -332,6 +332,7 @@ fn parse_mdla(
     r.check_count(anim_num, 4 * 6, "animation")?;
 
     let mut out = Vec::with_capacity(anim_num);
+    let mut frames_left = MAX_TOTAL_FRAMES;
     for a in 0..anim_num {
         let mut id = 0i32;
         while id == 0 {
@@ -367,6 +368,12 @@ fn parse_mdla(
             }
             let n = (size / MDLA_FRAME_BYTES) as usize;
             r.check_count(n, MDLA_FRAME_BYTES as usize, "frame")?;
+            frames_left = frames_left
+                .checked_sub(n)
+                .ok_or(PuppetError::CountTooLarge {
+                    what: "total frame",
+                    count: n,
+                })?;
             let mut frames = Vec::with_capacity(n);
             for _ in 0..n {
                 frames.push(PuppetFrame {
@@ -463,14 +470,38 @@ fn plausible_header(bytes: &[u8], pos: usize) -> bool {
     check(&mut r).unwrap_or(false)
 }
 
+/// Most animation frames (over all clips and bones) one file may hold.
+const MAX_TOTAL_FRAMES: usize = 2_000_000;
+/// Farthest `find_next_header` looks ahead, in bytes.
+const MAX_HEADER_SCAN: usize = 4 * 1024 * 1024;
+
 /// First byte offset at or after `from` where a clip header starts.
 fn find_next_header(bytes: &[u8], from: usize) -> Option<usize> {
-    let mut p = (from..bytes.len().saturating_sub(24)).find(|&p| plausible_header(bytes, p))?;
+    let end = bytes
+        .len()
+        .saturating_sub(24)
+        .min(from.saturating_add(MAX_HEADER_SCAN));
+    let mut p = (from..end).find(|&p| plausible_header(bytes, p))?;
     // Zero padding before the id can also parse as a shifted header; take the last of the run.
     while plausible_header(bytes, p + 1) {
         p += 1;
     }
     Some(p)
+}
+
+/// `m.inverse()`, or identity when `m` is singular or the result is not finite (a bone scaled
+/// to zero would otherwise fill the mesh with NaN).
+fn safe_inverse(m: &Mat4) -> Mat4 {
+    let det = m.determinant();
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return Mat4::IDENTITY;
+    }
+    let inv = m.inverse();
+    if inv.to_cols_array().iter().all(|v| v.is_finite()) {
+        inv
+    } else {
+        Mat4::IDENTITY
+    }
 }
 
 /// `combined[i] = combined[parent] * transform`; returns `inverse(combined[i])`.
@@ -483,7 +514,7 @@ fn bind_offsets(bones: &[PuppetBone]) -> Vec<Mat4> {
             .unwrap_or(Mat4::IDENTITY);
         combined.push(parent * b.transform);
     }
-    combined.iter().map(|m| m.inverse()).collect()
+    combined.iter().map(safe_inverse).collect()
 }
 
 /// `Rz(angle.z) * Ry(angle.y) * Rx(angle.x)`.
@@ -821,5 +852,46 @@ mod resync_tests {
         let bytes = header_fps(159, 2, 0.483);
         assert!(plausible_header(&bytes, 0));
         assert!(!plausible_header(&header_fps(159, 2, 0.0), 0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn singular_bone_gives_finite_bind_offsets() {
+        let bones = vec![
+            PuppetBone {
+                name: "zero".into(),
+                parent: None,
+                transform: Mat4::from_scale(Vec3::ZERO),
+            },
+            PuppetBone {
+                name: "child".into(),
+                parent: Some(0),
+                transform: Mat4::from_translation(Vec3::new(1.0, 2.0, 0.0)),
+            },
+            PuppetBone {
+                name: "nan".into(),
+                parent: None,
+                transform: Mat4::from_scale(Vec3::splat(f32::NAN)),
+            },
+        ];
+        for m in bind_offsets(&bones) {
+            assert!(m.to_cols_array().iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn regular_bone_keeps_its_inverse() {
+        let m = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0));
+        assert!(safe_inverse(&m).abs_diff_eq(m.inverse(), 1e-6));
+    }
+
+    #[test]
+    fn header_scan_is_bounded() {
+        let bytes = vec![0u8; MAX_HEADER_SCAN + 4096];
+        assert!(find_next_header(&bytes, 0).is_none());
     }
 }

@@ -60,7 +60,7 @@ use crate::shader_preprocessor::{
     compile_we_shader_pair, parse_uniform_comment_metadata, preprocess_we_shader_pair,
     ReflectedUniformField, UniformCommentMetadata, WE_SAMPLER_BINDING_OFFSET,
 };
-use crate::sprite::{pack_sprite_atlases, sprite_atlas_count, SpriteSheet};
+use crate::sprite::{sprite_atlas_count, AtlasPacker, SpriteSheet};
 use crate::text::{
     bitmap_size, grow_text_box, load_font, rasterize, FontMetrics, TextCache, TextKey, TextStyle,
 };
@@ -1079,6 +1079,8 @@ pub struct SceneRenderer {
     model3d: Option<ModelResources>,
     last_pointer: Vec2,
     diagnostics: DiagnosticsLog,
+    /// Bytes of render targets this scene may still allocate.
+    fbo_bytes_left: u64,
 }
 
 fn block_on<F: Future>(device: &wgpu::Device, fut: F) -> F::Output {
@@ -1103,6 +1105,49 @@ fn with_validation<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Result<T,
     }
 }
 
+/// Most pixels in one render target (about 6300 x 6300).
+const MAX_TARGET_PIXELS: u64 = 40_000_000;
+/// Bytes all render targets of one loaded scene may take together.
+const MAX_FBO_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Scales `(w, h)` down, keeping the aspect ratio, until both sides fit `max_dim` and the
+/// area fits `max_pixels`. Never returns a zero side.
+fn fit_extent(w: u32, h: u32, max_dim: u32, max_pixels: u64) -> (u32, u32) {
+    let (w, h) = (w.max(1), h.max(1));
+    let mut scale = 1.0f64;
+    let max_dim = max_dim.max(1);
+    scale = scale
+        .min(max_dim as f64 / w as f64)
+        .min(max_dim as f64 / h as f64);
+    let px = w as f64 * h as f64 * scale * scale;
+    if px > max_pixels as f64 {
+        scale *= (max_pixels as f64 / px).sqrt();
+    }
+    if scale >= 1.0 {
+        return (w, h);
+    }
+    let fw = ((w as f64 * scale).floor() as u32).clamp(1, max_dim);
+    let fh = ((h as f64 * scale).floor() as u32).clamp(1, max_dim);
+    (fw, fh)
+}
+
+/// Scene size in pixels, clamped to what the device and the pixel budget allow.
+fn clamp_scene_size(device: &wgpu::Device, size: Vec2) -> (u32, u32) {
+    let px = |v: f32| {
+        if v.is_finite() {
+            v.round().clamp(1.0, 1.0e6) as u32
+        } else {
+            1
+        }
+    };
+    fit_extent(
+        px(size.x),
+        px(size.y),
+        device.limits().max_texture_dimension_2d,
+        MAX_TARGET_PIXELS,
+    )
+}
+
 fn create_target(
     device: &wgpu::Device,
     label: &str,
@@ -1110,7 +1155,12 @@ fn create_target(
     height: u32,
     format: wgpu::TextureFormat,
 ) -> GpuTarget {
-    let (width, height) = (width.max(1), height.max(1));
+    let (width, height) = fit_extent(
+        width,
+        height,
+        device.limits().max_texture_dimension_2d,
+        MAX_TARGET_PIXELS,
+    );
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -1219,6 +1269,23 @@ enum TexDecode {
 /// Largest edge of an embedded-video placeholder texture.
 const MAX_EMBEDDED_VIDEO_DIMENSION: u32 = 4096;
 
+/// Largest edge and decoded size of an image inside a `.tex` (PNG, JPEG, ...).
+const MAX_IMAGE_DIMENSION: u32 = 16384;
+const MAX_IMAGE_ALLOC: u64 = 512 * 1024 * 1024;
+
+/// Decodes a container image with size limits, so a tiny file cannot expand into gigabytes.
+fn decode_container_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_ALLOC);
+    reader.limits(limits);
+    Ok(reader.decode().map_err(|e| e.to_string())?.to_rgba8())
+}
+
 fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
     let tex = parse_tex(bytes).map_err(|e| e.to_string())?;
     if tex.is_mp4() {
@@ -1242,9 +1309,7 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
             .and_then(|i| i.first())
             .ok_or("texture has no mipmaps")?;
         if tex.free_image_format != FIF_UNKNOWN {
-            let img = image::load_from_memory(&mip.raw_bytes)
-                .map_err(|e| e.to_string())?
-                .to_rgba8();
+            let img = decode_container_image(&mip.raw_bytes)?;
             let (w, h) = img.dimensions();
             Ok((img.into_raw(), w, h))
         } else {
@@ -1260,16 +1325,21 @@ fn decode_tex_file(bytes: &[u8]) -> Result<TexDecode, String> {
     if let Some(frames) = sheet_frames.as_mut() {
         let wanted = sprite_atlas_count(frames).min(tex.images.len());
         if wanted > 1 {
-            let mut parts = vec![(std::mem::take(&mut rgba), w, h)];
-            for i in 1..wanted {
-                parts.push(decode_image(i)?);
-            }
-            match pack_sprite_atlases(&parts, frames) {
-                Some(packed) => {
+            // One part at a time: the peak is the packed sheet plus the part being added.
+            if let Some(mut packer) = AtlasPacker::new(w, h, wanted) {
+                let mut ok = packer.add(0, &rgba, w, h);
+                for i in 1..wanted {
+                    if !ok {
+                        break;
+                    }
+                    let (part, pw, ph) = decode_image(i)?;
+                    ok = packer.add(i, &part, pw, ph);
+                }
+                if ok {
+                    let packed = packer.finish(frames);
                     (rgba, w, h) = (packed.rgba, packed.width, packed.height);
                     stacked = true;
                 }
-                None => rgba = parts.swap_remove(0).0,
             }
         }
     }
@@ -1400,10 +1470,7 @@ impl SceneRenderer {
         target_format: wgpu::TextureFormat,
         scene_size: Vec2,
     ) -> Self {
-        let (w, h) = (
-            scene_size.x.round().max(1.0) as u32,
-            scene_size.y.round().max(1.0) as u32,
-        );
+        let (w, h) = clamp_scene_size(device, scene_size);
         let simple_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene_simple_bgl"),
             entries: &simple_layout_entries(),
@@ -1549,6 +1616,7 @@ impl SceneRenderer {
             model3d: None,
             last_pointer: Vec2::splat(0.5),
             diagnostics: DiagnosticsLog::default(),
+            fbo_bytes_left: MAX_FBO_BYTES,
         };
         for blend in [
             BlendMode::Normal,
@@ -1809,6 +1877,32 @@ impl SceneRenderer {
             cache: None,
         });
         self.particle_pipelines.insert(blend, pipeline);
+    }
+
+    /// Takes `w x h` of `format` from the scene's render-target byte budget, scaling it down
+    /// when the budget runs short. Returns the size to allocate.
+    fn budget_fbo(
+        &mut self,
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+        format: wgpu::TextureFormat,
+    ) -> (u32, u32) {
+        let bpp = u64::from(format.block_copy_size(None).unwrap_or(8));
+        let (mut w, mut h) = fit_extent(
+            w,
+            h,
+            device.limits().max_texture_dimension_2d,
+            MAX_TARGET_PIXELS,
+        );
+        let left_px = (self.fbo_bytes_left / bpp).max(1);
+        if u64::from(w) * u64::from(h) > left_px {
+            (w, h) = fit_extent(w, h, u32::MAX, left_px);
+        }
+        self.fbo_bytes_left = self
+            .fbo_bytes_left
+            .saturating_sub(u64::from(w) * u64::from(h) * bpp);
+        (w, h)
     }
 
     /// Loads a `.tex` asset into the cache. Returns `false` (and caches nothing) on failure.
@@ -2136,10 +2230,11 @@ impl SceneRenderer {
         graph: &SceneGraph,
     ) -> Vec<String> {
         let mut warnings = Vec::new();
-        let (w, h) = (
-            graph.scene_size.x.round().max(1.0) as u32,
-            graph.scene_size.y.round().max(1.0) as u32,
-        );
+        let (w, h) = clamp_scene_size(device, graph.scene_size);
+        // Free what the previous scene left behind; this scene reloads what it needs.
+        self.textures.clear();
+        self.video_textures.clear();
+        self.fbo_bytes_left = MAX_FBO_BYTES;
         if (self.scene.width, self.scene.height) != (w, h) {
             self.scene = create_target(device, "scene_target", w, h, HDR_FORMAT);
             self.full_frame = create_target(device, RT_FULL_FRAME_BUFFER, w, h, HDR_FORMAT);
@@ -2184,15 +2279,10 @@ impl SceneRenderer {
         for (layer, plan) in graph.layers.iter().zip(&plans) {
             if let (Some(id), Some(plan)) = (layer.id, plan) {
                 if referenced.contains(&id) {
+                    let (lw, lh) = self.budget_fbo(device, plan.width, plan.height, FBO_FORMAT);
                     self.layer_outputs.insert(
                         id,
-                        create_target(
-                            device,
-                            "scene_layer_output",
-                            plan.width,
-                            plan.height,
-                            FBO_FORMAT,
-                        ),
+                        create_target(device, "scene_layer_output", lw, lh, FBO_FORMAT),
                     );
                 }
             }
@@ -2600,13 +2690,9 @@ impl SceneRenderer {
             let Some(GpuLayer::Effects(fx)) = self.layers[gi].as_ref() else {
                 continue;
             };
-            let target = create_target(
-                device,
-                "scene_group",
-                fx.plan.width,
-                fx.plan.height,
-                HDR_FORMAT,
-            );
+            let (gw, gh) = (fx.plan.width, fx.plan.height);
+            let (gw, gh) = self.budget_fbo(device, gw, gh, HDR_FORMAT);
+            let target = create_target(device, "scene_group", gw, gh, HDR_FORMAT);
             let base = self.make_simple_draw(device, &target.view);
             let backdrop = copy_bg.then(|| self.make_simple_draw(device, &self.full_frame.view));
             if let Some(GpuLayer::Effects(fx)) = self.layers[gi].as_mut() {
@@ -2674,10 +2760,10 @@ impl SceneRenderer {
         let mut targets = HashMap::new();
         for fbo in plan.all_fbos() {
             let label = format!("{}:{:?}", layer.key(), fbo.id);
-            targets.insert(
-                fbo.id.clone(),
-                create_target(device, &label, fbo.width, fbo.height, fbo.format),
-            );
+            targets.insert(fbo.id.clone(), {
+                let (fw, fh) = self.budget_fbo(device, fbo.width, fbo.height, fbo.format);
+                create_target(device, &label, fw, fh, fbo.format)
+            });
         }
         let target_format = |id: &RenderTargetId| match id {
             RenderTargetId::FullFrame | RenderTargetId::Scene => Some(HDR_FORMAT),
@@ -4101,5 +4187,49 @@ mod refract_tests {
             Value::parse("0.5").unwrap(),
         );
         assert!((refract_amount(&c) - 0.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod hostile_size_tests {
+    use super::*;
+
+    #[test]
+    fn fit_extent_keeps_small_sizes() {
+        assert_eq!(
+            fit_extent(1920, 1080, 8192, MAX_TARGET_PIXELS),
+            (1920, 1080)
+        );
+        assert_eq!(fit_extent(0, 0, 8192, MAX_TARGET_PIXELS), (1, 1));
+    }
+
+    #[test]
+    fn fit_extent_clamps_huge_sizes_to_limit_and_budget() {
+        let (w, h) = fit_extent(1_000_000, 1_000_000, 8192, MAX_TARGET_PIXELS);
+        assert!(w <= 8192 && h <= 8192 && u64::from(w) * u64::from(h) <= MAX_TARGET_PIXELS);
+        // Aspect ratio survives.
+        let (w, h) = fit_extent(100_000, 50_000, 8192, MAX_TARGET_PIXELS);
+        assert!(w >= 2 * h - 2 && w <= 2 * h + 2, "{w}x{h}");
+        let (w, h) = fit_extent(u32::MAX, 1, 8192, MAX_TARGET_PIXELS);
+        assert_eq!((w, h), (8192, 1));
+    }
+
+    #[test]
+    fn fit_extent_honours_a_pixel_budget_alone() {
+        let (w, h) = fit_extent(4000, 4000, u32::MAX, 1_000_000);
+        assert!(u64::from(w) * u64::from(h) <= 1_000_000);
+    }
+
+    #[test]
+    fn container_image_decode_rejects_oversized_png() {
+        // A PNG header declaring 60000x60000 pixels is refused by the limits.
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend(13u32.to_be_bytes());
+        png.extend(b"IHDR");
+        png.extend(60000u32.to_be_bytes());
+        png.extend(60000u32.to_be_bytes());
+        png.extend([8, 6, 0, 0, 0]);
+        png.extend([0, 0, 0, 0]);
+        assert!(decode_container_image(&png).is_err());
     }
 }

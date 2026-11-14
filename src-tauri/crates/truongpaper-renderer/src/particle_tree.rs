@@ -10,6 +10,8 @@
 //! Approximations: a child's `angles` and `probability` are ignored, `scale` is a uniform
 //! multiplier on the drawn size, and burst children emit for 0.1 s.
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use glam::Vec3;
@@ -25,6 +27,36 @@ const BURST_SECS: f32 = 0.1;
 /// Largest quad count per draw set (16-bit indices, 4 vertices per quad).
 const MAX_SET_QUADS: usize = 16_000;
 
+/// Most live child instances in one particle tree (all depths together).
+pub(crate) const MAX_TREE_INSTANCES: usize = 2048;
+/// Most child instances one `children` entry may hold, whatever its `maxcount` says.
+const MAX_GROUP_INSTANCES: usize = 1024;
+/// Set when the draw-set quad cap dropped geometry (logged once per process).
+static CAP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Shared counter of free child-instance slots for one particle tree.
+pub(crate) fn new_budget() -> Arc<AtomicUsize> {
+    Arc::new(AtomicUsize::new(MAX_TREE_INSTANCES))
+}
+
+/// One taken slot of the tree budget; the slot is returned when the instance is dropped.
+struct BudgetSlot(Arc<AtomicUsize>);
+
+impl BudgetSlot {
+    fn acquire(budget: &Arc<AtomicUsize>) -> Option<BudgetSlot> {
+        budget
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .ok()
+            .map(|_| BudgetSlot(budget.clone()))
+    }
+}
+
+impl Drop for BudgetSlot {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 /// The instances of one entry of a particle file's `children`.
 pub struct ChildGroup {
     spec: ParticleChildSpec,
@@ -38,6 +70,7 @@ struct ChildInstance {
     inst: ParticleSystemInstance,
     /// The followed parent particle died: stop emitting and drop once drained.
     orphan: bool,
+    _slot: BudgetSlot,
 }
 
 impl ChildGroup {
@@ -74,6 +107,7 @@ impl ParticleSystemInstance {
         inst.anchor = anchor;
         inst.draw_scale = self.draw_scale * spec.scale.x;
         inst.overrides = self.overrides;
+        inst.budget = self.budget.clone();
         if burst {
             inst.emit_until = Some(BURST_SECS);
         } else {
@@ -95,22 +129,35 @@ impl ParticleSystemInstance {
                 continue;
             };
             let spec = g.spec.clone();
-            let cap = spec.maxcount.max(1) as usize;
+            let cap = (spec.maxcount.max(1) as usize).min(MAX_GROUP_INSTANCES);
             match spec.kind {
                 ParticleChildKind::Static => {
                     if g.instances.is_empty() {
-                        let inst = self.make_child(&spec, &file, self.anchor + spec.origin, false);
-                        g.instances.push(ChildInstance {
-                            parent_id: 0,
-                            inst,
-                            orphan: false,
-                        });
+                        if let Some(slot) = BudgetSlot::acquire(&self.budget) {
+                            let inst =
+                                self.make_child(&spec, &file, self.anchor + spec.origin, false);
+                            g.instances.push(ChildInstance {
+                                parent_id: 0,
+                                inst,
+                                orphan: false,
+                                _slot: slot,
+                            });
+                        }
                     }
-                    g.instances[0].inst.anchor = self.anchor + spec.origin;
+                    if let Some(first) = g.instances.first_mut() {
+                        first.inst.anchor = self.anchor + spec.origin;
+                    }
                 }
                 ParticleChildKind::EventFollow => {
+                    // Particle ids grow with spawn order and `retain` keeps the order, so the
+                    // parent is found by binary search.
                     for ci in &mut g.instances {
-                        match self.particles.iter().find(|p| p.id == ci.parent_id) {
+                        let found = self
+                            .particles
+                            .binary_search_by_key(&ci.parent_id, |p| p.id)
+                            .ok()
+                            .map(|i| &self.particles[i]);
+                        match found {
                             Some(p) => {
                                 let pos = if self.worldspace {
                                     p.position
@@ -125,19 +172,24 @@ impl ParticleSystemInstance {
                             }
                         }
                     }
+                    let followed: HashSet<u64> = g.instances.iter().map(|c| c.parent_id).collect();
                     for p in &self.particles {
                         if g.instances.len() >= cap {
                             break;
                         }
-                        if g.instances.iter().any(|ci| ci.parent_id == p.id) {
+                        if followed.contains(&p.id) {
                             continue;
                         }
+                        let Some(slot) = BudgetSlot::acquire(&self.budget) else {
+                            break;
+                        };
                         let pos = self.abs_position(p) + spec.origin;
                         let inst = self.make_child(&spec, &file, pos, false);
                         g.instances.push(ChildInstance {
                             parent_id: p.id,
                             inst,
                             orphan: false,
+                            _slot: slot,
                         });
                     }
                 }
@@ -151,11 +203,15 @@ impl ParticleSystemInstance {
                         if g.instances.len() >= cap {
                             break;
                         }
+                        let Some(slot) = BudgetSlot::acquire(&self.budget) else {
+                            break;
+                        };
                         let inst = self.make_child(&spec, &file, *pos + spec.origin, true);
                         g.instances.push(ChildInstance {
                             parent_id: 0,
                             inst,
                             orphan: false,
+                            _slot: slot,
                         });
                     }
                 }
@@ -330,6 +386,11 @@ impl SetGeometry {
     /// Cuts the geometry to at most `capacity` quads, keeping only whole triangles whose
     /// vertices survive.
     pub fn fit(&mut self, capacity: usize) {
+        if (self.vertices.len() > capacity * 4 || self.indices.len() > capacity * 6)
+            && !CAP_LOGGED.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!("particle draw set exceeds {capacity} quads; extra particles dropped");
+        }
         self.vertices.truncate(capacity * 4);
         self.indices.truncate(capacity * 6);
         let n = self.vertices.len();
@@ -620,5 +681,58 @@ mod tests {
         sys.particles[0].age = 6.0;
         // Second half: frame 1 covers u in 0.5..1.
         assert!((max_u(&sys) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hostile_maxcount_is_capped_and_budgeted() {
+        let mut root = parse(
+            r#"{"maxcount":10000,"renderer":[],
+                "emitter":[{"name":"sphererandom","rate":200000,"distancemin":0,"distancemax":0}],
+                "initializer":[{"name":"lifetimerandom","min":100,"max":100}],
+                "children":[
+                  {"name":"c/a.json","type":"eventfollow","maxcount":4000000000},
+                  {"name":"c/a.json","type":"eventfollow","maxcount":4000000000},
+                  {"name":"c/a.json","type":"eventfollow","maxcount":4000000000}]}"#,
+        );
+        root.resolve_children(&|_: &str| {
+            Some(
+                r#"{"maxcount":4,"material":"m/a.json","renderer":[{"name":"sprite"}],
+                    "emitter":[{"name":"sphererandom","rate":10,"distancemin":0,"distancemax":0}],
+                    "initializer":[{"name":"lifetimerandom","min":1,"max":1}]}"#
+                    .into(),
+            )
+        });
+        let mut sys = ParticleSystemInstance::new(root);
+        for _ in 0..3 {
+            sys.step(0.05, Vec3::ZERO);
+        }
+        assert!(sys.particles.len() > 3000);
+        let live: usize = sys.groups.iter().map(|g| g.instances.len()).sum();
+        assert!(live <= MAX_TREE_INSTANCES, "{live} instances");
+        assert!(sys
+            .groups
+            .iter()
+            .all(|g| g.instances.len() <= MAX_GROUP_INSTANCES));
+        let taken = MAX_TREE_INSTANCES - sys.budget.load(Ordering::Acquire);
+        assert_eq!(taken, live);
+        // Dropping the tree returns every slot.
+        let budget = sys.budget.clone();
+        drop(sys);
+        assert_eq!(budget.load(Ordering::Acquire), MAX_TREE_INSTANCES);
+    }
+
+    #[test]
+    fn non_finite_particles_are_killed() {
+        let root = parse(
+            r#"{"maxcount":10,"renderer":[],
+                "emitter":[{"name":"sphererandom","rate":100,"distancemin":0,"distancemax":0}],
+                "initializer":[{"name":"lifetimerandom","min":100,"max":100}]}"#,
+        );
+        let mut sys = ParticleSystemInstance::new(root);
+        sys.step(0.05, Vec3::ZERO);
+        assert!(!sys.particles.is_empty());
+        sys.particles[0].position.x = f32::NAN;
+        sys.step(0.01, Vec3::ZERO);
+        assert!(sys.particles.iter().all(|p| p.position.is_finite()));
     }
 }

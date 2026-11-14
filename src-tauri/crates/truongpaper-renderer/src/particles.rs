@@ -398,6 +398,8 @@ pub struct ParticleSystemInstance {
     pub(crate) spawn_events: Vec<Vec3>,
     pub(crate) death_events: Vec<Vec3>,
     pub(crate) groups: Vec<crate::particle_tree::ChildGroup>,
+    /// Free child-instance slots shared by the whole particle tree.
+    pub(crate) budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ParticleSystemInstance {
@@ -436,6 +438,7 @@ impl ParticleSystemInstance {
             spawn_events: Vec::new(),
             death_events: Vec::new(),
             groups: Vec::new(),
+            budget: crate::particle_tree::new_budget(),
             emit_accumulators: vec![0.0; spec.emitter.len()],
             particles: Vec::with_capacity(max_count),
             control_points,
@@ -685,7 +688,12 @@ impl ParticleSystemInstance {
                     _ => {}
                 }
             }
-            true
+            // A NaN / inf from a bad expression would corrupt the vertex buffer.
+            p.position.is_finite()
+                && p.velocity.is_finite()
+                && p.size.is_finite()
+                && p.alpha.is_finite()
+                && p.rotation.is_finite()
         });
         self.death_events = deaths;
     }

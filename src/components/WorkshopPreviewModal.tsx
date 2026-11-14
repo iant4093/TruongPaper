@@ -34,6 +34,16 @@ export const WorkshopPreviewModal: React.FC = () => {
   React.useEffect(() => {
     if (preview) void loadGuestAvailability([preview.workshopId]);
   }, [preview?.workshopId, loadGuestAvailability]);
+  const progressState = preview ? downloadsById[preview.workshopId]?.state : undefined;
+  // A finished, failed or cancelled download ends the "Cancelling…" state, so a new download starts clean.
+  React.useEffect(() => { if (progressState !== 'downloading') setCancelling(false); }, [progressState]);
+  const requestCancel = () => {
+    if (!preview || cancelling) return;
+    setCancelling(true);
+    cancelDownload(preview.workshopId)
+      .then((found) => { if (!found) { setCancelling(false); toast.info('That download is not running yet. Try again in a moment.'); } })
+      .catch((e) => { setCancelling(false); toast.error(e, 'Could not cancel the download'); });
+  };
   const startDownload = async (source: WorkshopDownloadSource) => {
     if (!preview) return;
     setStarting(source); setDownloadError(null);
@@ -43,7 +53,7 @@ export const WorkshopPreviewModal: React.FC = () => {
       const message = errorMessage(err);
       setDownloadError(message);
       if (source === 'steam' && /^(sign in to steam|steam login required)/i.test(message)) openAuth();
-    } finally { setStarting(null); }
+    } finally { setStarting(null); setCancelling(false); }
   };
 
   const open = !!preview && !authModalOpen;
@@ -118,6 +128,11 @@ export const WorkshopPreviewModal: React.FC = () => {
                   <button className="button" disabled={!!starting} onClick={() => void startDownload('steam')}>
                     {starting === 'steam' ? 'Starting download…' : progress?.state === 'error' ? 'Retry with Steam' : 'Download with Steam'}
                   </button>
+                  {starting && (
+                    <button type="button" className="button" aria-disabled={cancelling} onClick={requestCancel}>
+                      {cancelling ? 'Cancelling…' : 'Cancel'}
+                    </button>
+                  )}
                 </div>
               )}
               {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && workshopTypeFromTags(preview.tags) !== 'Application' && (
@@ -133,10 +148,7 @@ export const WorkshopPreviewModal: React.FC = () => {
                     {formatBytes(preview.fileSizeBytes)})
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
-                    <button type="button" className="button" disabled={cancelling} onClick={() => {
-                      setCancelling(true);
-                      cancelDownload(preview.workshopId).catch((e) => { setCancelling(false); toast.error(e, 'Could not cancel the download'); });
-                    }}>{cancelling ? 'Cancelling…' : 'Cancel download'}</button>
+                    <button type="button" className="button" aria-disabled={cancelling} onClick={requestCancel}>{cancelling ? 'Cancelling…' : 'Cancel download'}</button>
                   </div>
                   <div style={{ height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.12)' }}>
                     <div

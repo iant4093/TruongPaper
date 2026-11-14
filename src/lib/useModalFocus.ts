@@ -2,8 +2,10 @@
 // Keyboard behaviour shared by modal dialogs: focus moves in, Tab stays inside,
 // Escape closes, and focus returns to the opener.
 import { useEffect, useRef, type RefObject } from 'react';
+import { isTopEscapeLayer, popEscapeLayer, pushEscapeLayer } from './escapeStack';
 
-const FOCUSABLE = 'button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE =
+  'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])';
 
 export function useModalFocus(
   active: boolean,
@@ -17,16 +19,24 @@ export function useModalFocus(
   useEffect(() => {
     if (!active) return;
     const previous = document.activeElement as HTMLElement | null;
-    const focusable = () =>
-      [...(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])].filter(
-        (el) => !(el as HTMLButtonElement).disabled,
-      );
+    const layer = pushEscapeLayer();
+    const focusable = () => [...(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
     (initialFocusRef?.current ?? focusable()[0])?.focus();
     const onKey = (event: KeyboardEvent) => {
-      // Capture phase + stopPropagation: one Escape closes only the top layer.
-      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeRef.current(); return; }
-      if (event.key !== 'Tab' || !dialogRef.current) return;
+      // Capture phase + stopImmediatePropagation: one Escape closes only the top layer.
+      if (event.key === 'Escape') {
+        if (!isTopEscapeLayer(layer)) return; // a newer layer (a confirm dialog) owns this key press
+        event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); closeRef.current(); return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current || !isTopEscapeLayer(layer)) return;
       const items = focusable();
+      const dialog = dialogRef.current;
+      // The focused button may have just become disabled, which drops focus to <body>: pull it back in.
+      if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? items[items.length - 1] : items[0])?.focus();
+        return;
+      }
       if (items.length === 0) return;
       const first = items[0], last = items[items.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -35,6 +45,7 @@ export function useModalFocus(
     document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('keydown', onKey, true);
+      popEscapeLayer(layer);
       if (previous?.isConnected) previous.focus();
     };
   }, [active, dialogRef, initialFocusRef]);

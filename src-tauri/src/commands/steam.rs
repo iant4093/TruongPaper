@@ -411,6 +411,43 @@ fn emit_progress(
     );
 }
 
+/// `<wallpapers>/workshop-staging/<id>`: a sibling of the library root, so scans never list it.
+fn staging_dir_for(workshop_root: &Path, id: &str) -> PathBuf {
+    sibling_dir(workshop_root, "workshop-staging").join(id)
+}
+
+fn backup_dir_for(workshop_root: &Path, id: &str) -> PathBuf {
+    sibling_dir(workshop_root, "workshop-backup").join(id)
+}
+
+fn sibling_dir(workshop_root: &Path, name: &str) -> PathBuf {
+    workshop_root.parent().unwrap_or(workshop_root).join(name)
+}
+
+/// Replaces `target` with the finished `staged` folder. The old `target` is kept in `backup`
+/// until the swap succeeds and restored if it does not.
+fn install_staged(staged: &Path, target: &Path, backup: &Path) -> std::io::Result<()> {
+    if let Some(parent) = target.parent().filter(|p| !p.exists()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_dir_all(backup);
+    let had_old = target.exists();
+    if had_old {
+        if let Some(parent) = backup.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(target, backup)?;
+    }
+    if let Err(err) = std::fs::rename(staged, target) {
+        if had_old {
+            let _ = std::fs::rename(backup, target);
+        }
+        return Err(err);
+    }
+    let _ = std::fs::remove_dir_all(backup);
+    Ok(())
+}
+
 /// Scans `<app_data>/wallpapers/workshop` + local Steam `431960` folders into the library.
 pub async fn sync_library(state: &AppState) -> Result<Vec<WallpaperItem>, String> {
     let root = state.workshop_dir();
@@ -513,17 +550,22 @@ pub async fn steam_download_workshop_item(
         Err(_) => workshop_id.clone(),
     };
     let out_dir = state.workshop_dir().join(&workshop_id);
-    // A failed first download must not leave a half-filled folder for the next library scan.
+    // Files land in a staging folder outside the library root and replace `out_dir` only once
+    // complete, so a failed or cancelled (re)download never leaves a half-written item.
+    let staging_dir = staging_dir_for(&state.workshop_dir(), &workshop_id);
+    let backup_dir = backup_dir_for(&state.workshop_dir(), &workshop_id);
     let existed = out_dir.exists();
+    let staging = staging_dir.clone();
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(staging)).await;
     emit_progress(&app, &workshop_id, &title, 0.0, "downloading", None);
 
     let download = async {
         if let Some(username) = username.as_deref() {
-            tokio::fs::create_dir_all(&out_dir)
+            tokio::fs::create_dir_all(&staging_dir)
                 .await
                 .map_err(|e| e.to_string())?;
             let args =
-                pubfile_download_args(&workshop_id, username, &out_dir, DEFAULT_MAX_DOWNLOADS)
+                pubfile_download_args(&workshop_id, username, &staging_dir, DEFAULT_MAX_DOWNLOADS)
                     .map_err(|e| e.to_string())?;
             let limits = SidecarLimits {
                 inactivity: Some(DOWNLOAD_INACTIVITY),
@@ -539,7 +581,7 @@ pub async fn steam_download_workshop_item(
         } else {
             let guest = truongpaper_steam::guest_download::download_guest_workshop(
                 &workshop_id,
-                &out_dir,
+                &staging_dir,
                 |pct| {
                     emit_progress(&app, &workshop_id, &title, pct, "downloading", None);
                 },
@@ -551,8 +593,23 @@ pub async fn steam_download_workshop_item(
         }
 
         let wallpaper_id = format!("workshop:{workshop_id}");
+        let (staged, target, backup) = (staging_dir.clone(), out_dir.clone(), backup_dir.clone());
+        let folder = workshop_id.clone();
+        tokio::task::spawn_blocking(move || {
+            if truongpaper_steam::local_sync::read_item_dir(&staged, &folder).is_none() {
+                return Err(
+                    "Download finished but the item has no readable project.json".to_string(),
+                );
+            }
+            install_staged(&staged, &target, &backup).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let items = sync_library(&state).await?;
         if !items.iter().any(|w| w.wallpaper_id == wallpaper_id) {
+            if !existed {
+                let _ = std::fs::remove_dir_all(&out_dir);
+            }
             return Err("Download finished but the item has no readable project.json".to_string());
         }
         Ok(wallpaper_id)
@@ -572,10 +629,8 @@ pub async fn steam_download_workshop_item(
             Ok(wallpaper_id)
         }
         Err(err) => {
-            if !existed {
-                let dir = out_dir.clone();
-                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
-            }
+            let staging = staging_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(staging)).await;
             let state = progress_state_for_error(&err);
             let detail = (state == "error").then(|| err.clone());
             emit_progress(&app, &workshop_id, &title, 0.0, state, detail);
@@ -585,15 +640,15 @@ pub async fn steam_download_workshop_item(
 }
 
 /// Stops a running Workshop download by id (`steam_download_workshop_item` then fails with
-/// "Download cancelled."). A no-op when nothing is downloading it.
+/// "Download cancelled."). Returns `false` (and does nothing) when no download is registered
+/// for the id, for example before it has started.
 #[tauri::command]
 pub async fn steam_cancel_download(
     state: State<'_, AppState>,
     url_or_id: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let workshop_id = parse_workshop_url_or_id(&url_or_id).map_err(|e| e.to_string())?;
-    state.steam.cancel_download(&workshop_id);
-    Ok(())
+    Ok(state.steam.cancel_download(&workshop_id))
 }
 
 /// `DepotDownloader -qr`: streams `steam-auth://qr-matrix`, saves and returns the account name.
@@ -747,6 +802,42 @@ mod tests {
         drop(guard);
         assert!(!session.cancel_download("1"));
         assert!(session.track_download("1").is_ok());
+    }
+
+    #[test]
+    fn staged_install_replaces_and_keeps_old_on_failure() {
+        let root = std::env::temp_dir().join(format!("tp-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workshop = root.join("wallpapers").join("workshop");
+        let (target, staged, backup) = (
+            workshop.join("42"),
+            staging_dir_for(&workshop, "42"),
+            backup_dir_for(&workshop, "42"),
+        );
+        assert!(staged.starts_with(root.join("wallpapers").join("workshop-staging")));
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("project.json"), "old").unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("project.json"), "new").unwrap();
+        install_staged(&staged, &target, &backup).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("project.json")).unwrap(),
+            "new"
+        );
+        assert!(!staged.exists() && !backup.exists());
+        // A missing staged folder fails and the installed item stays intact.
+        assert!(install_staged(&staged, &target, &backup).is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join("project.json")).unwrap(),
+            "new"
+        );
+        // First install (no old folder) works too.
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("project.json"), "first").unwrap();
+        install_staged(&staged, &target, &backup).unwrap();
+        assert!(target.join("project.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

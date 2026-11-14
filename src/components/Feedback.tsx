@@ -1,6 +1,7 @@
 // Toast stack and confirm dialog. Mount <FeedbackHost /> once per window.
 import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
+import { isTopEscapeLayer, popEscapeLayer, pushEscapeLayer } from '../lib/escapeStack';
 import { TOAST_ERROR_MS, TOAST_MS, useFeedback, type Toast } from '../store/feedback';
 
 const ToastItem: React.FC<{ toast: Toast }> = ({ toast }) => {
@@ -39,12 +40,13 @@ const ConfirmDialog: React.FC = () => {
   useEffect(() => {
     if (!request) return;
     const previous = document.activeElement as HTMLElement | null;
+    const layer = pushEscapeLayer();
     cancelRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); answer(false); }
+      if (event.key === 'Escape' && isTopEscapeLayer(layer)) { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); answer(false); }
     };
     document.addEventListener('keydown', onKey, true);
-    return () => { document.removeEventListener('keydown', onKey, true); if (previous?.isConnected) previous.focus(); };
+    return () => { document.removeEventListener('keydown', onKey, true); popEscapeLayer(layer); if (previous?.isConnected) previous.focus(); };
   }, [request, answer]);
   if (!request) return null;
   return (

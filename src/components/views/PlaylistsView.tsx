@@ -49,6 +49,8 @@ export function parsePlaylistExport(raw: string): PlaylistExportFile {
 }
 
 export const PlaylistsView: React.FC = () => {
+  const loaded = useAppStore((s) => s.loaded);
+  const loadFailed = useAppStore((s) => s.loadFailed);
   const monitors = useAppStore((s) => s.monitors);
   const playlists = useAppStore((s) => s.playlists);
   const settings = useAppStore((s) => s.settings);
@@ -193,7 +195,10 @@ export const PlaylistsView: React.FC = () => {
             </div>
           );
         })}
-        {playlists.length === 0 && !draft && (
+        {playlists.length === 0 && !draft && !loaded && (
+          <div className="view-loading" role="status">{loadFailed ? 'Could not load your playlists. Use Retry above.' : 'Loading…'}</div>
+        )}
+        {playlists.length === 0 && !draft && loaded && (
           <div className="empty-state" role="status">
             No playlists yet.
             <div className="empty-actions">

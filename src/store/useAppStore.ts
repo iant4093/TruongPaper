@@ -25,6 +25,7 @@ import type {
   WorkshopPreview,
   WorkshopDownloadSource,
 } from '../types/ipc';
+import { toast } from './feedback';
 import { adjustmentWriteKey, propertyWriteKey, wallpaperWrites } from '../lib/writeQueue';
 
 export interface SteamDownloadProgress {
@@ -133,7 +134,8 @@ export interface AppState {
   loadGuestAvailability: (workshopIds: string[]) => Promise<void>;
   importLocalWallpaper: (path: string) => Promise<WallpaperItem>;
   /** Stop a running Workshop download. */
-  cancelWorkshopDownload: (workshopId: string) => Promise<void>;
+  /** Resolves to false when no download is registered for the id (not started yet, or already over). */
+  cancelWorkshopDownload: (workshopId: string) => Promise<boolean>;
   deleteWallpaper: (wallpaperId: string) => Promise<void>;
   setWallpaperFavorite: (wallpaperId: string, favorite: boolean) => Promise<void>;
   dismissDownload: (workshopId: string) => void;
@@ -466,6 +468,10 @@ export const useAppStore = create<AppState>((set, get) => {
             ? { wallpaperErrors: Object.fromEntries(Object.entries(state.wallpaperErrors).filter(([id]) => id !== payload.monitorId)) }
             : state);
         }),
+        // Web, video and application wallpapers cannot span; the backend says so once per load.
+        listen<{ monitorId: string; wallpaperId: string | null; message: string }>('wallpaper://span-unsupported', () => {
+          toast.info("This wallpaper type can't span displays, so it stays on one display.");
+        }),
         // Every load reports its own list, so it replaces the previous one (an empty list clears it).
         listen<WallpaperDiagnosticsPayload>('wallpaper://diagnostics', ({ payload }) => {
           if (!payload.wallpaperId) return;
@@ -659,7 +665,7 @@ export const useAppStore = create<AppState>((set, get) => {
     closeWorkshopPreview: () => { previewRequest++; set({ inspectedWorkshop: null }); },
 
     cancelWorkshopDownload: async (workshopId) => {
-      await invoke('steam_cancel_download', { urlOrId: workshopId });
+      return (await invoke<boolean>('steam_cancel_download', { urlOrId: workshopId })) !== false;
     },
 
     downloadWorkshopItem: async (urlOrId, source) => {
@@ -940,7 +946,7 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (error) {
         if (seq === settingsSeq) {
           try { set({ settings: await invoke<AppSettings>('settings_get') }); }
-          catch { /* keep the optimistic value; the error is shown by the caller */ }
+          catch { if (before) set({ settings: before }); /* both calls failed: show the last known value */ }
         }
         throw error;
       } finally {

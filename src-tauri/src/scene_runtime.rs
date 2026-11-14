@@ -166,6 +166,31 @@ pub struct SceneRuntime {
     time_of_day: Option<f32>,
     /// Notes merged in by the host (e.g. [`truongpaper_renderer::SceneRenderer::diagnostics`]).
     extra_diagnostics: DiagnosticsLog,
+    script_stats: ScriptStats,
+}
+
+/// Wall-clock cost of the per-frame script step. Printed on drop when the
+/// `TRUONGPAPER_SCRIPT_STATS` environment variable is set (profiling aid).
+#[derive(Debug, Default, Clone, Copy)]
+struct ScriptStats {
+    frames: u32,
+    total: std::time::Duration,
+    max: std::time::Duration,
+}
+
+impl Drop for SceneRuntime {
+    fn drop(&mut self) {
+        let st = self.script_stats;
+        if st.frames > 0 && std::env::var_os("TRUONGPAPER_SCRIPT_STATS").is_some() {
+            eprintln!(
+                "script_stats frames={} total_ms={:.3} avg_us={:.1} max_us={:.1}",
+                st.frames,
+                st.total.as_secs_f64() * 1e3,
+                st.total.as_secs_f64() * 1e6 / f64::from(st.frames),
+                st.max.as_secs_f64() * 1e6
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for SceneRuntime {
@@ -223,6 +248,7 @@ impl SceneRuntime {
             paused: false,
             time_of_day: None,
             extra_diagnostics: DiagnosticsLog::default(),
+            script_stats: ScriptStats::default(),
         };
 
         for (_, key) in &rt.script_layers {
@@ -428,6 +454,7 @@ impl SceneRuntime {
         let world = cursor_world_position(cursor_norm, self.scene_size());
         self.graph.step_animations(self.elapsed);
         if !self.registered_slots.is_empty() {
+            let started = std::time::Instant::now();
             if let Err(err) =
                 self.step_scripts(dt, cursor_norm, world, left_down, left_64, right_64)
             {
@@ -436,6 +463,10 @@ impl SceneRuntime {
                     self.graph.scene_path
                 );
             }
+            let took = started.elapsed();
+            self.script_stats.frames += 1;
+            self.script_stats.total += took;
+            self.script_stats.max = self.script_stats.max.max(took);
         }
         // Parallax uses the pointer in scene orientation (y up), like cursorWorldPosition.
         let [x, y] = finite_cursor(cursor_norm);

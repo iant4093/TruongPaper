@@ -103,16 +103,17 @@ impl StereoRingBuffer {
         if channels == 0 {
             return;
         }
-        for frame in data.chunks_exact(channels) {
-            let l = frame[0];
-            let r = if channels >= 2 { frame[1] } else { l };
-            if self.left.len() >= FFT_SIZE {
-                self.left.pop_front();
-                self.right.pop_front();
-            }
-            self.left.push_back(l);
-            self.right.push_back(r);
-        }
+        // Only the newest `FFT_SIZE` frames can survive, so skip the older ones outright.
+        let frames = data.len() / channels;
+        let keep = frames.min(FFT_SIZE);
+        let data = &data[(frames - keep) * channels..frames * channels];
+        let overflow = (self.left.len() + keep).saturating_sub(FFT_SIZE);
+        self.left.drain(..overflow);
+        self.right.drain(..overflow);
+        self.left.extend(data.chunks_exact(channels).map(|f| f[0]));
+        let right_channel = usize::from(channels >= 2);
+        self.right
+            .extend(data.chunks_exact(channels).map(|f| f[right_channel]));
         self.last_write = Instant::now();
     }
 
@@ -126,17 +127,55 @@ impl StereoRingBuffer {
     pub fn snapshot_or_silence_at(&self, now: Instant) -> ([f32; FFT_SIZE], [f32; FFT_SIZE]) {
         let mut l = [0.0_f32; FFT_SIZE];
         let mut r = [0.0_f32; FFT_SIZE];
-        if now.saturating_duration_since(self.last_write) > SILENCE_TIMEOUT {
-            return (l, r);
-        }
-        for (dst, &src) in l.iter_mut().zip(self.left.iter()) {
-            *dst = src;
-        }
-        for (dst, &src) in r.iter_mut().zip(self.right.iter()) {
-            *dst = src;
-        }
+        self.snapshot_into(now, &mut l, &mut r);
         (l, r)
     }
+
+    /// Copies the newest samples into the caller's buffers. Returns `false` (buffers untouched)
+    /// when the OS stopped sending packets more than 35 ms ago, i.e. the input is silent.
+    pub fn snapshot_into(
+        &self,
+        now: Instant,
+        left: &mut [f32; FFT_SIZE],
+        right: &mut [f32; FFT_SIZE],
+    ) -> bool {
+        if now.saturating_duration_since(self.last_write) > SILENCE_TIMEOUT {
+            return false;
+        }
+        copy_deque(&self.left, left);
+        copy_deque(&self.right, right);
+        true
+    }
+}
+
+/// Copies `src` into the front of `dst` (the rest of `dst` is zeroed) without per-item iteration.
+fn copy_deque(src: &VecDeque<f32>, dst: &mut [f32; FFT_SIZE]) {
+    let (a, b) = src.as_slices();
+    let a = &a[..a.len().min(FFT_SIZE)];
+    let b = &b[..b.len().min(FFT_SIZE - a.len())];
+    dst[..a.len()].copy_from_slice(a);
+    dst[a.len()..a.len() + b.len()].copy_from_slice(b);
+    dst[a.len() + b.len()..].fill(0.0);
+}
+
+/// Inclusive-exclusive FFT bin range `[start, end)` of each of `N` log-spaced bands over
+/// 20 Hz..16 kHz (clamped to Nyquist). Computed once per sample rate.
+fn band_edges(n: usize, sample_rate: f32) -> Vec<(usize, usize)> {
+    let bins = FFT_SIZE / 2;
+    let min_freq = 20.0_f32;
+    let max_freq = (sample_rate * 0.5).min(16000.0);
+    let bin_hz = sample_rate / FFT_SIZE as f32;
+    (0..n)
+        .map(|i| {
+            let t0 = i as f32 / n as f32;
+            let t1 = (i + 1) as f32 / n as f32;
+            let f0 = min_freq * (max_freq / min_freq).powf(t0);
+            let f1 = min_freq * (max_freq / min_freq).powf(t1);
+            let idx0 = ((f0 / bin_hz).floor() as usize).clamp(1, bins - 1);
+            let idx1 = ((f1 / bin_hz).ceil() as usize).clamp(idx0 + 1, bins);
+            (idx0, idx1)
+        })
+        .collect()
 }
 
 /// 2048-point Hann-windowed stereo FFT with log-spaced 16/32/64 band reduction and smoothing.
@@ -145,6 +184,11 @@ pub struct SpectrumAnalyzer {
     hann_window: Vec<f32>,
     scratch_left: Vec<Complex<f32>>,
     scratch_right: Vec<Complex<f32>>,
+    mag_left: Vec<f32>,
+    mag_right: Vec<f32>,
+    edges_16: Vec<(usize, usize)>,
+    edges_32: Vec<(usize, usize)>,
+    edges_64: Vec<(usize, usize)>,
     prev_frame: AudioSpectrumFrame,
     sample_rate: f32,
 }
@@ -162,6 +206,11 @@ impl SpectrumAnalyzer {
             hann_window,
             scratch_left: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             scratch_right: vec![Complex::new(0.0, 0.0); FFT_SIZE],
+            mag_left: vec![0.0; FFT_SIZE / 2],
+            mag_right: vec![0.0; FFT_SIZE / 2],
+            edges_16: band_edges(16, sample_rate),
+            edges_32: band_edges(32, sample_rate),
+            edges_64: band_edges(64, sample_rate),
             prev_frame: AudioSpectrumFrame::default(),
             sample_rate,
         }
@@ -177,6 +226,9 @@ impl SpectrumAnalyzer {
         right_pcm: &[f32; FFT_SIZE],
         sensitivity_gain: f32,
     ) -> &AudioSpectrumFrame {
+        if left_pcm.iter().chain(right_pcm.iter()).all(|&v| v == 0.0) {
+            return self.process_silence();
+        }
         for i in 0..FFT_SIZE {
             self.scratch_left[i] = Complex::new(left_pcm[i] * self.hann_window[i], 0.0);
             self.scratch_right[i] = Complex::new(right_pcm[i] * self.hann_window[i], 0.0);
@@ -187,22 +239,39 @@ impl SpectrumAnalyzer {
 
         let nyquist_bins = FFT_SIZE / 2;
         let norm = 2.0 / (FFT_SIZE as f32).sqrt();
+        for (dst, c) in self
+            .mag_left
+            .iter_mut()
+            .zip(&self.scratch_left[..nyquist_bins])
+        {
+            *dst = (c.norm() * norm * sensitivity_gain).clamp(0.0, 1.0);
+        }
+        for (dst, c) in self
+            .mag_right
+            .iter_mut()
+            .zip(&self.scratch_right[..nyquist_bins])
+        {
+            *dst = (c.norm() * norm * sensitivity_gain).clamp(0.0, 1.0);
+        }
 
-        let mag_left: Vec<f32> = self.scratch_left[..nyquist_bins]
-            .iter()
-            .map(|c| (c.norm() * norm * sensitivity_gain).clamp(0.0, 1.0))
-            .collect();
-        let mag_right: Vec<f32> = self.scratch_right[..nyquist_bins]
-            .iter()
-            .map(|c| (c.norm() * norm * sensitivity_gain).clamp(0.0, 1.0))
-            .collect();
-
-        Self::bin_logarithmic(&mag_left, &mut self.prev_frame.left_16, self.sample_rate);
-        Self::bin_logarithmic(&mag_right, &mut self.prev_frame.right_16, self.sample_rate);
-        Self::bin_logarithmic(&mag_left, &mut self.prev_frame.left_32, self.sample_rate);
-        Self::bin_logarithmic(&mag_right, &mut self.prev_frame.right_32, self.sample_rate);
-        Self::bin_logarithmic(&mag_left, &mut self.prev_frame.left_64, self.sample_rate);
-        Self::bin_logarithmic(&mag_right, &mut self.prev_frame.right_64, self.sample_rate);
+        smooth_bands(&self.mag_left, &self.edges_16, &mut self.prev_frame.left_16);
+        smooth_bands(
+            &self.mag_right,
+            &self.edges_16,
+            &mut self.prev_frame.right_16,
+        );
+        smooth_bands(&self.mag_left, &self.edges_32, &mut self.prev_frame.left_32);
+        smooth_bands(
+            &self.mag_right,
+            &self.edges_32,
+            &mut self.prev_frame.right_32,
+        );
+        smooth_bands(&self.mag_left, &self.edges_64, &mut self.prev_frame.left_64);
+        smooth_bands(
+            &self.mag_right,
+            &self.edges_64,
+            &mut self.prev_frame.right_64,
+        );
 
         self.prev_frame.web_stereo_128[..64].copy_from_slice(&self.prev_frame.left_64);
         self.prev_frame.web_stereo_128[64..].copy_from_slice(&self.prev_frame.right_64);
@@ -210,35 +279,42 @@ impl SpectrumAnalyzer {
         &self.prev_frame
     }
 
-    fn bin_logarithmic<const N: usize>(
-        magnitudes: &[f32],
-        out_smoothed: &mut [f32; N],
-        sample_rate: f32,
-    ) {
-        let min_freq = 20.0_f32;
-        let max_freq = (sample_rate * 0.5).min(16000.0);
-        let bin_hz = sample_rate / FFT_SIZE as f32;
-
-        for (i, slot) in out_smoothed.iter_mut().enumerate() {
-            let t0 = i as f32 / N as f32;
-            let t1 = (i + 1) as f32 / N as f32;
-            let f0 = min_freq * (max_freq / min_freq).powf(t0);
-            let f1 = min_freq * (max_freq / min_freq).powf(t1);
-
-            let idx0 = ((f0 / bin_hz).floor() as usize).clamp(1, magnitudes.len() - 1);
-            let idx1 = ((f1 / bin_hz).ceil() as usize).clamp(idx0 + 1, magnitudes.len());
-
-            let peak = magnitudes[idx0..idx1]
-                .iter()
-                .copied()
-                .fold(0.0_f32, f32::max);
-
-            // Fast attack (0.65), smooth decay (0.22).
-            let prev = *slot;
-            let alpha = if peak > prev { 0.65 } else { 0.22 };
-            let next = (prev + alpha * (peak - prev)).clamp(0.0, 1.0);
-            *slot = if next < DENORMAL_FLOOR { 0.0 } else { next };
+    /// One step with all-zero input, without running the FFTs: the bands only decay. Gives the
+    /// same result as `process_stereo_pcm` on zeros, and nothing at all once they reached `0.0`.
+    pub fn process_silence(&mut self) -> &AudioSpectrumFrame {
+        if self.prev_frame.is_silent() {
+            return &self.prev_frame;
         }
+        let zeros = [0.0_f32; FFT_SIZE / 2];
+        let f = &mut self.prev_frame;
+        smooth_bands(&zeros, &self.edges_16, &mut f.left_16);
+        smooth_bands(&zeros, &self.edges_16, &mut f.right_16);
+        smooth_bands(&zeros, &self.edges_32, &mut f.left_32);
+        smooth_bands(&zeros, &self.edges_32, &mut f.right_32);
+        smooth_bands(&zeros, &self.edges_64, &mut f.left_64);
+        smooth_bands(&zeros, &self.edges_64, &mut f.right_64);
+        f.web_stereo_128[..64].copy_from_slice(&f.left_64);
+        f.web_stereo_128[64..].copy_from_slice(&f.right_64);
+        &self.prev_frame
+    }
+}
+
+/// Reduces FFT magnitudes to the band peaks given by precomputed `edges`, then applies the fast
+/// attack (0.65) / smooth decay (0.22) smoothing into `out_smoothed`.
+fn smooth_bands<const N: usize>(
+    magnitudes: &[f32],
+    edges: &[(usize, usize)],
+    out_smoothed: &mut [f32; N],
+) {
+    for (slot, &(idx0, idx1)) in out_smoothed.iter_mut().zip(edges) {
+        let peak = magnitudes[idx0..idx1]
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max);
+        let prev = *slot;
+        let alpha = if peak > prev { 0.65 } else { 0.22 };
+        let next = (prev + alpha * (peak - prev)).clamp(0.0, 1.0);
+        *slot = if next < DENORMAL_FLOOR { 0.0 } else { next };
     }
 }
 
@@ -246,6 +322,8 @@ impl SpectrumAnalyzer {
 pub struct AudioTicker {
     ring: Arc<Mutex<StereoRingBuffer>>,
     analyzer: SpectrumAnalyzer,
+    left: Box<[f32; FFT_SIZE]>,
+    right: Box<[f32; FFT_SIZE]>,
 }
 
 impl AudioTicker {
@@ -253,6 +331,8 @@ impl AudioTicker {
         Self {
             ring,
             analyzer: SpectrumAnalyzer::new(sample_rate),
+            left: Box::new([0.0; FFT_SIZE]),
+            right: Box::new([0.0; FFT_SIZE]),
         }
     }
 
@@ -263,10 +343,17 @@ impl AudioTicker {
 
     /// One tick with an explicit clock.
     pub fn tick_at(&mut self, now: Instant, sensitivity_gain: f32) -> AudioSpectrumFrame {
-        let (left, right) = self.ring.lock().snapshot_or_silence_at(now);
-        self.analyzer
-            .process_stereo_pcm(&left, &right, sensitivity_gain)
-            .clone()
+        let live = self
+            .ring
+            .lock()
+            .snapshot_into(now, &mut self.left, &mut self.right);
+        if live {
+            self.analyzer
+                .process_stereo_pcm(&self.left, &self.right, sensitivity_gain)
+                .clone()
+        } else {
+            self.analyzer.process_silence().clone()
+        }
     }
 }
 
@@ -364,7 +451,7 @@ pub fn spawn_audio_worker<F>(
     latest_frame: Arc<ArcSwap<AudioSpectrumFrame>>,
     sensitivity_gain: Arc<AtomicU32>, // f32::to_bits
     all_monitors_paused: Arc<AtomicBool>,
-) -> AudioWorkerHandle
+) -> std::io::Result<AudioWorkerHandle>
 where
     F: FnOnce() -> Option<Box<dyn LoopbackBackend>> + Send + 'static,
 {
@@ -386,6 +473,7 @@ where
             let mut retry_at = Instant::now();
             let mut health_at = Instant::now() + HEALTH_CHECK_PERIOD;
             let mut next_deadline = Instant::now();
+            let mut published_silence = false;
             while !stop_for_thread.load(Ordering::Relaxed) {
                 if all_monitors_paused.load(Ordering::Relaxed) {
                     if running {
@@ -448,15 +536,20 @@ where
                     next_deadline = now; // fell behind; don't burst
                 }
                 let gain = f32::from_bits(sensitivity_gain.load(Ordering::Relaxed));
-                latest_frame.store(Arc::new(ticker.tick(gain)));
+                let frame = ticker.tick(gain);
+                // Idle silence republishes nothing: no allocation, no change for readers.
+                let silent = frame.is_silent();
+                if !(silent && published_silence) {
+                    latest_frame.store(Arc::new(frame));
+                    published_silence = silent;
+                }
             }
             if let Some(b) = backend.as_mut() {
                 b.stop();
             }
-        })
-        .expect("spawn the audio analyzer thread");
+        })?;
 
-    AudioWorkerHandle {
+    Ok(AudioWorkerHandle {
         ring,
         shared: Arc::new(WorkerShared {
             tick_hz,
@@ -464,7 +557,7 @@ where
             waker: thread.thread().clone(),
             thread: Mutex::new(Some(thread)),
         }),
-    }
+    })
 }
 
 /// Starts cross-platform loopback capture with an explicit stop handle for runtime ownership
@@ -478,7 +571,7 @@ pub fn start_audio_loopback_worker(
     latest_frame: Arc<ArcSwap<AudioSpectrumFrame>>,
     sensitivity_gain: Arc<AtomicU32>,
     all_monitors_paused: Arc<AtomicBool>,
-) -> AudioWorkerHandle {
+) -> std::io::Result<AudioWorkerHandle> {
     spawn_audio_worker(
         default_backend,
         latest_frame,
@@ -497,10 +590,20 @@ fn default_backend() -> Option<Box<dyn LoopbackBackend>> {
     None
 }
 
+/// Pushes one capture callback's PCM with a single non-blocking lock attempt. The real-time audio
+/// thread never waits on the analyzer: if the ticker holds the ring (a short copy), this chunk
+/// is dropped, which the spectrum cannot notice.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn push_from_callback(ring: &Mutex<StereoRingBuffer>, data: &[f32], channels: usize) {
+    if let Some(mut ring) = ring.try_lock() {
+        ring.push_interleaved(data, channels);
+    }
+}
+
 /// `cpal` OS loopback implementation (Windows WASAPI loopback, macOS virtual device).
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod cpal_backend {
-    use super::{LoopbackBackend, StereoRingBuffer};
+    use super::{push_from_callback, LoopbackBackend, StereoRingBuffer};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::SampleFormat;
     use parking_lot::Mutex;
@@ -597,7 +700,7 @@ mod cpal_backend {
                 .build_input_stream(
                     &stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        ring.lock().push_interleaved(data, channels);
+                        push_from_callback(&ring, data, channels);
                     },
                     err_fn,
                     None,
@@ -611,7 +714,7 @@ mod cpal_backend {
                         move |data: &[i16], _: &cpal::InputCallbackInfo| {
                             scratch.clear();
                             scratch.extend(data.iter().map(|&s| s as f32 / 32768.0));
-                            ring.lock().push_interleaved(&scratch, channels);
+                            push_from_callback(&ring, &scratch, channels);
                         },
                         err_fn,
                         None,
@@ -626,7 +729,7 @@ mod cpal_backend {
                         move |data: &[u16], _: &cpal::InputCallbackInfo| {
                             scratch.clear();
                             scratch.extend(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
-                            ring.lock().push_interleaved(&scratch, channels);
+                            push_from_callback(&ring, &scratch, channels);
                         },
                         err_fn,
                         None,
@@ -777,6 +880,91 @@ mod tests {
     }
 
     #[test]
+    fn push_matches_a_per_sample_reference_for_any_chunk_size() {
+        // Reference: the old one-sample-at-a-time ring.
+        fn reference(chunks: &[(Vec<f32>, usize)]) -> (VecDeque<f32>, VecDeque<f32>) {
+            let mut l: VecDeque<f32> = VecDeque::from(vec![0.0; FFT_SIZE]);
+            let mut r = l.clone();
+            for (data, ch) in chunks {
+                for f in data.chunks_exact(*ch) {
+                    l.pop_front();
+                    r.pop_front();
+                    l.push_back(f[0]);
+                    r.push_back(if *ch >= 2 { f[1] } else { f[0] });
+                }
+            }
+            (l, r)
+        }
+        let mut n = 0.0_f32;
+        let mut chunks = Vec::new();
+        for (len, ch) in [
+            (7, 2),
+            (100, 1),
+            (5000, 2),
+            (1, 1),
+            (2048 * 3 + 2, 2),
+            (13, 3),
+        ] {
+            let data: Vec<f32> = (0..len * ch)
+                .map(|_| {
+                    n += 1.0;
+                    n
+                })
+                .collect();
+            chunks.push((data, ch));
+        }
+        let mut ring = StereoRingBuffer::new();
+        for (data, ch) in &chunks {
+            ring.push_interleaved(data, *ch);
+        }
+        let (l, r) = reference(&chunks);
+        assert_eq!(ring.left, l);
+        assert_eq!(ring.right, r);
+        assert_eq!(ring.left.len(), FFT_SIZE);
+    }
+
+    #[test]
+    fn silence_path_matches_fft_of_zeros_and_then_stops_working() {
+        let pcm = sine(1000.0, 0.01, FFT_SIZE);
+        let (l, r) = stereo_snapshot(&pcm, &pcm);
+        let zeros = [0.0_f32; FFT_SIZE];
+        let mut fast = SpectrumAnalyzer::new(SR);
+        let mut full = SpectrumAnalyzer::new(SR);
+        let seed = fast.process_stereo_pcm(&l, &r, 1.0).clone();
+        full.process_stereo_pcm(&l, &r, 1.0);
+        assert!(!seed.is_silent());
+        for _ in 0..200 {
+            let a = fast.process_silence().clone();
+            // Force the real FFT path with a denormal-sized, non-zero input.
+            let mut tiny = zeros;
+            tiny[0] = f32::MIN_POSITIVE;
+            let b = full.process_stereo_pcm(&tiny, &tiny, 1.0).clone();
+            assert_eq!(a.left_64, b.left_64);
+            assert_eq!(a.right_16, b.right_16);
+            assert_eq!(a.web_stereo_128, b.web_stereo_128);
+        }
+        assert!(fast.process_silence().is_silent());
+        // All-zero input takes the same shortcut.
+        let mut z = SpectrumAnalyzer::new(SR);
+        assert!(z.process_stereo_pcm(&zeros, &zeros, 1.0).is_silent());
+    }
+
+    #[test]
+    fn band_edges_are_ordered_and_cover_the_log_range() {
+        for n in [16, 32, 64] {
+            let edges = band_edges(n, SR);
+            assert_eq!(edges.len(), n);
+            let mut prev_start = 0;
+            for &(a, b) in &edges {
+                assert!(a >= 1 && b > a && b <= FFT_SIZE / 2);
+                assert!(a >= prev_start);
+                prev_start = a;
+            }
+            assert_eq!(edges[0].0, 1);
+        }
+    }
+
+    #[test]
     fn sensitivity_gain_scales_output() {
         let pcm = sine(1000.0, 0.001, FFT_SIZE);
         let (l, r) = stereo_snapshot(&pcm, &pcm);
@@ -814,7 +1002,8 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(AudioSpectrumFrame::default())),
             Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             Arc::new(AtomicBool::new(false)),
-        );
+        )
+        .unwrap();
         worker.stop();
         receiver
             .recv_timeout(Duration::from_secs(2))
@@ -847,7 +1036,8 @@ mod tests {
             Arc::clone(&latest),
             Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             Arc::new(AtomicBool::new(false)),
-        );
+        )
+        .unwrap();
 
         let wait_for = |pred: &dyn Fn(&AudioSpectrumFrame) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -930,6 +1120,7 @@ mod tests {
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
             Arc::clone(paused),
         )
+        .unwrap()
     }
 
     #[test]

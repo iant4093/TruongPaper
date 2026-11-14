@@ -25,16 +25,60 @@ impl WpeAssetSource for WeVirtualFileSystem {
     }
 }
 
+/// Largest body returned for one request. Longer ranges are answered with a shorter `206`, which
+/// `WKWebView` and `WebView2` follow with the next `Range` request.
+pub const MAX_RESPONSE_CHUNK: usize = 8 * 1024 * 1024;
+/// Largest non-media file served whole with `200` (scripts, pages, images, wasm).
+pub const MAX_FULL_RESPONSE: usize = 64 * 1024 * 1024;
+
 /// Handles one `wpe://localhost/<path>` request against `vfs`.
 ///
 /// - `200 OK` with the full body when there is no (or a syntactically invalid) `Range` header.
-/// - `206 Partial Content` for a satisfiable `Range: bytes=...` header.
+///   Audio and video larger than [`MAX_RESPONSE_CHUNK`] get a `206` for the first chunk instead,
+///   and other files larger than [`MAX_FULL_RESPONSE`] get `413`.
+/// - `206 Partial Content` for a satisfiable `Range: bytes=...` header, at most
+///   [`MAX_RESPONSE_CHUNK`] bytes per response.
 /// - `416 Range Not Satisfiable` (`Content-Range: bytes */total`) for a well-formed but
 ///   unsatisfiable range.
 /// - `403 Forbidden` for path traversal (`..`, absolute or drive-prefixed paths), `404` when missing.
+///
+/// `Access-Control-Allow-Origin` is only sent back for the app's own origins (see
+/// [`allowed_origin`]).
 pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
     vfs: &V,
     request: Request<Vec<u8>>,
+) -> Response<Cow<'static, [u8]>> {
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .and_then(allowed_origin);
+    let mut response = serve(vfs, &request);
+    if let Some(origin) = origin {
+        let headers = response.headers_mut();
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            header::HeaderValue::from_static(origin),
+        );
+        headers.insert(header::VARY, header::HeaderValue::from_static("Origin"));
+    }
+    response
+}
+
+/// The `Origin` values of our own wallpaper pages: `wpe://localhost` (`WKWebView`) and
+/// `http(s)://wpe.localhost` (`WebView2`). Returns the static string to echo, or `None`.
+pub fn allowed_origin(origin: &str) -> Option<&'static str> {
+    match origin {
+        "wpe://localhost" => Some("wpe://localhost"),
+        "http://wpe.localhost" => Some("http://wpe.localhost"),
+        "https://wpe.localhost" => Some("https://wpe.localhost"),
+        _ => None,
+    }
+}
+
+fn serve<V: WpeAssetSource + ?Sized>(
+    vfs: &V,
+    request: &Request<Vec<u8>>,
 ) -> Response<Cow<'static, [u8]>> {
     let uri_path = percent_encoding::percent_decode_str(request.uri().path())
         .decode_utf8_lossy()
@@ -68,6 +112,7 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
         .and_then(|v| v.to_str().ok())
     {
         if let Some((start, end)) = parse_http_byte_range(range_val, total_len) {
+            let end = end.min(start.saturating_add(MAX_RESPONSE_CHUNK - 1));
             let chunk_len = end - start + 1;
             let Ok(slice) = asset.read(start..end + 1) else {
                 return error_response(StatusCode::NOT_FOUND, b"Not Found");
@@ -81,7 +126,6 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
                     header::CONTENT_RANGE,
                     format!("bytes {start}-{end}/{total_len}"),
                 )
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .body(Cow::Owned(slice))
                 .expect("static 206 response headers are valid");
         }
@@ -91,13 +135,32 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::CONTENT_RANGE, format!("bytes */{total_len}"))
                 .header(header::CONTENT_LENGTH, "0")
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .body(Cow::Borrowed(&b""[..]))
                 .expect("static 416 response headers are valid");
         }
         // Malformed Range header: RFC 9110 says ignore it and serve the full representation.
     }
 
+    if total_len > MAX_RESPONSE_CHUNK && (mime.starts_with("video/") || mime.starts_with("audio/"))
+    {
+        // Never load a whole large media file: answer with the first chunk and let the player
+        // continue with `Range` requests.
+        let end = MAX_RESPONSE_CHUNK - 1;
+        let Ok(slice) = asset.read(0..end + 1) else {
+            return error_response(StatusCode::NOT_FOUND, b"Not Found");
+        };
+        return Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CONTENT_LENGTH, slice.len().to_string())
+            .header(header::CONTENT_RANGE, format!("bytes 0-{end}/{total_len}"))
+            .body(Cow::Owned(slice))
+            .expect("static 206 response headers are valid");
+    }
+    if total_len > MAX_FULL_RESPONSE {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, b"Payload Too Large");
+    }
     let Ok(bytes) = asset.read(0..total_len) else {
         return error_response(StatusCode::NOT_FOUND, b"Not Found");
     };
@@ -106,7 +169,6 @@ pub fn handle_wpe_protocol_request<V: WpeAssetSource + ?Sized>(
         .header(header::CONTENT_TYPE, mime)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, total_len.to_string())
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Cow::Owned(bytes))
         .expect("static 200 response headers are valid")
 }
@@ -115,7 +177,6 @@ fn error_response(status: StatusCode, body: &'static [u8]) -> Response<Cow<'stat
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Cow::Borrowed(body))
         .expect("static error response headers are valid")
 }
@@ -232,7 +293,10 @@ mod tests {
         assert_eq!(hdr(&res, header::CONTENT_TYPE), "video/mp4");
         assert_eq!(hdr(&res, header::ACCEPT_RANGES), "bytes");
         assert_eq!(hdr(&res, header::CONTENT_LENGTH), "10");
-        assert_eq!(hdr(&res, header::ACCESS_CONTROL_ALLOW_ORIGIN), "*");
+        assert!(res
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
         assert!(res.headers().get(header::CONTENT_RANGE).is_none());
     }
 
@@ -284,6 +348,127 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK, "{r}");
             assert_eq!(res.body().len(), 10, "{r}");
         }
+    }
+
+    /// One synthetic file served for every path.
+    struct BigVfs(Vec<u8>);
+
+    impl WpeAssetSource for BigVfs {
+        fn open_asset(&self, _: &str) -> io::Result<VfsAsset<'_>> {
+            Ok(VfsAsset::Bytes(&self.0))
+        }
+    }
+
+    fn big(len: usize) -> BigVfs {
+        BigVfs((0..len).map(|i| (i % 251) as u8).collect())
+    }
+
+    #[test]
+    fn open_ended_range_is_capped_to_one_chunk() {
+        let vfs = big(MAX_RESPONSE_CHUNK * 2 + 10);
+        let total = vfs.0.len();
+        let res = handle_wpe_protocol_request(&vfs, req("/v.mp4", Some("bytes=0-")));
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(res.body().len(), MAX_RESPONSE_CHUNK);
+        assert_eq!(
+            hdr(&res, header::CONTENT_RANGE),
+            format!("bytes 0-{}/{total}", MAX_RESPONSE_CHUNK - 1)
+        );
+        assert_eq!(
+            hdr(&res, header::CONTENT_LENGTH),
+            MAX_RESPONSE_CHUNK.to_string()
+        );
+
+        // The player continues from the end of the previous chunk; the tail is shorter.
+        let tail_start = MAX_RESPONSE_CHUNK * 2;
+        let range = format!("bytes={tail_start}-");
+        let res = handle_wpe_protocol_request(&vfs, req("/v.mp4", Some(&range)));
+        assert_eq!(res.body().as_ref(), &vfs.0[tail_start..]);
+        assert_eq!(
+            hdr(&res, header::CONTENT_RANGE),
+            format!("bytes {tail_start}-{}/{total}", total - 1)
+        );
+    }
+
+    #[test]
+    fn explicit_large_range_is_truncated_and_suffix_range_is_exact() {
+        let vfs = big(MAX_RESPONSE_CHUNK * 3);
+        let res = handle_wpe_protocol_request(&vfs, req("/v.mp4", Some("bytes=5-99999999")));
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(res.body().len(), MAX_RESPONSE_CHUNK);
+        assert_eq!(res.body().as_ref(), &vfs.0[5..5 + MAX_RESPONSE_CHUNK]);
+        // The mp4 `moov` atom is often probed from the end of the file.
+        let res = handle_wpe_protocol_request(&vfs, req("/v.mp4", Some("bytes=-100")));
+        assert_eq!(res.body().as_ref(), &vfs.0[vfs.0.len() - 100..]);
+    }
+
+    #[test]
+    fn large_media_without_range_gets_first_chunk_as_206() {
+        let vfs = big(MAX_RESPONSE_CHUNK + 1);
+        let res = handle_wpe_protocol_request(&vfs, req("/v.webm", None));
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(res.body().len(), MAX_RESPONSE_CHUNK);
+        assert_eq!(
+            hdr(&res, header::CONTENT_RANGE),
+            format!(
+                "bytes 0-{}/{}",
+                MAX_RESPONSE_CHUNK - 1,
+                MAX_RESPONSE_CHUNK + 1
+            )
+        );
+        // Exactly one chunk still returns the plain 200.
+        let vfs = big(MAX_RESPONSE_CHUNK);
+        let res = handle_wpe_protocol_request(&vfs, req("/v.webm", None));
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn huge_non_media_file_gets_413_but_ranges_still_work() {
+        let vfs = big(MAX_FULL_RESPONSE + 1);
+        let res = handle_wpe_protocol_request(&vfs, req("/a.bin", None));
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let res = handle_wpe_protocol_request(&vfs, req("/a.bin", Some("bytes=0-3")));
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(res.body().len(), 4);
+    }
+
+    #[test]
+    fn cors_header_is_only_sent_for_our_own_origins() {
+        let with_origin = |origin: &str| {
+            let r = Request::builder()
+                .uri("wpe://localhost/video.mp4")
+                .header(header::ORIGIN, origin)
+                .body(Vec::new())
+                .unwrap();
+            handle_wpe_protocol_request(&sample(), r)
+        };
+        for o in [
+            "wpe://localhost",
+            "http://wpe.localhost",
+            "https://wpe.localhost",
+        ] {
+            let res = with_origin(o);
+            assert_eq!(hdr(&res, header::ACCESS_CONTROL_ALLOW_ORIGIN), o);
+            assert_eq!(hdr(&res, header::VARY), "Origin");
+        }
+        for o in [
+            "https://evil.example",
+            "null",
+            "http://wpe.localhost.evil.example",
+        ] {
+            let res = with_origin(o);
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{o}"
+            );
+        }
+        let missing = handle_wpe_protocol_request(&sample(), req("/nope", None));
+        assert!(missing
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
     }
 
     #[test]

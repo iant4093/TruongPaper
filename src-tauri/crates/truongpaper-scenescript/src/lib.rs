@@ -19,13 +19,23 @@ use std::time::{Duration, Instant};
 pub const MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Wall-clock budget for one `init`/event/`applyUserProperties` host call.
 pub const INIT_BUDGET: Duration = Duration::from_secs(2);
-/// Wall-clock budget for one per-frame step (all slots). About one 30 fps frame: a script that
-/// needs more would stall the shared render thread, so it is interrupted instead.
-pub const FRAME_BUDGET: Duration = Duration::from_millis(33);
+/// Hard wall-clock limit for one per-frame step (all slots together). Only a runaway script
+/// (infinite loop) should reach it: it is interrupted so it cannot stall the render thread for
+/// good. Ordinary slowness is judged per slot, see [`SLOW_SLOT_MS`].
+pub const FRAME_BUDGET: Duration = Duration::from_millis(250);
+/// A slot whose own `update` takes longer than this (milliseconds) in a frame counts a slow
+/// strike; [`SLOW_STRIKES`] frames in a row disable it.
+pub const SLOW_SLOT_MS: f64 = 50.0;
+/// Consecutive slow frames of one slot before it is disabled.
+pub const SLOW_STRIKES: u32 = 10;
+/// A slot whose `update` throws on every frame for this long is disabled.
+pub const ERROR_DISABLE_AFTER: Duration = Duration::from_secs(3);
+/// Minimum gap between repeated log lines about the same failing slot.
+pub const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// Total wall-clock budget for compiling and initializing every property script at load (see
 /// [`SceneScriptEngine::begin_load`]). Scripts that would start after it ran out are skipped.
 pub const LOAD_BUDGET: Duration = Duration::from_secs(3);
-/// Consecutive frames in which one slot may overrun [`FRAME_BUDGET`] before it is disabled.
+/// Consecutive frames in which one slot may hit the hard [`FRAME_BUDGET`] before it is disabled.
 pub const OVERRUN_STRIKES: u32 = 3;
 /// QuickJS native stack ceiling. Well below the render thread's own stack.
 pub const MAX_STACK_BYTES: usize = 512 * 1024;
@@ -501,11 +511,12 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
             remember(name, g.__layers[name]);
         }
     };
-    const LAST = new Map();
+    const LAST = new Map(), PENDING = [], ERR = new Map();
     const RES = [16, 32, 64];
     // p = [dt, runtime, cursorWorldX, cursorWorldY, hasInput, screenX, screenY, leftDown,
     //      timeOfDay (<0: local clock), ...left64, ...right64]
     g.__step = function (p) {
+        PENDING.length = 0;
         const e = g.engine, inp = g.input;
         e.frametime = p[0]; e.runtime = p[1];
         if (p[4] !== 0) {
@@ -527,7 +538,8 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
                 buf.left[i] = l; buf.right[i] = r; buf.average[i] = (l + r) * 0.5;
             }
         }
-        const out = [];
+        const out = [], slow = [], failed = [];
+        let t = __now();
         for (const k in g.__scripts) {
             const slot = g.__scripts[k];
             g.__curSlot = k;
@@ -535,19 +547,39 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
                 try {
                     const next = slot.exports.update(slot.currentValue);
                     if (next !== undefined) slot.currentValue = next;
+                    ERR.delete(k);
                 } catch (err) {
-                    __log('error', `[${k}] update: ${err}`);
+                    const now = __now();
+                    let s = ERR.get(k);
+                    if (!s) { s = { since: now, logAt: now, n: 0 }; ERR.set(k, s); __log('error', `[${k}] update: ${err}`); }
+                    else if (now - s.logAt >= g.__errLogMs) {
+                        s.logAt = now;
+                        __log('error', `[${k}] update: ${err} (${s.n} more failures since the last report)`);
+                        s.n = 0;
+                    }
+                    s.n++;
+                    if (now - s.since >= g.__errDisableMs) failed.push(k);
                 }
             }
             const str = String(slot.currentValue);
-            if (LAST.get(k) !== str) { LAST.set(k, str); out.push(k, str); }
+            // Committed at the end of the frame: see __resetDiff.
+            if (LAST.get(k) !== str) { PENDING.push(k, str); out.push(k, str); }
+            const n = __now();
+            if (n - t > g.__slowMs) slow.push(k);
+            t = n;
         }
         g.__curSlot = undefined;
         const nums = [], strs = [];
         collect(nums, strs);
-        return [out, nums, strs];
+        for (let i = 0; i < PENDING.length; i += 2) LAST.set(PENDING[i], PENDING[i + 1]);
+        PENDING.length = 0;
+        return [out, nums, strs, slow, failed];
     };
-    g.__disable = function (k) { delete g.__scripts[k]; LAST.delete(k); };
+    // A frame that failed may have handed out values the host never received: forget what was
+    // reported so the next frame sends every slot again.
+    g.__resetDiff = function () { LAST.clear(); PENDING.length = 0; };
+    g.__errLogMs = 60000; g.__errDisableMs = 3000; g.__slowMs = 50;
+    g.__disable = function (k) { delete g.__scripts[k]; LAST.delete(k); ERR.delete(k); };
     g.__hasHandler = function (name) {
         for (const k in g.__scripts) if (typeof g.__scripts[k].exports[name] === 'function') return true;
         return false;
@@ -562,7 +594,7 @@ pub const SCENESCRIPT_RUNTIME_JS: &str = r#"
     // `Vec3`, ...) stay writable: real Workshop scripts reassign them at module top level
     // (`shared = shared || {}`, `console = {...}`), which Wallpaper Engine allows.
     for (const n of [
-        '__log', '__callAll', '__fireTimers', '__step', '__sync', '__register', '__collectLayers',
+        '__log', '__now', '__resetDiff', '__callAll', '__fireTimers', '__step', '__sync', '__register', '__collectLayers',
         '__disable', '__hasHandler', '__cursor', '__layerStubs', '__animStub', '__videoStub',
         '__localMatrix', '__WEMath', '__WEColor', '__layers', '__scripts', '__parents', '__audioBuffers']) {
         const d = Object.getOwnPropertyDescriptor(g, n);
@@ -630,7 +662,10 @@ pub fn sanitize_log_message(msg: &str) -> String {
 #[derive(Debug, Default)]
 struct Breaker {
     strikes: HashMap<String, u32>,
+    slow_strikes: HashMap<String, u32>,
     disabled: Vec<String>,
+    /// Slots disabled for throwing on every frame.
+    failed: Vec<String>,
 }
 
 impl Breaker {
@@ -645,6 +680,23 @@ impl Breaker {
         } else {
             false
         }
+    }
+
+    /// Records the slots that were slow (own time over [`SLOW_SLOT_MS`]) in one finished frame;
+    /// returns those that just reached [`SLOW_STRIKES`] consecutive slow frames.
+    fn slow_frame(&mut self, slow: &[String]) -> Vec<String> {
+        self.slow_strikes.retain(|k, _| slow.contains(k));
+        let mut tripped = Vec::new();
+        for k in slow {
+            let n = self.slow_strikes.entry(k.clone()).or_insert(0);
+            *n += 1;
+            if *n >= SLOW_STRIKES {
+                self.slow_strikes.remove(k);
+                self.disabled.push(k.clone());
+                tripped.push(k.clone());
+            }
+        }
+        tripped
     }
 
     /// A frame finished within budget: the strikes were not consecutive.
@@ -697,11 +749,10 @@ pub struct SceneLayers<'a> {
     pub ids: &'a [(String, i32)],
 }
 
-/// Shortest decimal of an `f32` read back as `f64` (what a JS source literal would produce);
-/// non-finite values become `0`.
+/// An `f32` widened to `f64`; non-finite values become `0`.
 fn num(v: f32) -> f64 {
     if v.is_finite() {
-        format!("{v}").parse().unwrap_or(0.0)
+        f64::from(v)
     } else {
         0.0
     }
@@ -892,6 +943,7 @@ pub struct SceneScriptEngine {
     /// Deadline read by the QuickJS interrupt handler; `None` while no host call is running.
     deadline: Arc<Mutex<Option<Instant>>>,
     frame_budget: Cell<Duration>,
+    error_disable_after: Cell<Duration>,
     /// End of the total script-load budget while one is running ([`Self::begin_load`]).
     load_deadline: Cell<Option<Instant>>,
     breaker: RefCell<Breaker>,
@@ -930,6 +982,14 @@ impl SceneScriptEngine {
             ctx.globals()
                 .set("__log", log)
                 .map_err(|e| js_err(&ctx, e))?;
+            let epoch = Instant::now();
+            let now = Function::new(ctx.clone(), move || {
+                epoch.elapsed().as_secs_f64() * 1000.0
+            })
+            .map_err(|e| js_err(&ctx, e))?;
+            ctx.globals()
+                .set("__now", now)
+                .map_err(|e| js_err(&ctx, e))?;
             eval_js::<()>(&ctx, SCENESCRIPT_BOOTSTRAP_JS)?;
             eval_js::<()>(
                 &ctx,
@@ -951,6 +1011,7 @@ impl SceneScriptEngine {
             context,
             deadline,
             frame_budget: Cell::new(FRAME_BUDGET),
+            error_disable_after: Cell::new(ERROR_DISABLE_AFTER),
             load_deadline: Cell::new(None),
             breaker: RefCell::new(Breaker::default()),
             handlers: Cell::new([None; 4]),
@@ -978,6 +1039,22 @@ impl SceneScriptEngine {
     /// [`OVERRUN_STRIKES`] frames in a row.
     pub fn take_disabled_slots(&self) -> Vec<String> {
         std::mem::take(&mut self.breaker.borrow_mut().disabled)
+    }
+
+    /// Slots disabled since the last call because their `update` threw on every frame for
+    /// [`ERROR_DISABLE_AFTER`]. (These are also part of [`Self::take_disabled_slots`].)
+    pub fn take_failed_slots(&self) -> Vec<String> {
+        std::mem::take(&mut self.breaker.borrow_mut().failed)
+    }
+
+    /// Overrides how long a slot may throw on every frame (tests).
+    pub fn set_error_disable_after(&self, after: Duration) {
+        self.error_disable_after.set(after);
+        let _ = self.guarded(INIT_BUDGET, |ctx| {
+            ctx.globals()
+                .set("__errDisableMs", after.as_secs_f64() * 1000.0)
+                .map_err(|e| js_err(ctx, e))
+        });
     }
 
     /// Runs `f` inside the context with a wall-clock budget enforced by the interrupt handler.
@@ -1483,11 +1560,34 @@ impl SceneScriptEngine {
             let slots: Vec<String> = arr.get(0).map_err(|e| js_err(ctx, e))?;
             let nums: Vec<f64> = arr.get(1).map_err(|e| js_err(ctx, e))?;
             let strs: Vec<String> = arr.get(2).map_err(|e| js_err(ctx, e))?;
-            Ok((slots, nums, strs))
+            let slow: Vec<String> = arr.get(3).map_err(|e| js_err(ctx, e))?;
+            let failed: Vec<String> = arr.get(4).map_err(|e| js_err(ctx, e))?;
+            Ok((slots, nums, strs, slow, failed))
         });
         match res {
-            Ok((slots, nums, strs)) => {
+            Ok((slots, nums, strs, slow, failed)) => {
                 self.breaker.borrow_mut().frame_ok();
+                let tripped = self.breaker.borrow_mut().slow_frame(&slow);
+                for slot in tripped {
+                    tracing::warn!(
+                        target: "scenescript",
+                        "script '{slot}' took over {SLOW_SLOT_MS} ms for {SLOW_STRIKES} frames in a row; disabled"
+                    );
+                    self.disable_slot(&slot);
+                }
+                for slot in failed {
+                    tracing::warn!(
+                        target: "scenescript",
+                        "script '{slot}' threw on every frame for {} s; disabled",
+                        self.error_disable_after.get().as_secs_f32()
+                    );
+                    {
+                        let mut b = self.breaker.borrow_mut();
+                        b.failed.push(slot.clone());
+                        b.disabled.push(slot.clone());
+                    }
+                    self.disable_slot(&slot);
+                }
                 let mut it = slots.into_iter();
                 let mut changed = Vec::new();
                 while let (Some(k), Some(v)) = (it.next(), it.next()) {
@@ -1499,6 +1599,14 @@ impl SceneScriptEngine {
                 })
             }
             Err(err) => {
+                // Values handed out by the failed frame never reached the host.
+                let _ = self.guarded(INIT_BUDGET, |ctx| {
+                    let f: Function = ctx
+                        .globals()
+                        .get("__resetDiff")
+                        .map_err(|e| js_err(ctx, e))?;
+                    f.call::<_, ()>(()).map_err(|e| js_err(ctx, e))
+                });
                 if started.elapsed() >= budget {
                     self.record_overrun();
                 }
@@ -1521,14 +1629,18 @@ impl SceneScriptEngine {
                 target: "scenescript",
                 "script '{slot}' overran the frame budget {OVERRUN_STRIKES} frames in a row; disabled"
             );
-            let _ = self.guarded(INIT_BUDGET, |ctx| {
-                let f: Function = ctx.globals().get("__disable").map_err(|e| js_err(ctx, e))?;
-                f.call::<_, ()>((slot.as_str(),))
-                    .map_err(|e| js_err(ctx, e))
-            });
-            self.slot_values.borrow_mut().remove(&slot);
-            self.handlers.set([None; 4]);
+            self.disable_slot(&slot);
         }
+    }
+
+    /// Removes a slot from the script runtime.
+    fn disable_slot(&self, slot: &str) {
+        let _ = self.guarded(INIT_BUDGET, |ctx| {
+            let f: Function = ctx.globals().get("__disable").map_err(|e| js_err(ctx, e))?;
+            f.call::<_, ()>((slot,)).map_err(|e| js_err(ctx, e))
+        });
+        self.slot_values.borrow_mut().remove(slot);
+        self.handlers.set([None; 4]);
     }
 
     /// Like [`Self::step_frame_diff`] but returns the current value of every slot and leaves
@@ -2214,6 +2326,122 @@ mod tests {
         let out = e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
         assert!(out.slots.iter().any(|(k, _)| k == "ok"));
         assert!(out.slots.iter().all(|(k, _)| k != "hang"));
+    }
+
+    fn busy_ms(ms: u32) -> String {
+        format!(
+            "export function update(v) {{ const t = Date.now(); while (Date.now() - t < {ms}) {{}} return v + 1; }}"
+        )
+    }
+
+    #[test]
+    fn slow_but_healthy_scripts_are_not_disabled() {
+        // Three slots of ~30 ms each: 90 ms per frame, over the old 33 ms frame budget but
+        // under the hard limit and under the per-slot limit.
+        let e = engine();
+        for k in ["a", "b", "c"] {
+            e.register_property_script(k, "L", &busy_ms(30), "0")
+                .unwrap();
+        }
+        for i in 0..14 {
+            e.step_frame_diff(&frame(&Z64, &Z64, i as f32 * 0.03))
+                .unwrap();
+        }
+        assert!(e.take_disabled_slots().is_empty());
+    }
+
+    #[test]
+    fn slot_slow_for_many_frames_is_disabled_but_not_its_neighbour() {
+        let mut b = Breaker::default();
+        let slow = vec!["s".to_string()];
+        for _ in 0..SLOW_STRIKES - 1 {
+            assert!(b.slow_frame(&slow).is_empty());
+        }
+        // A fast frame in between resets the count.
+        assert!(b.slow_frame(&[]).is_empty());
+        for _ in 0..SLOW_STRIKES - 1 {
+            assert!(b.slow_frame(&slow).is_empty());
+        }
+        assert_eq!(b.slow_frame(&slow), ["s"]);
+        assert_eq!(b.disabled, ["s"]);
+    }
+
+    #[test]
+    fn interrupted_frame_resends_slot_values() {
+        let e = engine();
+        e.register_property_script(
+            "n",
+            "L",
+            "let c = 0; export function update(v) { return ++c; }",
+            "0",
+        )
+        .unwrap();
+        e.register_property_script(
+            "hang",
+            "L",
+            "let c = 0; export function update(v) { if (++c === 2) { for (;;) {} } return v; }",
+            "0",
+        )
+        .unwrap();
+        e.set_frame_budget(Duration::from_millis(30));
+        let f0 = e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        assert!(f0.slots.iter().any(|(k, v)| k == "n" && v == "1"));
+        // "n" runs first and changes, then "hang" is interrupted: the frame is lost.
+        assert!(e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).is_err());
+        e.set_frame_budget(Duration::from_millis(250));
+        let f2 = e.step_frame_diff(&frame(&Z64, &Z64, 0.2)).unwrap();
+        assert!(
+            f2.slots.iter().any(|(k, v)| k == "n" && v == "3"),
+            "{:?}",
+            f2.slots
+        );
+        assert!(f2.slots.iter().any(|(k, _)| k == "hang"));
+    }
+
+    #[test]
+    fn slot_throwing_every_frame_is_disabled_and_reported() {
+        let e = engine();
+        e.set_error_disable_after(Duration::from_millis(60));
+        e.register_property_script(
+            "bad",
+            "L",
+            "export function update(v) { throw new Error('x'); }",
+            "0",
+        )
+        .unwrap();
+        e.register_property_script(
+            "ok",
+            "L",
+            "export function update(v) { return v + 1; }",
+            "0",
+        )
+        .unwrap();
+        e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        assert!(e.take_failed_slots().is_empty());
+        std::thread::sleep(Duration::from_millis(80));
+        e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
+        assert_eq!(e.take_failed_slots(), ["bad"]);
+        assert_eq!(e.take_disabled_slots(), ["bad"]);
+        let out = e.step_frame_diff(&frame(&Z64, &Z64, 0.2)).unwrap();
+        assert!(out.slots.iter().all(|(k, _)| k != "bad"));
+    }
+
+    #[test]
+    fn slot_that_recovers_is_not_disabled() {
+        let e = engine();
+        e.set_error_disable_after(Duration::from_millis(60));
+        e.register_property_script(
+            "flaky",
+            "L",
+            "let c = 0; export function update(v) { if (++c === 1 || c === 3) throw new Error('x'); return v; }",
+            "0",
+        )
+        .unwrap();
+        e.step_frame_diff(&frame(&Z64, &Z64, 0.0)).unwrap();
+        e.step_frame_diff(&frame(&Z64, &Z64, 0.1)).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        e.step_frame_diff(&frame(&Z64, &Z64, 0.2)).unwrap();
+        assert!(e.take_failed_slots().is_empty());
     }
 
     #[test]

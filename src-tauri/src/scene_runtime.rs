@@ -162,6 +162,13 @@ pub struct SceneRuntime {
     skipped_slots: Vec<String>,
     /// Slots dropped at run time for overrunning the frame budget repeatedly.
     disabled_slots: Vec<String>,
+    /// Slots dropped for throwing on every frame (subset reported separately in diagnostics).
+    failed_slots: Vec<String>,
+    /// Something other than a slot result may have written graph properties since the slots
+    /// were last applied (user properties, script layer writes, animations, load).
+    reapply_all: bool,
+    /// `render_epoch` seen at the last apply.
+    applied_epoch: u64,
     elapsed: f32,
     paused: bool,
     time_of_day: Option<f32>,
@@ -245,6 +252,9 @@ impl SceneRuntime {
             layer_idx: Vec::new(),
             synced: HashMap::new(),
             slot_values: HashMap::new(),
+            failed_slots: Vec::new(),
+            reapply_all: true,
+            applied_epoch: 0,
             registered_slots: Vec::new(),
             skipped_slots: Vec::new(),
             disabled_slots: Vec::new(),
@@ -420,9 +430,15 @@ impl SceneRuntime {
             ));
         }
         for slot in &self.disabled_slots {
-            log.push(format!(
-                "SceneScript {slot} disabled: repeatedly exceeded its frame budget"
-            ));
+            if self.failed_slots.contains(slot) {
+                log.push(format!(
+                    "SceneScript {slot} disabled: its update threw on every frame"
+                ));
+            } else {
+                log.push(format!(
+                    "SceneScript {slot} disabled: repeatedly exceeded its time budget"
+                ));
+            }
         }
         log.extend(self.extra_diagnostics.to_vec());
         log.to_vec()
@@ -512,12 +528,25 @@ impl SceneRuntime {
         self.drop_disabled_slots();
         let out = stepped?;
         self.apply_pulled(out.layers);
+        let mut changed: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(out.slots.len());
         for (slot, value) in out.slots {
+            changed.insert(slot.clone());
             self.slot_values.insert(slot, value);
         }
-        // Registration order keeps multiple slots on one layer deterministic. Slots that did
-        // not change still re-apply their value, so they keep winning over other writers.
+        // Registration order keeps multiple slots on one layer deterministic. Slot results
+        // must keep winning over other writers (animations, script layer state, user
+        // properties), so every slot is re-applied whenever one of those may have written the
+        // graph; otherwise only the slots whose value changed are applied.
+        let epoch = self.graph.render_epoch();
+        let all = std::mem::take(&mut self.reapply_all)
+            || self.graph.has_animations()
+            || epoch != self.applied_epoch;
+        self.applied_epoch = epoch;
         for slot in &self.registered_slots {
+            if !all && !changed.contains(slot) {
+                continue;
+            }
             if let Some(value) = self.slot_values.get(slot) {
                 self.graph.apply_script_output(slot, value);
             }
@@ -527,6 +556,7 @@ impl SceneRuntime {
 
     /// Forgets slots the engine disabled (frame-budget circuit breaker).
     fn drop_disabled_slots(&mut self) {
+        self.failed_slots.extend(self.engine.take_failed_slots());
         for slot in self.engine.take_disabled_slots() {
             tracing::warn!(
                 "scene {}: SceneScript '{slot}' disabled after repeated frame-budget overruns",
@@ -563,6 +593,7 @@ impl SceneRuntime {
     /// values re-resolve) and calls `applyUserProperties(changedProps)` on every script.
     pub fn apply_user_properties(&mut self, changed_json: &str) -> anyhow::Result<()> {
         let changed_json = plain_properties_json(changed_json);
+        self.reapply_all = true;
         self.graph.apply_user_properties(&changed_json)?;
         // Instance-level `scriptproperties` bound to the changed properties.
         for slot in self.graph.property_scripts() {
@@ -780,6 +811,7 @@ impl SceneRuntime {
     /// skipped (compared in place).
     fn apply_pulled(&mut self, layers: Vec<LayerState>) -> usize {
         let mut applied = 0;
+        self.reapply_all |= !layers.is_empty();
         for s in layers {
             if self.synced.get(&s.name) == Some(&s) {
                 continue;
@@ -1513,6 +1545,43 @@ mod tests {
         let before = layer(&rt, "Move").transform.scale.x;
         step(&mut rt);
         assert!(layer(&rt, "Move").transform.scale.x > before);
+    }
+
+    #[test]
+    fn throwing_script_is_disabled_and_reported_and_unchanged_slots_stay_applied() {
+        let t = TempDir::new("thrower");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 100, "height": 50 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Bad", "image": "models/solid.json", "origin": "0 0 0",
+                "alpha": { "script": "let n = 0; export function update(v) { if (n++ > 0) throw new Error('boom'); return v; }", "value": 1 } },
+              { "name": "Still", "image": "models/solid.json", "origin": "0 0 0",
+                "scale": { "script": "export function update(v) { return new Vec3(2, 2, 2); }", "value": "1 1 1" } } ]
+            }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        rt.engine
+            .set_error_disable_after(std::time::Duration::from_millis(30));
+        step(&mut rt);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        step(&mut rt);
+        assert_eq!(rt.script_slots().len(), 1, "{:?}", rt.script_slots());
+        assert!(rt
+            .diagnostics()
+            .iter()
+            .any(|d| d.contains("threw on every frame")));
+        // A property written by someone else is restored once user properties change, and a
+        // value that did not change is not lost.
+        assert_eq!(layer(&rt, "Still").transform.scale.x, 2.0);
+        rt.apply_user_properties("{}").unwrap();
+        step(&mut rt);
+        assert_eq!(layer(&rt, "Still").transform.scale.x, 2.0);
     }
 
     #[test]

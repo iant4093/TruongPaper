@@ -4,7 +4,7 @@
 import React, { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { MonitorSmartphone, X } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
+import { errorMessage, isCancelMessage, useAppStore } from '../store/useAppStore';
 import { formatBytes, workshopTypeFromTags } from '../lib/format';
 import { Badge, Thumb } from './ui';
 import { useModalFocus } from '../lib/useModalFocus';
@@ -25,10 +25,12 @@ export const WorkshopPreviewModal: React.FC = () => {
   const loadGuestAvailability = useAppStore((s) => s.loadGuestAvailability);
 
   const download = useAppStore((s) => s.downloadWorkshopItem);
+  const cancelDownload = useAppStore((s) => s.cancelWorkshopDownload);
+  const [cancelling, setCancelling] = useState(false);
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
   const [starting, setStarting] = useState<WorkshopDownloadSource | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  React.useEffect(() => { setDownloadError(null); setStarting(null); }, [preview?.workshopId]);
+  React.useEffect(() => { setDownloadError(null); setStarting(null); setCancelling(false); }, [preview?.workshopId]);
   React.useEffect(() => {
     if (preview) void loadGuestAvailability([preview.workshopId]);
   }, [preview?.workshopId, loadGuestAvailability]);
@@ -37,7 +39,8 @@ export const WorkshopPreviewModal: React.FC = () => {
     setStarting(source); setDownloadError(null);
     try { await download(preview.workshopId, source === 'ggnetwork' ? source : undefined); }
     catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      if (isCancelMessage(err)) return; // the user stopped it
+      const message = errorMessage(err);
       setDownloadError(message);
       if (source === 'steam' && /^(sign in to steam|steam login required)/i.test(message)) openAuth();
     } finally { setStarting(null); }
@@ -128,6 +131,12 @@ export const WorkshopPreviewModal: React.FC = () => {
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
                     Downloading chunks... {Math.round(progress.progressPercent)}% ({formatBytes(downloadedBytes)} /{' '}
                     {formatBytes(preview.fileSizeBytes)})
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                    <button type="button" className="button" disabled={cancelling} onClick={() => {
+                      setCancelling(true);
+                      cancelDownload(preview.workshopId).catch((e) => { setCancelling(false); toast.error(e, 'Could not cancel the download'); });
+                    }}>{cancelling ? 'Cancelling…' : 'Cancel download'}</button>
                   </div>
                   <div style={{ height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.12)' }}>
                     <div

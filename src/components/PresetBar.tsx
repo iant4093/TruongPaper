@@ -4,7 +4,7 @@ import { Dropdown } from './Dropdown';
 // `wallpaper_save_preset` / `wallpaper_apply_preset`.
 import React, { useState } from 'react';
 import { Save } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
+import { errorMessage, useAppStore } from '../store/useAppStore';
 import { toast } from '../store/feedback';
 
 export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) => {
@@ -14,6 +14,7 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
   const [name, setName] = useState('');
   const [selected, setSelected] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgError, setMsgError] = useState(false);
 
   const onSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,8 +24,10 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
       setSelected(preset.presetId);
       setName('');
       setMsg(`Saved "${preset.name}"`);
+      setMsgError(false);
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
+      setMsg(errorMessage(err));
+      setMsgError(true);
     }
   };
 
@@ -50,7 +53,7 @@ export const PresetBar: React.FC<{ wallpaperId: string }> = ({ wallpaperId }) =>
           <Save size={12} />
         </button>
       </form>
-      {msg && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>{msg}</div>}
+      {msg && <div role={msgError ? 'alert' : 'status'} style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>{msg}</div>}
     </div>
   );
 };

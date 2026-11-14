@@ -168,6 +168,7 @@ export const AllWallpapersView: React.FC<{
 
   const canApply = !!activeMonitorId;
   const loaded = useAppStore((s) => s.loaded);
+  const loadFailed = useAppStore((s) => s.loadFailed);
   const emptyLibrary = loaded && wallpapers.length === 0;
 
   return (
@@ -205,7 +206,9 @@ export const AllWallpapersView: React.FC<{
           </div>
         </div>
       )}
-      {!loaded && <div className="view-loading" role="status">Loading…</div>}
+      {!loaded && (loadFailed
+        ? <div className="view-loading" role="status">Could not load your library. Use Retry above.</div>
+        : <div className="view-loading" role="status">Loading…</div>)}
       <VirtualGrid items={entries} getKey={(e) => e.id} label="Wallpapers"
         renderItem={(entry, cell) => entry.kind === 'playlist' ? (
           <WallpaperCard id={entry.id} title={entry.playlist.name} preview={playlistPreview(entry.playlist)}

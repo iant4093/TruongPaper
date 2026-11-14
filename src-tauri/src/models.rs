@@ -366,7 +366,7 @@ pub struct SteamDownloadProgress {
     pub workshop_id: String,
     pub title: String,
     pub progress_percent: f32,
-    /// `'downloading' | 'completed' | 'error'`
+    /// `'downloading' | 'completed' | 'error' | 'cancelled'`
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

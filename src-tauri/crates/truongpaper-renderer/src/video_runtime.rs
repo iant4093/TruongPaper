@@ -331,7 +331,8 @@ pub fn tightly_packed_rows(frame: &VideoFrame) -> Cow<'_, [u8]> {
     Cow::Owned(packed)
 }
 
-/// Platform video decoder producing CPU frames (macOS: `truongpaper_platform::mac_video`).
+/// Platform video decoder producing CPU frames (macOS: `truongpaper_platform::mac_video`,
+/// Windows: `truongpaper_platform::win_video`).
 pub trait VideoFrameSource {
     /// Newest frame decoded since the last call, if any.
     fn latest_frame(&mut self) -> Option<VideoFrame>;

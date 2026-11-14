@@ -1277,6 +1277,53 @@ impl VideoFrameSource for MacVideoSource {
     }
 }
 
+/// `WinVideoDecoder` (Media Foundation `IMFMediaEngine`) as a [`VideoFrameSource`] (tightly
+/// packed BGRA frames; the decoder swaps buffers with the pool, so playback does not allocate).
+#[cfg(target_os = "windows")]
+struct WinVideoSource {
+    decoder: truongpaper_platform::win_video::WinVideoDecoder,
+    /// Pixel buffer handed back by the renderer after an upload, reused for a later frame.
+    pool: Vec<u8>,
+}
+
+#[cfg(target_os = "windows")]
+impl VideoFrameSource for WinVideoSource {
+    fn latest_frame(&mut self) -> Option<truongpaper_renderer::VideoFrame> {
+        let mut data = std::mem::take(&mut self.pool);
+        let Some((width, height, stride)) = self.decoder.copy_latest_bgra_frame_into(&mut data)
+        else {
+            self.pool = data;
+            return None;
+        };
+        Some(truongpaper_renderer::VideoFrame {
+            width,
+            height,
+            stride,
+            format: truongpaper_renderer::VideoPixelFormat::Bgra8,
+            data,
+        })
+    }
+
+    fn apply_settings(&mut self, settings: VideoPlaybackSettings) {
+        let s = settings.clamped();
+        self.decoder.set_rate(s.speed);
+        self.decoder.set_volume(s.effective_volume());
+        self.decoder.set_muted(s.is_effectively_muted());
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        if paused {
+            self.decoder.pause();
+        } else {
+            self.decoder.play();
+        }
+    }
+
+    fn recycle_frame(&mut self, frame: truongpaper_renderer::VideoFrame) {
+        self.pool = frame.data;
+    }
+}
+
 struct EmbeddedVideo {
     path: String,
     source: Box<dyn VideoFrameSource>,
@@ -1293,7 +1340,10 @@ fn open_embedded_videos(
     if paths.is_empty() {
         return Vec::new();
     }
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )]
     let mut out = Vec::new();
     for path in paths {
         let extracted = vfs
@@ -1332,11 +1382,36 @@ fn open_embedded_videos(
             }
             Err(err) => tracing::warn!("embedded video {}: {err}", mp4.display()),
         }
-        #[cfg(not(target_os = "macos"))]
+        // A file the installed codecs cannot decode (e.g. HEVC without the Store extension) is
+        // reported and logged by the decoder thread; the texture keeps its placeholder.
+        #[cfg(target_os = "windows")]
+        match truongpaper_platform::win_video::WinVideoDecoder::open(&mp4) {
+            Ok(decoder) => {
+                let mut source = WinVideoSource {
+                    decoder,
+                    pool: Vec::new(),
+                };
+                // Muted until the render loop makes this monitor the scene's sound owner.
+                source.apply_settings(VideoPlaybackSettings {
+                    muted: true,
+                    ..video_settings(adj)
+                });
+                source.set_paused(false);
+                out.push(EmbeddedVideo {
+                    path,
+                    source: Box::new(source),
+                });
+            }
+            Err(err) => tracing::warn!(
+                "embedded video {} stays on its placeholder: {err:#}",
+                mp4.display()
+            ),
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = adj;
             tracing::warn!(
-                "embedded video {} stays on its placeholder: D3D11VA decode is not implemented",
+                "embedded video {} stays on its placeholder: no video decoder on this OS",
                 mp4.display()
             );
         }

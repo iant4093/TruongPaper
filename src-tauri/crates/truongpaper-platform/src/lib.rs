@@ -24,6 +24,10 @@ pub mod mac_desktop;
 #[path = "macos_video.rs"]
 pub mod mac_video;
 
+#[cfg(target_os = "windows")]
+#[path = "windows_video.rs"]
+pub mod win_video;
+
 pub use application::{
     application_launch_args, application_wallpapers_supported,
     is_wallpaper_type_supported_on_this_os,

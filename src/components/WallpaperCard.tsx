@@ -76,3 +76,66 @@ const WallpaperCardBase: React.FC<WallpaperCardProps> = ({
 
 /** Memoized: with stable callbacks a store update only re-renders the cards whose data changed. */
 export const WallpaperCard = React.memo(WallpaperCardBase);
+
+export interface DownloadCardProps {
+  workshopId: string;
+  title: string;
+  preview: string | null | undefined;
+  /** 0..100 */
+  percent: number;
+  failed?: boolean;
+  error?: string | null;
+  cancelling?: boolean;
+  tabIndex?: 0 | -1;
+  onCancel: (workshopId: string) => void;
+  onRetry: (workshopId: string) => void;
+  onDismiss: (workshopId: string) => void;
+}
+
+/** A Workshop download in the library grid: grayed out, with a progress bar until it is installed. */
+const DownloadCardBase: React.FC<DownloadCardProps> = ({
+  workshopId, title, preview, percent, failed, error, cancelling, tabIndex = 0, onCancel, onRetry, onDismiss,
+}) => {
+  const pct = Math.max(0, Math.min(100, Math.round(percent)));
+  return (
+    <article className={`wallpaper-card is-downloading${failed ? ' is-failed' : ''}`} aria-busy={!failed}>
+      <div className="wallpaper-media">
+        {/* Focusable for arrow-key moves through the grid; there is nothing to apply yet. */}
+        <div className="wallpaper-select" data-grid-select="" tabIndex={tabIndex} role="img"
+          aria-label={failed ? `${title}, download failed` : `${title}, downloading ${pct}%`}>
+          <Thumb src={preview} alt="" height="auto" lazy />
+        </div>
+        <div className="wallpaper-progress" aria-hidden={failed ? 'true' : undefined}>
+          <span className="wallpaper-progress-label">{failed ? 'Download failed' : `Downloading ${pct}%`}</span>
+          {!failed && (
+            <div className="progress" role="progressbar" aria-label={`Downloading ${title}`}
+              aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+              <div style={{ width: `${pct}%` }} />
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="wallpaper-info">
+        <div className="wallpaper-title" title={title}>{title}</div>
+        <div className="wallpaper-meta" title={failed ? error ?? undefined : undefined}>
+          {failed ? (error || 'Download failed') : 'Workshop download'}
+        </div>
+        <div className="wallpaper-actions">
+          {failed ? (
+            <>
+              <button type="button" className="button wallpaper-apply" onClick={() => onRetry(workshopId)}>Retry</button>
+              <button type="button" className="button" onClick={() => onDismiss(workshopId)}>Dismiss</button>
+            </>
+          ) : (
+            <button type="button" className="button wallpaper-apply" disabled={cancelling}
+              aria-label={`Cancel download: ${title}`} onClick={() => onCancel(workshopId)}>
+              {cancelling ? 'Cancelling…' : 'Cancel download'}
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+};
+
+export const DownloadCard = React.memo(DownloadCardBase);

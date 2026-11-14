@@ -205,6 +205,12 @@ input.button { cursor: text; }
 .wallpaper-badge { position: absolute; left: 9px; bottom: 9px; background: #1a1a1ae6; padding: 2px 7px; border-radius: 4px; color: #e0d3a3; font-size: 11px; }
 .wallpaper-star { position: absolute; right: 8px; top: 8px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 50%; background: #1a1a1acc; color: #cfcfcf; }
 .wallpaper-star:hover, .wallpaper-star.is-on { color: #f2cf6b; background: #1a1a1af2; }
+.wallpaper-card.is-downloading .thumbnail img { filter: grayscale(1) brightness(.55); }
+.wallpaper-card.is-downloading .wallpaper-title { color: var(--text-muted); }
+.wallpaper-progress { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 2px; }
+.wallpaper-progress-label { font-size: 11px; color: #e0e0e0; text-shadow: 0 1px 2px #000; }
+.wallpaper-card.is-failed .wallpaper-progress-label { color: var(--danger-text); }
+.wallpaper-card.is-failed .wallpaper-meta { color: var(--danger-text); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .empty-state { padding: 40px 20px; text-align: center; border: 1px dashed #414141; border-radius: 8px; color: var(--text-muted); font-size: 12px; }
 .empty-state svg { display: block; margin: 0 auto 10px; }
 .saved-album-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 10px; }

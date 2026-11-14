@@ -85,6 +85,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     clock.mark("http client ready");
 
     let state = AppState::new(conn, app_data_dir.clone(), http.clone());
+    // Windows ids used to be GDI names (`\\.\DISPLAY5`); carry their data over to stable ids.
+    match controls::migrate_monitor_ids(&state.db.lock(), &controls::legacy_monitor_id_renames()) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("moved {n} per-display records to stable monitor ids"),
+        Err(err) => tracing::warn!("could not move per-display records to stable ids: {err}"),
+    }
     // Pause and display volumes survive restarts; restore them before any renderer starts.
     controls::restore_persisted(&state.db.lock(), &state.host);
     let hotkeys = {

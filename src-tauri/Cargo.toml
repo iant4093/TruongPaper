@@ -107,7 +107,7 @@ memmap2 = "0.9"
 rustfft = "6.2"
 cpal = "0.15"
 kira = "0.9"
-rquickjs = { version = "0.8", features = ["bindgen", "classes", "array-buffer", "loader", "parallel"] }
+rquickjs = { version = "0.8", features = ["classes", "array-buffer", "loader", "parallel"] }
 keyvalues-parser = "0.2"
 notify = { version = "8.0", default-features = false, features = ["macos_fsevent"] }
 raw-window-handle = "0.6"
@@ -121,6 +121,7 @@ tauri-plugin-single-instance = "2.2"
 tauri-plugin-global-shortcut = "2.2"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Devices_Display",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",

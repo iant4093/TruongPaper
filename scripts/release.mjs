@@ -40,7 +40,10 @@ if (!env.TAURI_SIGNING_PRIVATE_KEY) {
   env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??= '';
 }
 
-const build = spawnSync('npx', ['tauri', 'build', ...args], { cwd: root, env, stdio: 'inherit' });
+// Run the local Tauri CLI through Node: `npx` is `npx.cmd` on Windows, which spawnSync cannot
+// start without a shell.
+const tauriCli = join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
+const build = spawnSync(process.execPath, [tauriCli, 'build', ...args], { cwd: root, env, stdio: 'inherit' });
 if (build.status !== 0) process.exit(build.status ?? 1);
 
 // Catch signing/runtime failures in the actual bundled downloader before delivery.
@@ -67,7 +70,8 @@ if (!archives.length) {
   console.warn('[release] No signed updater archives found (is createUpdaterArtifacts enabled?)');
   process.exit(0);
 }
-const pick = archives[0];
+// The Windows updater installs the NSIS setup, never the MSI.
+const pick = archives.find((a) => a.dir.endsWith('nsis')) ?? archives[0];
 const manifest = {
   version,
   notes: notes || `TruongPaper ${version}`,

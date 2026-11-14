@@ -268,6 +268,73 @@ const DELETE_RETRY_DELAYS: &[Duration] = &[
     Duration::from_millis(2000),
 ];
 
+/// Before an install replaces `wallpaper_id`'s folder: switches every monitor showing it to
+/// photos and unmounts its files, then waits for the renderer to let go. Windows refuses to
+/// rename a folder while a file inside it is open or memory-mapped. Returns the monitors to
+/// give the wallpaper back to with [`reapply_wallpaper`].
+pub(crate) async fn release_wallpaper_files(
+    app: &AppHandle,
+    state: &AppState,
+    wallpaper_id: &str,
+) -> Vec<(String, crate::models::WallpaperSource)> {
+    // Each monitor's saved source (the wallpaper itself, or a playlist that is showing it).
+    let saved = db::monitor_sources(&state.db.lock()).unwrap_or_default();
+    let monitors: Vec<(String, crate::models::WallpaperSource)> = state
+        .host
+        .monitors_showing(wallpaper_id)
+        .into_iter()
+        .map(|(id, _)| {
+            let source = saved.get(&id).cloned().unwrap_or_else(|| {
+                crate::models::WallpaperSource::Workshop {
+                    wallpaper_id: wallpaper_id.to_string(),
+                }
+            });
+            (id, source)
+        })
+        .collect();
+    let switched = switch_monitors_off(app, state, wallpaper_id).await;
+    state.host.unmount_if(wallpaper_id);
+    if switched {
+        tokio::time::sleep(DELETE_SETTLE).await;
+    }
+    monitors
+}
+
+/// Gives each monitor its saved source back after [`release_wallpaper_files`].
+pub(crate) async fn reapply_wallpaper(
+    app: &AppHandle,
+    state: &AppState,
+    wallpaper_id: &str,
+    monitors: &[(String, crate::models::WallpaperSource)],
+) {
+    let Some(photo) = app.try_state::<crate::commands::photo::PhotoServiceState>() else {
+        return;
+    };
+    for (monitor_id, source) in monitors {
+        let _apply = crate::commands::monitor::lock_monitor_apply(monitor_id).await;
+        if let Err(err) =
+            crate::commands::monitor::apply_source(app, state, &photo, monitor_id, source).await
+        {
+            tracing::warn!("could not show the updated {wallpaper_id} on {monitor_id}: {err}");
+        }
+    }
+}
+
+/// Runs `op` again after each of [`DELETE_RETRY_DELAYS`] while it fails: Defender, the search
+/// indexer and a closing webview hold files of a wallpaper for a short moment on Windows.
+pub(crate) fn with_io_retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut delays = DELETE_RETRY_DELAYS.iter();
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(err) => match delays.next() {
+                Some(delay) => std::thread::sleep(*delay),
+                None => return Err(err),
+            },
+        }
+    }
+}
+
 /// Retries `remove` on failure after each delay; a folder that is already gone counts as done.
 fn remove_dir_all_with_retry<F>(path: &Path, delays: &[Duration], remove: F) -> std::io::Result<()>
 where

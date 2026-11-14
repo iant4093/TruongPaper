@@ -180,6 +180,11 @@ pub unsafe fn setup_desktop_layer() -> Option<DesktopHandles> {
     if worker_w.0.is_null() {
         return None;
     }
+    // On 24H2 the wallpaper is ordered below DefView; without it (Explorer still starting) the
+    // window would land above the icons. Callers retry.
+    if is_raised_layered_desktop && shell_dll_defview.0.is_null() {
+        return None;
+    }
 
     Some(DesktopHandles {
         progman,
@@ -206,33 +211,23 @@ pub unsafe fn attach_hwnd_to_desktop(
     let width = monitor_bounds.right - monitor_bounds.left;
     let height = monitor_bounds.bottom - monitor_bounds.top;
 
-    // 1. Move window to target monitor coordinates in virtual screen space first
-    let _ = SetWindowPos(
-        hwnd,
-        Some(HWND_BOTTOM),
-        monitor_bounds.left,
-        monitor_bounds.top,
-        width,
-        height,
-        SWP_NOACTIVATE,
-    );
-
-    // 2. Map monitor rectangle into target parent client coordinates using [POINT; 2]
+    // Map the monitor rectangle (screen coordinates) straight into the parent's client space.
+    // Reading the window rect back would be wrong for a window that is already a child: its
+    // position is then parent-relative, and every re-attach shifted it by the parent's origin
+    // (820 px up with a monitor above the primary).
     let target_parent = if desktop.is_raised_layered_desktop {
         desktop.progman
     } else {
         desktop.worker_w
     };
-    let mut mapped_rect = RECT::default();
-    let _ = GetWindowRect(hwnd, &mut mapped_rect);
     let mut pts = [
         POINT {
-            x: mapped_rect.left,
-            y: mapped_rect.top,
+            x: monitor_bounds.left,
+            y: monitor_bounds.top,
         },
         POINT {
-            x: mapped_rect.right,
-            y: mapped_rect.bottom,
+            x: monitor_bounds.right,
+            y: monitor_bounds.bottom,
         },
     ];
     // `None` = screen coordinates.
@@ -275,18 +270,18 @@ pub unsafe fn attach_hwnd_to_desktop(
         // NOTE: never SPI_SETDESKWALLPAPER here; on 24H2 it destroys the child WorkerW.
     } else {
         let _ = SetParent(hwnd, Some(desktop.worker_w));
+        // Top of WorkerW's children, so a re-attached webview sits above a recreated renderer
+        // surface. No SPI_SETDESKWALLPAPER here: with a NULL path it reset the user's Windows
+        // wallpaper on every attach.
         let _ = SetWindowPos(
             hwnd,
-            None,
+            Some(HWND_TOP),
             pts[0].x,
             pts[0].y,
             width,
             height,
-            SWP_NOACTIVATE | SWP_NOZORDER,
+            SWP_NOACTIVATE,
         );
-
-        // Refresh desktop only on classic non-24H2 (on 24H2 this would destroy WorkerW!)
-        let _ = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, None, SPIF_UPDATEINIFILE);
     }
 
     true

@@ -220,13 +220,23 @@ async fn apply_still(_: AppHandle, output: PathBuf) -> Result<(), String> {
         use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 
         // SAFETY: both operations run on this blocking thread, with a balanced WinRT apartment.
-        unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
+        // A reused pool thread may already be in another apartment (RPC_E_CHANGED_MODE): it is
+        // usable as is, and the apartment is not ours to uninitialize.
+        let owns_apartment = match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+            Ok(()) => true,
+            Err(err) if err.code() == windows::Win32::Foundation::RPC_E_CHANGED_MODE => false,
+            Err(err) => return Err(err),
+        };
+        // StorageFile rejects forward slashes.
+        let output = PathBuf::from(output.to_string_lossy().replace('/', "\\"));
         let result = (|| {
             let image =
                 StorageFile::GetFileFromPathAsync(&HSTRING::from(output.as_os_str()))?.join()?;
             LockScreen::SetImageFileAsync(&image)?.join()
         })();
-        unsafe { RoUninitialize() };
+        if owns_apartment {
+            unsafe { RoUninitialize() };
+        }
         result
     })
     .await

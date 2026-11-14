@@ -615,8 +615,10 @@ pub async fn show(
     #[cfg(target_os = "windows")]
     {
         // Webviews with different browser arguments need their own data directory.
-        builder =
-            builder.additional_browser_args(truongpaper_platform::WEBVIEW2_WALLPAPER_BROWSER_ARGS);
+        builder = builder
+            .additional_browser_args(truongpaper_platform::WEBVIEW2_WALLPAPER_BROWSER_ARGS)
+            // WebView2 paints white until the page draws; black blends with the wallpaper.
+            .background_color(tauri::window::Color(0, 0, 0, 255));
         if let Ok(dir) = app.path().app_data_dir() {
             builder = builder.data_directory(dir.join("wallpaper-webview"));
         }

@@ -65,7 +65,7 @@ pub unsafe fn poll_desktop_cursor_win32(
     desktop: &crate::win_desktop::DesktopHandles,
 ) -> Option<(f32, f32, bool)> {
     use windows::Win32::Foundation::POINT;
-    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, WindowFromPoint};
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, IsChild, WindowFromPoint};
 
     let mut pt = POINT::default();
     GetCursorPos(&mut pt).ok()?;
@@ -79,9 +79,13 @@ pub unsafe fn poll_desktop_cursor_win32(
     let (norm_x, norm_y) = normalize_point_top_left(pt.x as f64, pt.y as f64, monitor)?;
 
     let hovered_hwnd = WindowFromPoint(pt);
+    // `WindowFromPoint` returns the deepest child: over the desktop that is the icon list view
+    // (`SysListView32`) inside `SHELLDLL_DefView`, so descendants of DefView count as desktop.
     let is_desktop_visible_under_cursor = hovered_hwnd == desktop.shell_dll_defview
         || hovered_hwnd == desktop.worker_w
-        || hovered_hwnd == desktop.progman;
+        || hovered_hwnd == desktop.progman
+        || (!desktop.shell_dll_defview.0.is_null()
+            && IsChild(desktop.shell_dll_defview, hovered_hwnd).as_bool());
 
     Some((norm_x, norm_y, is_desktop_visible_under_cursor))
 }

@@ -62,8 +62,16 @@ fn register_bundled_core_assets(app: &tauri::App) {
     }
 }
 
+/// Argument the login item starts TruongPaper with: wallpapers start, Studio stays hidden.
+const AUTOSTART_ARG: &str = "--autostart";
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let clock = StartupClock(std::time::Instant::now());
+    if std::env::args().any(|a| a == AUTOSTART_ARG) {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+    }
     // Closing Studio hides it. The tray keeps running and uses it for Pause and Next.
     if let Some(window) = app.get_webview_window("main") {
         let studio = window.clone();
@@ -87,10 +95,27 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState::new(conn, app_data_dir.clone(), http.clone());
     // Windows ids used to be GDI names (`\\.\DISPLAY5`); carry their data over to stable ids.
-    match controls::migrate_monitor_ids(&state.db.lock(), &controls::legacy_monitor_id_renames()) {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("moved {n} per-display records to stable monitor ids"),
-        Err(err) => tracing::warn!("could not move per-display records to stable ids: {err}"),
+    // Once only: a later run could otherwise move a disconnected monitor's old row onto a
+    // different monitor that inherited its GDI number.
+    if cfg!(target_os = "windows") {
+        let conn = state.db.lock();
+        let done = truongpaper_core::get_setting::<bool>(&conn, "monitor_ids_migrated")
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if !done {
+            match controls::migrate_monitor_ids(&conn, &controls::legacy_monitor_id_renames()) {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::info!("moved {n} per-display records to stable monitor ids");
+                    }
+                    let _ = truongpaper_core::set_setting(&conn, "monitor_ids_migrated", &true);
+                }
+                Err(err) => {
+                    tracing::warn!("could not move per-display records to stable ids: {err}")
+                }
+            }
+        }
     }
     // Pause and display volumes survive restarts; restore them before any renderer starts.
     controls::restore_persisted(&state.db.lock(), &state.host);
@@ -104,6 +129,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(state);
     app.manage(photo);
     controls::listen_selected_monitor(app.handle());
+    // Rewrite an existing login item so it carries `--autostart` (older builds registered it
+    // without, which opened Studio at every sign-in).
+    if settings.lock().launch_at_login {
+        use tauri_plugin_autostart::ManagerExt;
+        if let Err(err) = app.autolaunch().enable() {
+            tracing::debug!("could not refresh the login item: {err}");
+        }
+    }
     clock.mark("state restored");
 
     // Critical path to the first frame: the live runtimes. Web / Video webview windows + their
@@ -152,11 +185,17 @@ pub fn run() {
         context
     };
     let app = tauri::Builder::default()
+        // First, as Tauri recommends: a second launch hands over before other plugins start.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|a| a == AUTOSTART_ARG) {
+                tray::show_studio(app);
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![AUTOSTART_ARG]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -167,9 +206,6 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_studio(app);
-        }))
         .register_asynchronous_uri_scheme_protocol(
             protocol::WPE_SCHEME,
             |ctx, request, responder| {

@@ -124,6 +124,13 @@ impl OcclusionProbe {
     fn refresh_monitors(&mut self, _app: &AppHandle) {
         // SAFETY: plain Win32 enumeration / window lookups on this dedicated thread.
         unsafe {
+            // Explorer restarted: the cached handles are gone, look them up again.
+            if self.desktop.is_some_and(|d| {
+                !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(d.progman)).as_bool()
+            }) {
+                self.desktop = None;
+                self.setup_attempts = 0;
+            }
             if self.desktop.is_none() && self.setup_attempts < 5 {
                 self.setup_attempts += 1;
                 self.desktop = truongpaper_platform::win_desktop::setup_desktop_layer();

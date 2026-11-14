@@ -244,6 +244,51 @@ fn rect_from_win32(r: &windows::Win32::Foundation::RECT) -> ScreenRect {
     ScreenRect::from_ltrb(r.left as f64, r.top as f64, r.right as f64, r.bottom as f64)
 }
 
+/// `true` for windows that never hide the wallpaper: the desktop shell itself (also the
+/// top-level `WorkerW` that hosts the icons, which is the foreground window after a click on
+/// the desktop), tool windows, click-through overlays, and cloaked windows (suspended UWP apps,
+/// other virtual desktops, "Windows Input Experience").
+///
+/// # Safety
+/// Calls raw Win32 / DWM APIs.
+#[cfg(target_os = "windows")]
+unsafe fn is_ignored_desktop_window(
+    hwnd: windows::Win32::Foundation::HWND,
+    desktop: &crate::win_desktop::DesktopHandles,
+) -> bool {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    if hwnd == desktop.progman || hwnd == desktop.worker_w || hwnd == desktop.shell_dll_defview {
+        return true;
+    }
+    let mut class = [0u16; 64];
+    let len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+    let class = String::from_utf16_lossy(&class[..len]);
+    if class == "Progman" || class == "WorkerW" {
+        return true;
+    }
+    if let Ok(def_view) = FindWindowExW(Some(hwnd), None, w!("SHELLDLL_DefView"), PCWSTR::null()) {
+        if !def_view.0.is_null() {
+            return true;
+        }
+    }
+    let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    if (ex_style & (WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0)) != 0 {
+        return true;
+    }
+    let mut cloaked: u32 = 0;
+    DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_CLOAKED,
+        &mut cloaked as *mut u32 as *mut _,
+        std::mem::size_of::<u32>() as u32,
+    )
+    .is_ok()
+        && cloaked != 0
+}
+
 /// Windows: gathers the foreground window and all candidate top-level windows, then decides
 /// via [`decide_occlusion_win32`].
 ///
@@ -258,7 +303,7 @@ pub unsafe fn evaluate_monitor_occlusion_win32(
     pause_on_maximized: bool,
     desktop: &crate::win_desktop::DesktopHandles,
 ) -> MonitorPlaybackPolicy {
-    use windows::core::{w, BOOL, PCWSTR};
+    use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -270,11 +315,9 @@ pub unsafe fn evaluate_monitor_occlusion_win32(
     let mut foreground = None;
     if pause_on_fullscreen {
         let fg = GetForegroundWindow();
-        if !fg.0.is_null()
-            && fg != desktop.progman
-            && fg != desktop.worker_w
-            && fg != desktop.shell_dll_defview
-        {
+        // A maximized window is not fullscreen: with an auto-hidden taskbar its rect still covers
+        // the monitor. `pause_on_maximized` handles it instead.
+        if !fg.0.is_null() && !is_ignored_desktop_window(fg, desktop) && !IsZoomed(fg).as_bool() {
             let mut fg_rect = RECT::default();
             if GetWindowRect(fg, &mut fg_rect).is_ok() {
                 foreground = Some(rect_from_win32(&fg_rect));
@@ -285,13 +328,11 @@ pub unsafe fn evaluate_monitor_occlusion_win32(
     let mut normal_windows: Vec<ScreenRect> = Vec::new();
     if pause_on_maximized {
         struct OccCtx {
-            progman: HWND,
-            worker_w: HWND,
+            desktop: crate::win_desktop::DesktopHandles,
             rects: Vec<ScreenRect>,
         }
         let mut ctx = OccCtx {
-            progman: desktop.progman,
-            worker_w: desktop.worker_w,
+            desktop: *desktop,
             rects: Vec::new(),
         };
 
@@ -300,19 +341,7 @@ pub unsafe fn evaluate_monitor_occlusion_win32(
             if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
                 return BOOL(1);
             }
-            if hwnd == ctx.progman || hwnd == ctx.worker_w {
-                return BOOL(1);
-            }
-            // Classic desktop: the top-level WorkerW hosting SHELLDLL_DefView spans the monitor.
-            if let Ok(def_view) =
-                FindWindowExW(Some(hwnd), None, w!("SHELLDLL_DefView"), PCWSTR::null())
-            {
-                if !def_view.0.is_null() {
-                    return BOOL(1);
-                }
-            }
-            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-            if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
+            if is_ignored_desktop_window(hwnd, &ctx.desktop) {
                 return BOOL(1);
             }
             let mut w_rect = RECT::default();

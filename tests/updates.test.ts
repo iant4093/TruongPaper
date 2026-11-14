@@ -24,9 +24,10 @@ function fakeUpdate(events: Array<{ event: string; data: Record<string, number> 
     currentVersion: '1.0.0',
     date: '2025-01-02T00:00:00Z',
     body: 'Faster Liquid Glass transitions',
-    downloadAndInstall: vi.fn(async (cb: (e: unknown) => void) => {
+    download: vi.fn(async (cb: (e: unknown) => void) => {
       for (const e of events) cb(e);
     }),
+    install: vi.fn(async () => {}),
   };
 }
 
@@ -114,7 +115,7 @@ describe('services/updates', () => {
     await expect(m.installUpdate(() => {})).rejects.toThrow('No update available');
   });
 
-  it('shuts the runtime down, streams progress, installs and relaunches', async () => {
+  it('downloads first, then shuts the runtime down, installs and relaunches', async () => {
     const m = await freshModule();
     const update = fakeUpdate([
       { event: 'Started', data: { contentLength: 300 } },
@@ -129,19 +130,20 @@ describe('services/updates', () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       order.push(cmd);
     });
-    update.downloadAndInstall.mockImplementationOnce(async (cb: (e: unknown) => void) => {
-      order.push('downloadAndInstall');
+    update.download.mockImplementationOnce(async (cb: (e: unknown) => void) => {
+      order.push('download');
       cb({ event: 'Started', data: { contentLength: 300 } });
       cb({ event: 'Progress', data: { chunkLength: 100 } });
       cb({ event: 'Progress', data: { chunkLength: 200 } });
     });
+    update.install.mockImplementationOnce(async () => { order.push('install'); });
     relaunchMock.mockImplementationOnce(async () => {
       order.push('relaunch');
     });
 
     const progress: Array<[number, number | null]> = [];
     await m.installUpdate((d, t) => progress.push([d, t]));
-    expect(order).toEqual(['runtime_shutdown_for_update', 'downloadAndInstall', 'relaunch']);
+    expect(order).toEqual(['download', 'runtime_shutdown_for_update', 'install', 'relaunch']);
     expect(progress).toEqual([
       [0, 300],
       [100, 300],
@@ -156,7 +158,19 @@ describe('services/updates', () => {
     await m.checkForUpdate();
     invokeMock.mockRejectedValue(new Error('not running'));
     await m.installUpdate(() => {});
-    expect(update.downloadAndInstall).toHaveBeenCalled();
+    expect(update.install).toHaveBeenCalled();
     expect(relaunchMock).toHaveBeenCalled();
+  });
+
+  it('keeps the wallpapers running when the download fails', async () => {
+    const m = await freshModule();
+    const update = fakeUpdate();
+    checkMock.mockResolvedValue(update);
+    await m.checkForUpdate();
+    update.download.mockRejectedValueOnce(new Error('network down'));
+    await expect(m.installUpdate(() => {})).rejects.toThrow('network down');
+    expect(invokeMock).not.toHaveBeenCalledWith('runtime_shutdown_for_update', undefined);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'runtime_shutdown_for_update')).toBe(false);
+    expect(update.install).not.toHaveBeenCalled();
   });
 });

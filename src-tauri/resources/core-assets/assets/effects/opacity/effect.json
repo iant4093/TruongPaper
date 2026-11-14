@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "opacity",
+	"name": "Opacity",
+	"description": "TruongPaper built-in opacity effect",
+	"group": "enhance",
+	"passes": [
+		{
+			"material": "materials/effects/opacity.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/opacity.json",
+		"shaders/effects/opacity.frag",
+		"shaders/effects/opacity.vert"
+	]
+}

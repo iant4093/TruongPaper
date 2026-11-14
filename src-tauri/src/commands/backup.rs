@@ -161,7 +161,10 @@ pub fn build_backup(conn: &Connection, settings: Value) -> Result<Backup, String
     Ok(backup)
 }
 
-fn list_presets(conn: &Connection, wallpaper_id: &str) -> Result<Vec<WallpaperPreset>, String> {
+pub(crate) fn list_presets(
+    conn: &Connection,
+    wallpaper_id: &str,
+) -> Result<Vec<WallpaperPreset>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT preset_id, preset_name, user_properties_json, adjustments_json
@@ -335,9 +338,47 @@ pub fn apply_backup(
     Ok((summary, applied_sources))
 }
 
+/// Applies a backup inside one transaction; any error rolls everything back.
+pub fn apply_backup_atomic(
+    conn: &Connection,
+    backup: &Backup,
+) -> Result<(BackupSummary, AppliedSources), String> {
+    let tx = conn.unchecked_transaction().map_err(s)?;
+    let applied = apply_backup(&tx, backup)?;
+    tx.commit().map_err(s)?;
+    Ok(applied)
+}
+
+/// How many `truongpaper.db.pre-import-*.bak` snapshots are kept.
+const KEEP_PRE_IMPORT_BACKUPS: usize = 3;
+const PRE_IMPORT_PREFIX: &str = "truongpaper.db.pre-import-";
+
+/// Deletes all but the newest `keep` pre-import snapshots in `dir` (newest = largest timestamp).
+pub fn prune_backups(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut found: Vec<(i64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stamp = name
+                .strip_prefix(PRE_IMPORT_PREFIX)?
+                .strip_suffix(".bak")?
+                .parse::<i64>()
+                .ok()?;
+            Some((stamp, entry.path()))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in found.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Snapshot of the live database next to it before an import rewrites it.
 fn backup_database(conn: &Connection, dir: &Path) -> Result<PathBuf, String> {
-    let target = dir.join(format!("truongpaper.db.pre-import-{}.bak", now_ms()));
+    let target = dir.join(format!("{PRE_IMPORT_PREFIX}{}.bak", now_ms()));
     let _ = std::fs::create_dir_all(dir);
     conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
         .map_err(|e| format!("Could not back up the database before import: {e}"))?;
@@ -375,6 +416,61 @@ pub async fn backup_export(
     Ok(summary)
 }
 
+/// Every saved preset, keyed by wallpaper id.
+#[tauri::command]
+pub async fn wallpaper_list_presets(
+    state: State<'_, AppState>,
+) -> Result<BTreeMap<String, Vec<WallpaperPreset>>, String> {
+    let conn = state.db.lock();
+    list_all_presets(&conn)
+}
+
+pub(crate) fn list_all_presets(
+    conn: &Connection,
+) -> Result<BTreeMap<String, Vec<WallpaperPreset>>, String> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT wallpaper_id FROM wallpaper_presets ORDER BY wallpaper_id")
+        .map_err(s)?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(s)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(s)?;
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let presets = list_presets(conn, &id)?;
+        out.insert(id, presets);
+    }
+    Ok(out)
+}
+
+/// Writes a playlist export (built by the UI) to a file the user picked.
+#[tauri::command]
+pub async fn playlist_export(path: String, contents: String) -> Result<(), String> {
+    check_playlist_export(&path, &contents)?;
+    let target = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&target, contents)
+            .map_err(|e| format!("Could not write {}: {e}", target.display()))
+    })
+    .await
+    .map_err(s)?
+}
+
+fn check_playlist_export(path: &str, contents: &str) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("Choose a file for the playlists".into());
+    }
+    if contents.len() as u64 > MAX_BACKUP_BYTES {
+        return Err("Playlist export is larger than 10 MB".into());
+    }
+    let value: Value = serde_json::from_str(contents).map_err(|_| "Not a playlist export")?;
+    if value.get("format").and_then(Value::as_str) != Some("truongpaper-playlists") {
+        return Err("Not a playlist export".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn backup_import(
     app: AppHandle,
@@ -395,11 +491,22 @@ pub async fn backup_import(
     .map_err(s)??;
     let backup = parse_backup(&text)?;
 
-    let (mut summary, sources) = {
-        let conn = state.db.lock();
-        backup_database(&conn, &state.app_data_dir)?;
-        apply_backup(&conn, &backup)?
+    // The snapshot (VACUUM INTO) and the import both run off the async runtime; the import is
+    // one transaction, so a failure part-way leaves the database as it was.
+    let db = state.db.clone();
+    let dir = state.app_data_dir.clone();
+    let applied = {
+        let backup = backup.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock();
+            backup_database(&conn, &dir)?;
+            prune_backups(&dir, KEEP_PRE_IMPORT_BACKUPS);
+            apply_backup_atomic(&conn, &backup)
+        })
+        .await
+        .map_err(s)??
     };
+    let (mut summary, sources) = applied;
     crate::scheduler::invalidate_playlist_cache();
 
     // Settings go through the same merge + sanitize + persist path as `settings_update`; a
@@ -468,6 +575,7 @@ mod tests {
             mode: PlaylistMode::Mixed,
             interval_seconds: 60,
             items: vec![PlaylistItem::PhotoApiDraw],
+            transition: None,
         }
     }
 
@@ -556,5 +664,85 @@ mod tests {
         let file = backup_database(&conn, &dir).unwrap();
         assert!(file.is_file());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lists_presets_for_every_wallpaper() {
+        let conn = test_db();
+        add_wallpaper(&conn, "workshop:1", None);
+        add_wallpaper(&conn, "workshop:2", None);
+        assert!(list_all_presets(&conn).unwrap().is_empty());
+        db::save_preset(&conn, "workshop:1", "A", IpcFitMode::Fill).unwrap();
+        db::save_preset(&conn, "workshop:1", "B", IpcFitMode::Fill).unwrap();
+        db::save_preset(&conn, "workshop:2", "C", IpcFitMode::Fill).unwrap();
+        let all = list_all_presets(&conn).unwrap();
+        assert_eq!(all["workshop:1"].len(), 2);
+        assert_eq!(all["workshop:2"][0].name, "C");
+    }
+
+    #[test]
+    fn playlist_export_checks_path_and_format() {
+        let ok = r#"{"format":"truongpaper-playlists","version":1}"#;
+        assert!(check_playlist_export("/tmp/x.json", ok).is_ok());
+        assert!(check_playlist_export(" ", ok).is_err());
+        assert!(check_playlist_export("/tmp/x.json", "nope").is_err());
+        assert!(check_playlist_export("/tmp/x.json", r#"{"format":"other"}"#).is_err());
+    }
+
+    #[test]
+    fn prune_keeps_only_the_newest_snapshots() {
+        let dir = std::env::temp_dir().join(format!("truongpaper-prune-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for stamp in [5, 10, 2, 99, 7] {
+            std::fs::write(dir.join(format!("{PRE_IMPORT_PREFIX}{stamp}.bak")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("truongpaper.db"), b"x").unwrap();
+        prune_backups(&dir, 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "truongpaper.db".to_string(),
+                format!("{PRE_IMPORT_PREFIX}10.bak"),
+                format!("{PRE_IMPORT_PREFIX}7.bak"),
+                format!("{PRE_IMPORT_PREFIX}99.bak"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_import_rolls_back_everything() {
+        let dst = test_db();
+        add_wallpaper(&dst, "workshop:1", Some("1"));
+        let mut b = parse_backup(r#"{"format":"truongpaper-backup","version":1}"#).unwrap();
+        b.playlists.push(playlist("pl1"));
+        b.wallpaper_presets.insert(
+            "workshop:1".into(),
+            vec![WallpaperPreset {
+                preset_id: "p1".into(),
+                wallpaper_id: "workshop:1".into(),
+                name: "A".into(),
+                properties: Map::new(),
+                adjustments: UniversalAdjustments::default(),
+            }],
+        );
+        // Make the preset insert (which runs after the playlist) fail.
+        dst.execute_batch(
+            "CREATE TRIGGER fail_preset BEFORE INSERT ON wallpaper_presets
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        assert!(apply_backup_atomic(&dst, &b).is_err());
+        assert!(db::list_playlists(&dst).unwrap().is_empty());
+
+        dst.execute_batch("DROP TRIGGER fail_preset").unwrap();
+        apply_backup_atomic(&dst, &b).unwrap();
+        assert_eq!(db::list_playlists(&dst).unwrap().len(), 1);
     }
 }

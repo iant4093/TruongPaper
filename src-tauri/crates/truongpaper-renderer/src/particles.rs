@@ -20,7 +20,7 @@ pub struct SpriteParticleVertex {
     pub texcoord_rot_size: [f32; 4], // offset 12..28: (u, v, rotation.z, size)
     pub color: [f32; 4],             // offset 28..44: (r, g, b, a)
     pub velocity_life: [f32; 4],     // offset 44..60: (vx, vy, vz, normalized_age)
-    pub rotation_xy: [f32; 2],       // offset 60..68: (rotation.x, rotation.y)
+    pub rotation_xy: [f32; 2],       // offset 60..68: sampling uv (after sprite-sheet remap)
 }
 const _: () = assert!(std::mem::size_of::<SpriteParticleVertex>() == 68);
 
@@ -47,6 +47,70 @@ pub struct ParticleFile {
     pub operator: Vec<Value>,
     pub renderer: Vec<ParticleRendererSpec>,
     pub controlpoint: Vec<ParticleControlPointSpec>,
+    /// Particle `flags` (bit 0: world space, particles stay put when the system moves).
+    pub flags: u32,
+    /// Sprite-sheet animation cycles per particle lifetime (`sequencemultiplier`).
+    pub sequence_multiplier: f32,
+    /// `animationmode: "randomframe"`: each particle shows one random sheet frame for its whole
+    /// life instead of playing the sequence.
+    pub random_frame: bool,
+    /// Child systems that follow this system's particles.
+    pub children: Vec<ParticleChildSpec>,
+    /// The parsed file of each entry of `children` (`None` when it could not be loaded); filled
+    /// by [`ParticleFile::resolve_children`].
+    pub child_files: Vec<Option<std::sync::Arc<ParticleFile>>>,
+    /// `operator` compiled into typed structs on first use (shared by every instance of this
+    /// file). Edit `operator` before the first step; the cache is not invalidated.
+    compiled_operators: std::sync::OnceLock<std::sync::Arc<[Operator]>>,
+}
+
+/// How a child system is spawned from its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticleChildKind {
+    /// One instance at a fixed offset from the parent system.
+    Static,
+    /// One instance per live parent particle, following it.
+    EventFollow,
+    /// A short burst at each parent particle's spawn position.
+    EventSpawn,
+    /// A short burst where each parent particle dies.
+    EventDeath,
+}
+
+/// One entry of a particle file's `children` array.
+#[derive(Debug, Clone)]
+pub struct ParticleChildSpec {
+    pub name: String,
+    pub kind: ParticleChildKind,
+    pub origin: Vec3,
+    pub scale: Vec3,
+    pub angles: Vec3,
+    pub maxcount: u32,
+    pub probability: f32,
+}
+
+impl ParticleChildSpec {
+    pub fn from_json(v: &Value) -> Self {
+        let kind = match json_string(v, "type", "static")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "eventfollow" => ParticleChildKind::EventFollow,
+            "eventspawn" => ParticleChildKind::EventSpawn,
+            "eventdeath" => ParticleChildKind::EventDeath,
+            // WE omits the key for its default kind, a single fixed instance.
+            _ => ParticleChildKind::Static,
+        };
+        Self {
+            name: json_string(v, "name", ""),
+            kind,
+            origin: parse_vec3_json(v.get("origin"), Vec3::ZERO),
+            scale: parse_vec3_json(v.get("scale"), Vec3::ONE),
+            angles: parse_vec3_json(v.get("angles"), Vec3::ZERO),
+            maxcount: json_u32(v, "maxcount", 10),
+            probability: json_f32(v, "probability", 1.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +256,13 @@ impl ParticleControlPointSpec {
 }
 
 impl ParticleFile {
+    /// The compiled operator list, built once per file.
+    pub(crate) fn operators(&self) -> std::sync::Arc<[Operator]> {
+        self.compiled_operators
+            .get_or_init(|| self.operator.iter().map(Operator::compile).collect())
+            .clone()
+    }
+
     /// Decodes a Wallpaper Engine `particles/*.json` document.
     pub fn from_json_str(src: &str) -> Result<Self, ParticleSpecError> {
         Self::from_json(&Value::parse(src)?)
@@ -219,7 +290,55 @@ impl ParticleFile {
                 .iter()
                 .map(ParticleControlPointSpec::from_json)
                 .collect(),
+            flags: json_u32(v, "flags", 0),
+            sequence_multiplier: json_f32(v, "sequencemultiplier", 1.0),
+            random_frame: v
+                .get("animationmode")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("randomframe")),
+            children: json_array(v, "children")
+                .iter()
+                .map(ParticleChildSpec::from_json)
+                .collect(),
+            child_files: Vec::new(),
+            compiled_operators: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Loads and parses the file of every child system through `read` (a path -> text lookup),
+    /// recursively up to a small depth. Each distinct file is parsed once.
+    pub fn resolve_children(&mut self, read: &dyn Fn(&str) -> Option<String>) {
+        let mut cache = std::collections::HashMap::new();
+        self.resolve_children_cached(read, &mut cache, 0);
+    }
+
+    fn resolve_children_cached(
+        &mut self,
+        read: &dyn Fn(&str) -> Option<String>,
+        cache: &mut std::collections::HashMap<String, Option<std::sync::Arc<ParticleFile>>>,
+        depth: u32,
+    ) {
+        self.child_files.clear();
+        if depth >= 4 {
+            self.child_files = vec![None; self.children.len()];
+            return;
+        }
+        for child in &self.children {
+            let loaded = match cache.get(&child.name) {
+                Some(hit) => hit.clone(),
+                None => {
+                    let parsed = read(&child.name)
+                        .and_then(|t| ParticleFile::from_json_str(&t).ok())
+                        .map(|mut f| {
+                            f.resolve_children_cached(read, cache, depth + 1);
+                            std::sync::Arc::new(f)
+                        });
+                    cache.insert(child.name.clone(), parsed.clone());
+                    parsed
+                }
+            };
+            self.child_files.push(loaded);
+        }
     }
 }
 
@@ -240,20 +359,88 @@ pub struct SingleParticle {
     pub lifetime: f32,
     pub noise_seed: f32,
     pub alive: bool,
+    /// Unique within the system; child instances use it to find the particle they follow.
+    pub id: u64,
+}
+
+/// Scene-object `instanceoverride` multipliers applied on top of the particle preset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleOverrides {
+    pub count: f32,
+    pub rate: f32,
+    pub size: f32,
+    pub alpha: f32,
+    pub lifetime: f32,
+    pub speed: f32,
+    pub brightness: f32,
+    /// Tint multiplied into the particle color (`colorn`).
+    pub color: Vec3,
+}
+
+impl Default for ParticleOverrides {
+    fn default() -> Self {
+        Self {
+            count: 1.0,
+            rate: 1.0,
+            size: 1.0,
+            alpha: 1.0,
+            lifetime: 1.0,
+            speed: 1.0,
+            brightness: 1.0,
+            color: Vec3::ONE,
+        }
+    }
 }
 
 pub struct ParticleSystemInstance {
-    pub spec: ParticleFile,
+    pub overrides: ParticleOverrides,
+    pub spec: std::sync::Arc<ParticleFile>,
     pub particles: Vec<SingleParticle>,
     pub emit_accumulators: Vec<f32>,
     pub control_points: [Vec3; 8],
     pub rng_state: u64,
     pub elapsed_time: f32,
     pub spawned_instantaneous: bool,
+    /// Offset of this system's origin from the layer origin (non-zero for child systems).
+    pub anchor: Vec3,
+    /// World-space systems keep particles where they were emitted when `anchor` moves.
+    pub worldspace: bool,
+    /// Scale applied to particle sizes when drawn (a child's `scale`).
+    pub draw_scale: f32,
+    /// `false` stops spawning (the system drains and can then be dropped).
+    pub emitting: bool,
+    /// Elapsed time after which emission stops (burst children).
+    pub emit_until: Option<f32>,
+    pub(crate) next_id: u64,
+    /// Distinguishes instances of one particle file (mixed into `randomframe`).
+    pub(crate) instance_seed: u64,
+    /// Layer-space positions of particles spawned / dead during the last step.
+    pub(crate) spawn_events: Vec<Vec3>,
+    pub(crate) death_events: Vec<Vec3>,
+    pub(crate) groups: Vec<crate::particle_tree::ChildGroup>,
+    /// Free child-instance slots shared by the whole particle tree.
+    pub(crate) budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ParticleSystemInstance {
     pub fn new(spec: ParticleFile) -> Self {
+        let mut inst = Self::new_unwarmed(std::sync::Arc::new(spec));
+        inst.prewarm();
+        inst
+    }
+
+    /// Runs the `starttime` warm-up (at most 10 s).
+    pub fn prewarm(&mut self) {
+        let prewarm = self.spec.starttime.min(10.0);
+        if prewarm > 0.0 {
+            let steps = (prewarm / 0.05).ceil() as usize;
+            for _ in 0..steps {
+                self.step(0.05, Vec3::ZERO);
+            }
+        }
+    }
+
+    pub fn new_unwarmed(spec: std::sync::Arc<ParticleFile>) -> Self {
         let max_count = spec.maxcount.clamp(1, 10_000) as usize;
         let mut control_points = [Vec3::ZERO; 8];
         for cp in &spec.controlpoint {
@@ -261,23 +448,45 @@ impl ParticleSystemInstance {
                 control_points[cp.id] = parse_vec3_str(&cp.offset, Vec3::ZERO);
             }
         }
-        let mut inst = Self {
+        let inst = Self {
+            worldspace: spec.flags & 1 != 0,
+            anchor: Vec3::ZERO,
+            draw_scale: 1.0,
+            emitting: true,
+            emit_until: None,
+            next_id: 0,
+            instance_seed: 0,
+            spawn_events: Vec::new(),
+            death_events: Vec::new(),
+            groups: Vec::new(),
+            budget: crate::particle_tree::new_budget(),
             emit_accumulators: vec![0.0; spec.emitter.len()],
             particles: Vec::with_capacity(max_count),
             control_points,
             rng_state: 0x853C_49E6_748F_EA9B,
             elapsed_time: 0.0,
             spawned_instantaneous: false,
+            overrides: ParticleOverrides::default(),
             spec,
         };
-        let prewarm = inst.spec.starttime.min(10.0);
-        if prewarm > 0.0 {
-            let steps = (prewarm / 0.05).ceil() as usize;
-            for _ in 0..steps {
-                inst.step(0.05, Vec3::ZERO);
-            }
-        }
+        let mut inst = inst;
+        inst.groups = crate::particle_tree::ChildGroup::build(&inst.spec);
         inst
+    }
+
+    /// Replaces the instance overrides. Particles already alive keep their values; new ones use
+    /// the new multipliers (so a property change shows as the old particles die off).
+    pub fn set_overrides(&mut self, overrides: ParticleOverrides) {
+        self.overrides = overrides;
+    }
+
+    /// Particle cap after the `count` override.
+    fn max_count(&self) -> usize {
+        let base = self.spec.maxcount.clamp(1, 10_000) as f32;
+        // Never above the GPU buffer capacity sized from the preset's own `maxcount`.
+        (base * self.overrides.count.max(0.0))
+            .round()
+            .clamp(0.0, base) as usize
     }
 
     #[inline]
@@ -297,11 +506,20 @@ impl ParticleSystemInstance {
         min + (max - min) * self.rand01()
     }
 
+    /// Steps this system, then its child systems.
     pub fn step(&mut self, dt: f32, cursor_layer_pos: Vec3) {
         if dt <= 0.0 {
             return;
         }
+        self.step_self(dt, cursor_layer_pos);
+        self.step_children(dt, cursor_layer_pos);
+    }
+
+    fn step_self(&mut self, dt: f32, cursor_layer_pos: Vec3) {
         self.elapsed_time += dt;
+        if self.emit_until.is_some_and(|t| self.elapsed_time > t) {
+            self.emitting = false;
+        }
 
         // 1. Update cursor-bound control points
         for cp in &self.spec.controlpoint {
@@ -312,164 +530,72 @@ impl ParticleSystemInstance {
         }
 
         // 2. Spawn new particles from emitters
-        let max_count = self.spec.maxcount.clamp(1, 10_000) as usize;
-        for (e_idx, emitter) in self.spec.emitter.clone().iter().enumerate() {
+        let max_count = self.max_count();
+        let spec = self.spec.clone();
+        for (e_idx, emitter) in spec.emitter.iter().enumerate() {
             let mut to_spawn = 0usize;
             if !self.spawned_instantaneous && emitter.instantaneous > 0 {
                 to_spawn += emitter.instantaneous as usize;
             }
-            self.emit_accumulators[e_idx] += emitter.rate * dt;
+            self.emit_accumulators[e_idx] += emitter.rate * self.overrides.rate.max(0.0) * dt;
             let periodic = self.emit_accumulators[e_idx].floor() as usize;
             self.emit_accumulators[e_idx] -= periodic as f32;
             to_spawn += periodic;
 
+            if !self.emitting {
+                continue;
+            }
             for _ in 0..to_spawn {
                 if self.particles.len() >= max_count {
                     break;
                 }
-                let p = self.spawn_one_particle(emitter);
+                let mut p = self.spawn_one_particle(emitter);
+                if self.worldspace {
+                    p.position += self.anchor;
+                    p.initial_position += self.anchor;
+                }
+                self.next_id += 1;
+                p.id = self.next_id;
+                self.spawn_events.push(if self.worldspace {
+                    p.position
+                } else {
+                    self.anchor + p.position
+                });
                 self.particles.push(p);
             }
         }
         self.spawned_instantaneous = true;
 
         // 3. Run operators and integrate active particles
-        let operators = self.spec.operator.clone();
+        let operators = self.spec.operators();
         let cps = self.control_points;
         let time = self.elapsed_time;
 
+        let (anchor, worldspace) = (self.anchor, self.worldspace);
+        let mut deaths = Vec::new();
         self.particles.retain_mut(|p| {
             p.age += dt;
             if p.age >= p.lifetime {
+                deaths.push(if worldspace {
+                    p.position
+                } else {
+                    anchor + p.position
+                });
                 return false;
             }
             let life_frac = (p.age / p.lifetime.max(0.0001)).clamp(0.0, 1.0);
 
-            for op in &operators {
-                let op_name = op.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                match op_name {
-                    "movement" => {
-                        let gravity = parse_vec3_json(op.get("gravity"), Vec3::ZERO);
-                        let drag = op.get("drag").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        p.velocity += gravity * dt;
-                        p.velocity *= (1.0 - drag * dt).max(0.0);
-                        p.position += p.velocity * dt;
-                    }
-                    "angularmovement" => {
-                        let drag = op.get("drag").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let force = parse_vec3_json(op.get("force"), Vec3::ZERO);
-                        p.angular_velocity += force * dt;
-                        p.angular_velocity *= (1.0 - drag * dt).max(0.0);
-                        p.rotation += p.angular_velocity * dt;
-                    }
-                    "alphafade" => {
-                        let fade_in =
-                            op.get("fadeintime").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
-                        let fade_out = op
-                            .get("fadeouttime")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.8) as f32;
-                        let factor = if life_frac < fade_in && fade_in > 0.0 {
-                            life_frac / fade_in
-                        } else if life_frac > fade_out && fade_out < 1.0 {
-                            1.0 - (life_frac - fade_out) / (1.0 - fade_out)
-                        } else {
-                            1.0
-                        };
-                        p.alpha = p.initial_alpha * factor.clamp(0.0, 1.0);
-                    }
-                    "sizechange" => {
-                        let st = op.get("starttime").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let et = op.get("endtime").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                        let sv =
-                            op.get("startvalue").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                        let ev = op.get("endvalue").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let t = ((life_frac - st) / (et - st).max(0.0001)).clamp(0.0, 1.0);
-                        p.size = p.initial_size * (sv + (ev - sv) * t);
-                    }
-                    "colorchange" => {
-                        let st = op.get("starttime").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let et = op.get("endtime").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-                        let sv = parse_vec3_json(op.get("startvalue"), Vec3::ONE);
-                        let ev = parse_vec3_json(op.get("endvalue"), Vec3::ONE);
-                        let t = ((life_frac - st) / (et - st).max(0.0001)).clamp(0.0, 1.0);
-                        p.color = p.initial_color * sv.lerp(ev, t);
-                    }
-                    "oscillateposition" => {
-                        let freq = op
-                            .get("frequencymax")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(1.0) as f32;
-                        let scale =
-                            op.get("scalemax").and_then(|v| v.as_f64()).unwrap_or(5.0) as f32;
-                        let mask = parse_vec3_json(op.get("mask"), Vec3::new(1.0, 1.0, 0.0));
-                        let wave =
-                            (time * freq + p.noise_seed * std::f32::consts::TAU).sin() * scale;
-                        p.position += mask * wave * dt;
-                    }
-                    "turbulence" => {
-                        let speed =
-                            op.get("speedmax").and_then(|v| v.as_f64()).unwrap_or(50.0) as f32;
-                        let scale = op.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.01) as f32;
-                        let mask = parse_vec3_json(op.get("mask"), Vec3::new(1.0, 1.0, 0.0));
-                        let nx = ((p.position.y * scale + time + p.noise_seed).sin()
-                            + (p.position.x * scale * 0.7 - time).cos())
-                            * 0.5;
-                        let ny = ((p.position.x * scale + time * 1.3 + p.noise_seed).cos()
-                            - (p.position.y * scale * 0.7 + time).sin())
-                            * 0.5;
-                        p.velocity += Vec3::new(nx, ny, 0.0) * mask * speed * dt;
-                    }
-                    "vortex" => {
-                        let cp_id =
-                            op.get("controlpoint").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let center = cps.get(cp_id).copied().unwrap_or(Vec3::ZERO)
-                            + parse_vec3_json(op.get("offset"), Vec3::ZERO);
-                        let axis = parse_vec3_json(op.get("axis"), Vec3::Z).normalize_or_zero();
-                        let r_vec = p.position - center;
-                        let dist = r_vec.length().max(0.001);
-                        let inner = op
-                            .get("distanceinner")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0) as f32;
-                        let outer = op
-                            .get("distanceouter")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(250.0) as f32;
-                        let s_in = op
-                            .get("speedinner")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(100.0) as f32;
-                        let s_out =
-                            op.get("speedouter").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                        let t = ((dist - inner) / (outer - inner).max(0.001)).clamp(0.0, 1.0);
-                        let speed = s_in + (s_out - s_in) * t;
-                        let tangent = axis.cross(r_vec / dist).normalize_or_zero();
-                        p.velocity += tangent * speed * dt;
-                    }
-                    "controlpointattract" => {
-                        let cp_id =
-                            op.get("controlpoint").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let center = cps.get(cp_id).copied().unwrap_or(Vec3::ZERO)
-                            + parse_vec3_json(op.get("origin"), Vec3::ZERO);
-                        let scale =
-                            op.get("scale").and_then(|v| v.as_f64()).unwrap_or(200.0) as f32;
-                        let threshold = op
-                            .get("threshold")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(512.0) as f32;
-                        let to_cp = center - p.position;
-                        let dist = to_cp.length();
-                        if dist > 0.001 && dist < threshold {
-                            let falloff = 1.0 - (dist / threshold);
-                            p.velocity += (to_cp / dist) * scale * falloff * dt;
-                        }
-                    }
-                    _ => {}
-                }
+            for op in operators.iter() {
+                op.apply(p, dt, life_frac, time, &cps);
             }
-            true
+            // A NaN / inf from a bad expression would corrupt the vertex buffer.
+            p.position.is_finite()
+                && p.velocity.is_finite()
+                && p.size.is_finite()
+                && p.alpha.is_finite()
+                && p.rotation.is_finite()
         });
+        self.death_events = deaths;
     }
 
     fn spawn_one_particle(&mut self, emitter: &ParticleEmitterSpec) -> SingleParticle {
@@ -517,9 +643,11 @@ impl ParticleSystemInstance {
             lifetime: 5.0,
             noise_seed: self.rand01(),
             alive: true,
+            id: 0,
         };
 
-        for init in &self.spec.initializer.clone() {
+        let spec = self.spec.clone();
+        for init in &spec.initializer {
             let name = init.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match name {
                 "lifetimerandom" => {
@@ -580,6 +708,15 @@ impl ParticleSystemInstance {
             }
         }
 
+        let ov = self.overrides;
+        p.lifetime = (p.lifetime * ov.lifetime).max(0.05);
+        p.size *= ov.size;
+        p.initial_size *= ov.size;
+        p.alpha *= ov.alpha;
+        p.initial_alpha *= ov.alpha;
+        p.velocity *= ov.speed;
+        p.color *= ov.color * ov.brightness;
+        p.initial_color *= ov.color * ov.brightness;
         p
     }
 
@@ -600,7 +737,7 @@ impl ParticleSystemInstance {
                     texcoord_rot_size: [uv[0], uv[1], p.rotation.z, p.size * 0.5],
                     color: [p.color.x, p.color.y, p.color.z, p.alpha],
                     velocity_life: [p.velocity.x, p.velocity.y, p.velocity.z, norm_age],
-                    rotation_xy: [p.rotation.x, p.rotation.y],
+                    rotation_xy: uv,
                 });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -677,6 +814,248 @@ impl ParticleSystemInstance {
     }
 }
 
+/// A particle operator parsed once from its JSON object (defaults match Wallpaper Engine's).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Operator {
+    Movement {
+        gravity: Vec3,
+        drag: f32,
+    },
+    AngularMovement {
+        drag: f32,
+        force: Vec3,
+    },
+    AlphaFade {
+        fade_in: f32,
+        fade_out: f32,
+    },
+    SizeChange {
+        start: f32,
+        end: f32,
+        start_value: f32,
+        end_value: f32,
+    },
+    ColorChange {
+        start: f32,
+        end: f32,
+        start_value: Vec3,
+        end_value: Vec3,
+    },
+    /// Each particle and axis gets its own frequency, scale and phase inside the min..max
+    /// ranges (linux-wallpaperengine `createOscillatePositionOperator`).
+    OscillatePosition {
+        frequency: (f32, f32),
+        scale: (f32, f32),
+        phase: (f32, f32),
+        mask: Vec3,
+    },
+    /// Noise force of strength `speed` (the middle of `speedmin..speedmax`).
+    Turbulence {
+        speed: f32,
+        scale: f32,
+        time_scale: f32,
+        phase: f32,
+        mask: Vec3,
+    },
+    Vortex {
+        control_point: usize,
+        offset: Vec3,
+        axis: Vec3,
+        inner: f32,
+        outer: f32,
+        speed_inner: f32,
+        speed_outer: f32,
+    },
+    ControlPointAttract {
+        control_point: usize,
+        origin: Vec3,
+        scale: f32,
+        threshold: f32,
+    },
+    /// Unknown operator: ignored.
+    Other,
+}
+
+impl Operator {
+    pub(crate) fn compile(op: &Value) -> Self {
+        let num = |key: &str, default: f32| {
+            op.get(key)
+                .and_then(|v| v.as_f64())
+                .map_or(default, |n| n as f32)
+        };
+        let vec3 = |key: &str, default: Vec3| parse_vec3_json(op.get(key), default);
+        let index = |key: &str| op.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        match op.get("name").and_then(|v| v.as_str()).unwrap_or("") {
+            "movement" => Self::Movement {
+                gravity: vec3("gravity", Vec3::ZERO),
+                drag: num("drag", 0.0),
+            },
+            "angularmovement" => Self::AngularMovement {
+                drag: num("drag", 0.0),
+                force: vec3("force", Vec3::ZERO),
+            },
+            // Wallpaper Engine's defaults are 0.5 / 0.5 (linux-wallpaperengine's ObjectParser
+            // agrees): fade in over the first half, out over the second.
+            "alphafade" => Self::AlphaFade {
+                fade_in: num("fadeintime", 0.5),
+                fade_out: num("fadeouttime", 0.5),
+            },
+            "sizechange" => Self::SizeChange {
+                start: num("starttime", 0.0),
+                end: num("endtime", 1.0),
+                start_value: num("startvalue", 1.0),
+                end_value: num("endvalue", 0.0),
+            },
+            "colorchange" => Self::ColorChange {
+                start: num("starttime", 0.0),
+                end: num("endtime", 1.0),
+                start_value: vec3("startvalue", Vec3::ONE),
+                end_value: vec3("endvalue", Vec3::ONE),
+            },
+            "oscillateposition" => Self::OscillatePosition {
+                frequency: (num("frequencymin", 0.0), num("frequencymax", 5.0)),
+                scale: (num("scalemin", 0.0), num("scalemax", 10.0)),
+                phase: (num("phasemin", 0.0), num("phasemax", std::f32::consts::TAU)),
+                mask: vec3("mask", Vec3::new(1.0, 1.0, 0.0)),
+            },
+            "turbulence" => {
+                let max = num("speedmax", 50.0);
+                let min = num("speedmin", max);
+                Self::Turbulence {
+                    speed: (min + max) * 0.5,
+                    scale: num("scale", 0.01),
+                    time_scale: num("timescale", 1.0),
+                    phase: (num("phasemin", 0.0) + num("phasemax", 0.0)) * 0.5,
+                    mask: vec3("mask", Vec3::new(1.0, 1.0, 0.0)),
+                }
+            }
+            "vortex" => Self::Vortex {
+                control_point: index("controlpoint"),
+                offset: vec3("offset", Vec3::ZERO),
+                axis: vec3("axis", Vec3::Z).normalize_or_zero(),
+                inner: num("distanceinner", 0.0),
+                outer: num("distanceouter", 250.0),
+                speed_inner: num("speedinner", 100.0),
+                speed_outer: num("speedouter", 0.0),
+            },
+            "controlpointattract" => Self::ControlPointAttract {
+                control_point: index("controlpoint"),
+                origin: vec3("origin", Vec3::ZERO),
+                scale: num("scale", 200.0),
+                threshold: num("threshold", 512.0),
+            },
+            _ => Self::Other,
+        }
+    }
+
+    /// Advances one particle by `dt` (`life_frac` is its normalized age, `time` the system clock).
+    fn apply(&self, p: &mut SingleParticle, dt: f32, life_frac: f32, time: f32, cps: &[Vec3; 8]) {
+        match *self {
+            Self::Movement { gravity, drag } => {
+                p.velocity += gravity * dt;
+                p.velocity *= (1.0 - drag * dt).max(0.0);
+                p.position += p.velocity * dt;
+            }
+            Self::AngularMovement { drag, force } => {
+                p.angular_velocity += force * dt;
+                p.angular_velocity *= (1.0 - drag * dt).max(0.0);
+                p.rotation += p.angular_velocity * dt;
+            }
+            Self::AlphaFade { fade_in, fade_out } => {
+                let factor = if life_frac < fade_in && fade_in > 0.0 {
+                    life_frac / fade_in
+                } else if life_frac > fade_out && fade_out < 1.0 {
+                    1.0 - (life_frac - fade_out) / (1.0 - fade_out)
+                } else {
+                    1.0
+                };
+                p.alpha = p.initial_alpha * factor.clamp(0.0, 1.0);
+            }
+            Self::SizeChange {
+                start,
+                end,
+                start_value,
+                end_value,
+            } => {
+                let t = ((life_frac - start) / (end - start).max(0.0001)).clamp(0.0, 1.0);
+                p.size = p.initial_size * (start_value + (end_value - start_value) * t);
+            }
+            Self::ColorChange {
+                start,
+                end,
+                start_value,
+                end_value,
+            } => {
+                let t = ((life_frac - start) / (end - start).max(0.0001)).clamp(0.0, 1.0);
+                p.color = p.initial_color * start_value.lerp(end_value, t);
+            }
+            Self::OscillatePosition {
+                frequency,
+                scale,
+                phase,
+                mask,
+            } => {
+                // Velocity form of `scale * cos(freq * age + phase)`, per axis.
+                let mut delta = Vec3::ZERO;
+                for axis in 0..3 {
+                    let k = axis as f32;
+                    let w = lerp(frequency.0, frequency.1, seeded(p.noise_seed, 1.0 + k));
+                    let s = lerp(scale.0, scale.1, seeded(p.noise_seed, 4.0 + k));
+                    let ph = lerp(phase.0, phase.1, seeded(p.noise_seed, 7.0 + k));
+                    delta[axis] = -s * w * (w * p.age + ph).sin() * dt;
+                }
+                p.position += delta * mask;
+            }
+            Self::Turbulence {
+                speed,
+                scale,
+                time_scale,
+                phase,
+                mask,
+            } => {
+                let t = phase + wrap_turbulence_time(time_scale, time);
+                let q = p.position * scale * 2.0;
+                let nx = ((q.y + t + p.noise_seed).sin() + (q.x * 0.7 - t).cos()) * 0.5;
+                let ny = ((q.x + t * 1.3 + p.noise_seed).cos() - (q.y * 0.7 + t).sin()) * 0.5;
+                let dir = Vec3::new(nx, ny, 0.0).normalize_or_zero();
+                p.velocity += dir * mask * speed * dt;
+            }
+            Self::Vortex {
+                control_point,
+                offset,
+                axis,
+                inner,
+                outer,
+                speed_inner,
+                speed_outer,
+            } => {
+                let center = cps.get(control_point).copied().unwrap_or(Vec3::ZERO) + offset;
+                let r_vec = p.position - center;
+                let dist = r_vec.length().max(0.001);
+                let t = ((dist - inner) / (outer - inner).max(0.001)).clamp(0.0, 1.0);
+                let speed = speed_inner + (speed_outer - speed_inner) * t;
+                let tangent = axis.cross(r_vec / dist).normalize_or_zero();
+                p.velocity += tangent * speed * dt;
+            }
+            Self::ControlPointAttract {
+                control_point,
+                origin,
+                scale,
+                threshold,
+            } => {
+                let center = cps.get(control_point).copied().unwrap_or(Vec3::ZERO) + origin;
+                let to_cp = center - p.position;
+                let dist = to_cp.length();
+                if dist > 0.001 && dist < threshold {
+                    let falloff = 1.0 - (dist / threshold);
+                    p.velocity += (to_cp / dist) * scale * falloff * dt;
+                }
+            }
+            Self::Other => {}
+        }
+    }
+}
+
 pub fn parse_vec3_str(s: &str, default: Vec3) -> Vec3 {
     let mut it = s.split_whitespace().filter_map(|p| p.parse::<f32>().ok());
     match (it.next(), it.next(), it.next()) {
@@ -692,5 +1071,169 @@ fn parse_vec3_json(val: Option<&Value>, default: Vec3) -> Vec3 {
         Some(Value::String(s)) => parse_vec3_str(s, default),
         Some(Value::Number(n)) => Vec3::splat(*n as f32),
         _ => default,
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// A stable value in 0..1 from a particle's `noise_seed` and a per-use key.
+/// `time_scale * time` reduced by a whole number of periods of every trig term it feeds
+/// (`t` and `1.3 t` are both periodic in `20 pi`), so the noise keeps its precision after days.
+fn wrap_turbulence_time(time_scale: f32, time: f32) -> f32 {
+    const PERIOD: f32 = 20.0 * std::f32::consts::PI;
+    let v = time_scale * time;
+    if !v.is_finite() {
+        return 0.0;
+    }
+    // Short runs keep the exact original value.
+    if v.abs() < PERIOD {
+        return v;
+    }
+    (time.rem_euclid(PERIOD / time_scale.abs()) * time_scale).rem_euclid(PERIOD)
+}
+
+fn seeded(seed: f32, key: f32) -> f32 {
+    ((seed * 12.9898 + key * 78.233).sin() * 43_758.547)
+        .fract()
+        .abs()
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn system() -> ParticleSystemInstance {
+        let spec = ParticleFile::from_json_str(
+            r#"{ "maxcount": 100, "emitter": [ { "name": "boxrandom", "rate": 100,
+                 "distancemax": "10 10 0" } ],
+                 "initializer": [ { "name": "sizerandom", "min": 10, "max": 10 },
+                                  { "name": "alpharandom", "min": 1, "max": 1 } ] }"#,
+        )
+        .unwrap();
+        ParticleSystemInstance::new(spec)
+    }
+
+    #[test]
+    fn instance_overrides_scale_count_size_alpha_and_color() {
+        let mut base = system();
+        base.step(1.0, Vec3::ZERO);
+        assert_eq!(base.particles.len(), 100);
+
+        let mut ov = system();
+        ov.set_overrides(ParticleOverrides {
+            count: 0.5,
+            size: 2.0,
+            alpha: 0.5,
+            color: Vec3::new(1.0, 0.0, 0.0),
+            ..ParticleOverrides::default()
+        });
+        ov.step(1.0, Vec3::ZERO);
+        assert_eq!(ov.particles.len(), 50);
+        let p = &ov.particles[0];
+        assert_eq!((p.size, p.alpha), (20.0, 0.5));
+        assert_eq!(p.color, Vec3::new(1.0, 0.0, 0.0));
+
+        let mut slow = system();
+        slow.set_overrides(ParticleOverrides {
+            rate: 0.1,
+            ..ParticleOverrides::default()
+        });
+        slow.step(1.0, Vec3::ZERO);
+        assert_eq!(slow.particles.len(), 10);
+    }
+    fn particle() -> SingleParticle {
+        SingleParticle {
+            position: Vec3::ZERO,
+            initial_position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            color: Vec3::ONE,
+            initial_color: Vec3::ONE,
+            alpha: 1.0,
+            initial_alpha: 1.0,
+            size: 10.0,
+            initial_size: 10.0,
+            age: 0.0,
+            lifetime: 1.0,
+            noise_seed: 0.0,
+            alive: true,
+            id: 1,
+        }
+    }
+
+    fn compile(json: &str) -> Operator {
+        Operator::compile(&Value::parse(json).unwrap())
+    }
+
+    #[test]
+    fn operators_compile_with_wallpaper_engine_defaults() {
+        assert_eq!(
+            compile(r#"{"name":"alphafade"}"#),
+            Operator::AlphaFade {
+                fade_in: 0.5,
+                fade_out: 0.5
+            }
+        );
+        assert_eq!(
+            compile(r#"{"name":"movement","gravity":"0 -100 0","drag":2}"#),
+            Operator::Movement {
+                gravity: Vec3::new(0.0, -100.0, 0.0),
+                drag: 2.0
+            }
+        );
+        assert_eq!(compile(r#"{"name":"nope"}"#), Operator::Other);
+        assert_eq!(compile(r#"{}"#), Operator::Other);
+    }
+
+    #[test]
+    fn compiled_operators_move_and_fade_a_particle() {
+        let cps = [Vec3::ZERO; 8];
+        let mut p = particle();
+        let gravity = compile(r#"{"name":"movement","gravity":"0 -10 0"}"#);
+        gravity.apply(&mut p, 0.5, 0.0, 0.0, &cps);
+        assert_eq!(p.velocity, Vec3::new(0.0, -5.0, 0.0));
+        assert_eq!(p.position, Vec3::new(0.0, -2.5, 0.0));
+
+        let fade = compile(r#"{"name":"alphafade","fadeintime":0.5,"fadeouttime":0.5}"#);
+        fade.apply(&mut p, 0.0, 0.25, 0.0, &cps);
+        assert!((p.alpha - 0.5).abs() < 1e-6);
+        fade.apply(&mut p, 0.0, 0.75, 0.0, &cps);
+        assert!((p.alpha - 0.5).abs() < 1e-6);
+
+        let size = compile(r#"{"name":"sizechange","startvalue":1,"endvalue":0}"#);
+        size.apply(&mut p, 0.0, 0.5, 0.0, &cps);
+        assert!((p.size - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn operators_are_compiled_once_per_file() {
+        let file = ParticleFile::from_json_str(
+            r#"{"maxcount":1,"operator":[{"name":"movement"},{"name":"alphafade"}]}"#,
+        )
+        .unwrap();
+        let a = file.operators();
+        let b = file.operators();
+        assert_eq!(a.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+}
+
+#[cfg(test)]
+mod round13_tests {
+    use super::wrap_turbulence_time;
+
+    #[test]
+    fn turbulence_time_wraps_without_changing_the_phase() {
+        let period = 20.0 * std::f32::consts::PI;
+        let small = wrap_turbulence_time(1.5, 3.0);
+        assert!((small - 4.5).abs() < 1e-4);
+        let big = wrap_turbulence_time(1.5, 1.0e6);
+        assert!((0.0..period).contains(&big));
+        assert_eq!(wrap_turbulence_time(0.0, 5.0), 0.0);
+        assert_eq!(wrap_turbulence_time(-1.5, 3.0), -4.5);
+        assert_eq!(wrap_turbulence_time(1.0, f32::NAN), 0.0);
     }
 }

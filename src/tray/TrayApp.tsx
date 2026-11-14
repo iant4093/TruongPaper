@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { Thumb } from '../components/ui';
-import { OFFLINE_NOTICE, formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL } from '../lib/format';
+import { OFFLINE_NOTICE, formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL, wallpaperPreviewSrc } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { WallpaperSource } from '../types/ipc';
 import { LoadErrorCard } from '../components/LoadErrorCard';
@@ -15,7 +15,7 @@ export const TrayApp: React.FC = () => {
   const monitors = useAppStore((s) => s.monitors);
   const wallpapers = useAppStore((s) => s.wallpapers);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
-  const rotateNextPhoto = useAppStore((s) => s.rotateNextPhoto);
+  const playbackNext = useAppStore((s) => s.playbackNext);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setPhotoFavorite = useAppStore((s) => s.setPhotoFavorite);
   const blacklistAndSkipPhoto = useAppStore((s) => s.blacklistAndSkipPhoto);
@@ -36,7 +36,7 @@ export const TrayApp: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     let cleanup: (() => void) | undefined;
-    void initAppListeners()
+    void initAppListeners({ light: true })
       .then((fn) => {
         if (cancelled) fn();
         else cleanup = fn;
@@ -87,9 +87,10 @@ export const TrayApp: React.FC = () => {
   const isPaused = activeMonitor?.userPaused ?? false;
   const { wallpaper: currentWallpaper, photo: currentPhoto } =
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
-  const canRotate = !!currentPhoto || activeMonitor?.activeSource.kind === 'photo_api';
+  const isPlaylist = activeMonitor?.activeSource.kind === 'playlist';
+  const canRotate = isPlaylist || activeMonitor?.activeSource.kind === 'photo_api';
   const currentTitle = currentWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
-  const currentPreview = currentWallpaper?.previewPath || photoPreviewSrc(currentPhoto);
+  const currentPreview = wallpaperPreviewSrc(currentWallpaper) || photoPreviewSrc(currentPhoto);
   const currentDetails = currentWallpaper
     ? `${WALLPAPER_TYPE_LABEL[currentWallpaper.type]} · ${formatBytes(currentWallpaper.bytes)}`
     : currentPhoto?.width && currentPhoto?.height
@@ -114,7 +115,7 @@ export const TrayApp: React.FC = () => {
     setSwitching(true);
     setActionError(null);
     try {
-      if (canRotate) await rotateNextPhoto(activeMonitorId);
+      if (canRotate) await playbackNext(activeMonitorId);
       else await applyMonitorSource(activeMonitorId, { kind: 'photo_api' });
     } catch (error) {
       setActionError(String(error));
@@ -141,13 +142,15 @@ export const TrayApp: React.FC = () => {
             style={{ padding: '5px 12px', fontSize: 12 }}
             onClick={async () => {
               // Bring the main studio window forward, then dismiss this popover.
-              const studio = await WebviewWindow.getByLabel('main');
-              if (studio) {
-                await studio.unminimize().catch(() => {});
-                await studio.show();
-                await studio.setFocus();
-              }
-              await getCurrentWebviewWindow().hide();
+              try {
+                const studio = await WebviewWindow.getByLabel('main');
+                if (studio) {
+                  await studio.unminimize().catch(() => {});
+                  await studio.show();
+                  await studio.setFocus();
+                }
+                await getCurrentWebviewWindow().hide();
+              } catch (error) { setActionError(String(error)); }
             }}
           >
             Studio
@@ -192,7 +195,7 @@ export const TrayApp: React.FC = () => {
               disabled={!activeMonitorId || switching}
               onClick={() => void showPhotos()}
             >
-              {switching ? 'Loading photo…' : canRotate ? 'Next photo' : 'Use photos'}
+              {switching ? 'Loading…' : isPlaylist ? 'Next in playlist' : canRotate ? 'Next photo' : 'Use photos'}
             </button>
           </div>
 

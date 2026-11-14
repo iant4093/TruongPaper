@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "xray",
+	"name": "X-Ray",
+	"description": "TruongPaper built-in x-ray effect",
+	"group": "interactive",
+	"passes": [
+		{
+			"material": "materials/effects/xray.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/xray.json",
+		"shaders/effects/xray.frag",
+		"shaders/effects/xray.vert"
+	]
+}

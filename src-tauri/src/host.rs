@@ -153,6 +153,8 @@ pub struct MonitorRuntime {
     pub audio_reactive: bool,
     /// Per-display output volume `0..=1`; multiplies `adjustments.volume`.
     pub monitor_volume: f32,
+    /// Transition length set by the playlist on this display; `None` uses the global setting.
+    pub transition_secs: Option<f32>,
 }
 
 impl Default for MonitorRuntime {
@@ -169,6 +171,7 @@ impl Default for MonitorRuntime {
             adjustments: UniversalAdjustments::default(),
             audio_reactive: false,
             monitor_volume: 1.0,
+            transition_secs: None,
         }
     }
 }
@@ -273,13 +276,25 @@ impl WallpaperHost {
     /// Records that `generation` of `monitor_id` reached the screen. `true` the first time it is
     /// recorded for that generation (the caller emits `wallpaper://loaded` then).
     pub fn note_presented(&self, monitor_id: &str, generation: u64) -> bool {
-        if let Some(runtime) = self.monitors.lock().get_mut(monitor_id) {
-            if runtime.generation == generation && runtime.presented_generation != generation {
-                runtime.presented_generation = generation;
-                return true;
-            }
+        let first = self
+            .monitors
+            .lock()
+            .get_mut(monitor_id)
+            .is_some_and(|runtime| {
+                if runtime.generation == generation && runtime.presented_generation != generation {
+                    runtime.presented_generation = generation;
+                    true
+                } else {
+                    false
+                }
+            });
+        if first {
+            // The webview bridge keeps the old Web/Video window over the desktop until the new
+            // photo or scene is on screen. Without this wake it only re-checked on the next
+            // unrelated change, so the old wallpaper could stay visible indefinitely.
+            self.bump();
         }
-        false
+        first
     }
 
     /// Wakes the render loop and the webview bridge (e.g. a background decode finished or a
@@ -666,6 +681,14 @@ impl WallpaperHost {
         self.bump();
     }
 
+    /// The playlist on `monitor_id` sets its own transition length (`None`: global setting).
+    pub fn set_transition_secs(&self, monitor_id: &str, secs: Option<f32>) {
+        if let Some(rt) = self.monitors.lock().get_mut(monitor_id) {
+            rt.transition_secs = secs;
+        }
+        self.bump();
+    }
+
     pub fn monitor_volume(&self, monitor_id: &str) -> f32 {
         self.monitors
             .lock()
@@ -930,8 +953,12 @@ mod tests {
         // Unchanged: times out with the same epoch.
         let now = host.epoch();
         assert_eq!(host.wait_for_change(now, Duration::from_millis(20)), now);
+        let before = host.epoch();
         assert!(host.note_presented("A", generation));
+        assert!(host.epoch() > before, "presenting wakes the webview bridge");
+        let after = host.epoch();
         assert!(!host.note_presented("A", generation));
+        assert_eq!(host.epoch(), after, "a repeat present is not a change");
     }
 
     #[test]

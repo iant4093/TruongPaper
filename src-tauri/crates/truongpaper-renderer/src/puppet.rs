@@ -292,6 +292,29 @@ pub fn parse_mdl_skeleton(
     })
 }
 
+/// Like [`parse_mdl_skeleton`], but a mesh with no `MDLS` section (an unskinned puppet) gets a
+/// single identity root bone and no animations, so every vertex stays at its rest position.
+pub fn parse_mdl_skeleton_or_rest(
+    bytes: &[u8],
+    mesh: &ParsedMdlMesh,
+) -> Result<PuppetSkeleton, PuppetError> {
+    if mesh.section("MDLS").is_some() {
+        return parse_mdl_skeleton(bytes, mesh);
+    }
+    let bones = vec![PuppetBone {
+        name: "root".to_string(),
+        parent: None,
+        transform: Mat4::IDENTITY,
+    }];
+    let offsets = bind_offsets(&bones);
+    Ok(PuppetSkeleton {
+        version: 0,
+        bones,
+        animations: Vec::new(),
+        offsets,
+    })
+}
+
 fn parse_mdla(
     bytes: &[u8],
     offset: usize,
@@ -309,6 +332,7 @@ fn parse_mdla(
     r.check_count(anim_num, 4 * 6, "animation")?;
 
     let mut out = Vec::with_capacity(anim_num);
+    let mut frames_left = MAX_TOTAL_FRAMES;
     for a in 0..anim_num {
         let mut id = 0i32;
         while id == 0 {
@@ -344,6 +368,12 @@ fn parse_mdla(
             }
             let n = (size / MDLA_FRAME_BYTES) as usize;
             r.check_count(n, MDLA_FRAME_BYTES as usize, "frame")?;
+            frames_left = frames_left
+                .checked_sub(n)
+                .ok_or(PuppetError::CountTooLarge {
+                    what: "total frame",
+                    count: n,
+                })?;
             let mut frames = Vec::with_capacity(n);
             for _ in 0..n {
                 frames.push(PuppetFrame {
@@ -354,18 +384,23 @@ fn parse_mdla(
             }
             bone_frames.push(frames);
         }
-        if extended_layout {
-            // Extended mesh exports pad the next clip's ID with byte-sized fields.
-            let padding = if version >= 6 { 3 } else { 2 };
-            r.skip(padding, "extended MDLA trailer")?;
-        } else if version == 3 {
-            r.skip(1, "MDLA3 trailer")?;
+        let tracks_end = r.pos;
+        let standard = skip_mdla_trailer(&mut r, version, extended_layout);
+        if a + 1 == anim_num {
+            standard?;
         } else {
-            let n = r.u32("animation event count")? as usize;
-            r.check_count(n, 5, "animation event")?;
-            for _ in 0..n {
-                let _t = r.f32("animation event time")?;
-                let _s = r.cstr("animation event name")?;
+            if standard.is_err() || !plausible_header(bytes, r.pos) {
+                // Newer exports append extra per-clip blocks (e.g. float tracks); resync on the
+                // next valid clip header instead of trusting a fixed trailer size.
+                match find_next_header(bytes, tracks_end) {
+                    Some(pos) => r.pos = pos,
+                    None => {
+                        return Err(PuppetError::Truncated {
+                            offset: tracks_end,
+                            what: "next animation header",
+                        })
+                    }
+                }
             }
         }
         out.push(PuppetAnimation {
@@ -380,6 +415,101 @@ fn parse_mdla(
     Ok(out)
 }
 
+fn skip_mdla_trailer(
+    r: &mut Reader<'_>,
+    version: u32,
+    extended_layout: bool,
+) -> Result<(), PuppetError> {
+    if extended_layout {
+        // Extended mesh exports pad the next clip's ID with byte-sized fields.
+        r.skip(if version >= 6 { 3 } else { 2 }, "extended MDLA trailer")
+    } else if version == 3 {
+        r.skip(1, "MDLA3 trailer")
+    } else {
+        let n = r.u32("animation event count")? as usize;
+        r.check_count(n, 5, "animation event")?;
+        for _ in 0..n {
+            let _t = r.f32("animation event time")?;
+            let _s = r.cstr("animation event name")?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether a well-formed animation clip header starts at `pos` (after optional zero padding).
+fn plausible_header(bytes: &[u8], pos: usize) -> bool {
+    let mut r = Reader { bytes, pos };
+    let check = |r: &mut Reader<'_>| -> Result<bool, PuppetError> {
+        let id = r.i32("id")?;
+        if !(1..=100_000).contains(&id) {
+            return Ok(false);
+        }
+        let _ = r.i32("unk")?;
+        let mut name = r.cstr("name")?;
+        if name.is_empty() {
+            name = r.cstr("name")?;
+        }
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            return Ok(false);
+        }
+        if !matches!(r.cstr("mode")?.as_str(), "loop" | "single" | "mirror") {
+            return Ok(false);
+        }
+        let fps = r.f32("fps")?;
+        let length = r.i32("length")?;
+        let _ = r.i32("unk2")?;
+        let bones = r.u32("bones")? as usize;
+        // Slow clips exist: 2477602742's FrontPole_puppet.mdl has a 0.48 fps "Animation 2".
+        Ok(fps.is_finite()
+            && fps > 0.0
+            && fps <= 240.0
+            && (1..=100_000).contains(&length)
+            && bones <= 4096
+            && bones * 8 <= r.remaining())
+    };
+    check(&mut r).unwrap_or(false)
+}
+
+/// Most animation frames (over all clips and bones) one file may hold.
+const MAX_TOTAL_FRAMES: usize = 2_000_000;
+/// Farthest `find_next_header` looks ahead, in bytes.
+const MAX_HEADER_SCAN: usize = 4 * 1024 * 1024;
+
+/// First byte offset at or after `from` where a clip header starts.
+fn find_next_header(bytes: &[u8], from: usize) -> Option<usize> {
+    let end = bytes
+        .len()
+        .saturating_sub(24)
+        .min(from.saturating_add(MAX_HEADER_SCAN));
+    let mut p = (from..end).find(|&p| plausible_header(bytes, p))?;
+    // Zero padding before the id can also parse as a shifted header; take the last of the run.
+    while plausible_header(bytes, p + 1) {
+        p += 1;
+    }
+    Some(p)
+}
+
+/// `m.inverse()`, or identity when `m` is singular or the result is not finite (a bone scaled
+/// to zero would otherwise fill the mesh with NaN).
+fn safe_inverse(m: &Mat4) -> Mat4 {
+    let det = m.determinant();
+    // Relative to the column lengths (Hadamard's bound), so a small uniform scale is still
+    // invertible while a collapsed axis is not.
+    let bound: f32 = [m.x_axis, m.y_axis, m.z_axis, m.w_axis]
+        .iter()
+        .map(|c| c.length())
+        .product();
+    if !det.is_finite() || !bound.is_finite() || bound <= 0.0 || det.abs() < bound * 1e-6 {
+        return Mat4::IDENTITY;
+    }
+    let inv = m.inverse();
+    if inv.to_cols_array().iter().all(|v| v.is_finite()) {
+        inv
+    } else {
+        Mat4::IDENTITY
+    }
+}
+
 /// `combined[i] = combined[parent] * transform`; returns `inverse(combined[i])`.
 fn bind_offsets(bones: &[PuppetBone]) -> Vec<Mat4> {
     let mut combined: Vec<Mat4> = Vec::with_capacity(bones.len());
@@ -390,7 +520,7 @@ fn bind_offsets(bones: &[PuppetBone]) -> Vec<Mat4> {
             .unwrap_or(Mat4::IDENTITY);
         combined.push(parent * b.transform);
     }
-    combined.iter().map(|m| m.inverse()).collect()
+    combined.iter().map(safe_inverse).collect()
 }
 
 /// `Rz(angle.z) * Ry(angle.y) * Rx(angle.x)`.
@@ -689,4 +819,96 @@ pub fn puppet_combos(bone_count: usize) -> HashMap<String, i32> {
             i32::try_from(bone_count).unwrap_or(i32::MAX),
         ),
     ])
+}
+
+#[cfg(test)]
+mod resync_tests {
+    use super::*;
+
+    fn header(id: i32, bones: u32) -> Vec<u8> {
+        header_fps(id, bones, 30.0)
+    }
+
+    fn header_fps(id: i32, bones: u32, fps: f32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend(id.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        b.extend(b"wave\0loop\0");
+        b.extend(fps.to_le_bytes());
+        b.extend(10i32.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        b.extend(bones.to_le_bytes());
+        b.extend(vec![0u8; bones as usize * 8]);
+        b
+    }
+
+    #[test]
+    fn finds_clip_header_after_unknown_extra_block() {
+        let mut bytes = vec![0u8, 0, 0, 0, 1, 0xc4, 3, 0, 0, 0, 0];
+        bytes.extend(vec![0u8; 29]);
+        let at = bytes.len();
+        bytes.extend(header(241, 2));
+        assert_eq!(find_next_header(&bytes, 0), Some(at));
+        assert!(!plausible_header(&bytes, 0));
+    }
+
+    /// Regression (2477602742): a 0.48 fps clip header is still a clip header.
+    #[test]
+    fn slow_clip_header_is_plausible() {
+        let bytes = header_fps(159, 2, 0.483);
+        assert!(plausible_header(&bytes, 0));
+        assert!(!plausible_header(&header_fps(159, 2, 0.0), 0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_uniform_scale_is_still_inverted() {
+        let m = Mat4::from_scale(Vec3::splat(1e-4));
+        let inv = safe_inverse(&m);
+        assert!((inv.x_axis.x - 1e4).abs() < 1.0);
+        assert_eq!(
+            safe_inverse(&Mat4::from_scale(Vec3::new(1.0, 0.0, 1.0))),
+            Mat4::IDENTITY
+        );
+    }
+
+    #[test]
+    fn singular_bone_gives_finite_bind_offsets() {
+        let bones = vec![
+            PuppetBone {
+                name: "zero".into(),
+                parent: None,
+                transform: Mat4::from_scale(Vec3::ZERO),
+            },
+            PuppetBone {
+                name: "child".into(),
+                parent: Some(0),
+                transform: Mat4::from_translation(Vec3::new(1.0, 2.0, 0.0)),
+            },
+            PuppetBone {
+                name: "nan".into(),
+                parent: None,
+                transform: Mat4::from_scale(Vec3::splat(f32::NAN)),
+            },
+        ];
+        for m in bind_offsets(&bones) {
+            assert!(m.to_cols_array().iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn regular_bone_keeps_its_inverse() {
+        let m = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0));
+        assert!(safe_inverse(&m).abs_diff_eq(m.inverse(), 1e-6));
+    }
+
+    #[test]
+    fn header_scan_is_bounded() {
+        let bytes = vec![0u8; MAX_HEADER_SCAN + 4096];
+        assert!(find_next_header(&bytes, 0).is_none());
+    }
 }

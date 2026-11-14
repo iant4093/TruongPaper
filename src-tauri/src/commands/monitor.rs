@@ -152,6 +152,22 @@ pub(crate) async fn lock_monitor_apply(monitor_id: &str) -> tokio::sync::OwnedMu
     lock.lock_owned().await
 }
 
+/// Newest user apply request per monitor. When several clicks queue behind a slow apply,
+/// only the newest one runs; the ones in between are skipped instead of each loading in turn.
+static APPLY_TICKETS: LazyLock<parking_lot::Mutex<HashMap<String, u64>>> =
+    LazyLock::new(Default::default);
+
+fn take_apply_ticket(monitor_id: &str) -> u64 {
+    let mut tickets = APPLY_TICKETS.lock();
+    let ticket = tickets.entry(monitor_id.to_string()).or_default();
+    *ticket += 1;
+    *ticket
+}
+
+fn is_latest_apply(monitor_id: &str, ticket: u64) -> bool {
+    APPLY_TICKETS.lock().get(monitor_id).copied() == Some(ticket)
+}
+
 /// Multi-monitor applies always lock sorted, unique IDs to avoid opposing clone deadlocks.
 pub(crate) async fn lock_monitor_applies<'a>(
     monitor_ids: impl IntoIterator<Item = &'a str>,
@@ -162,6 +178,22 @@ pub(crate) async fn lock_monitor_applies<'a>(
         guards.push(lock_monitor_apply(id).await);
     }
     guards
+}
+
+/// Transition for what `source` shows: a playlist's own effect and length, otherwise the global
+/// (Photography) setting with no length override.
+fn transition_for(state: &AppState, source: &WallpaperSource) -> (IpcTransitionType, Option<f32>) {
+    if let WallpaperSource::Playlist { playlist_id } = source {
+        if let Ok(Some(playlist)) = db::get_playlist(&state.db.lock(), playlist_id) {
+            if let Some(t) = playlist.transition {
+                return (
+                    IpcTransitionType::from_setting(&t.transition_type),
+                    Some(t.duration_seconds),
+                );
+            }
+        }
+    }
+    (settings_modes(state).1, None)
 }
 
 fn settings_modes(state: &AppState) -> (IpcFitMode, IpcTransitionType) {
@@ -255,12 +287,14 @@ async fn start_wallpaper_runtime(
     let host = &state.host;
     let activate = || -> Result<(), String> {
         db::set_monitor_source(&state.db.lock(), monitor_id, source)?;
+        let (transition, secs) = transition_for(state, source);
         host.set_source(
             monitor_id,
             source.clone(),
             Some(wallpaper_id.to_string()),
-            adjustments.compositor_uniforms(settings_modes(state).1),
+            adjustments.compositor_uniforms(transition),
         );
+        host.set_transition_secs(monitor_id, secs);
         Ok(())
     };
     if !matches!(
@@ -525,13 +559,14 @@ pub(crate) fn set_photo_host_source(
     state: &AppState,
     monitor_id: &str,
 ) -> Result<WallpaperSource, String> {
-    let (default_fit, transition) = settings_modes(state);
+    let (default_fit, _) = settings_modes(state);
     let source = {
         let conn = state.db.lock();
         db::monitor_sources(&conn)?
             .remove(monitor_id)
             .unwrap_or_default()
     };
+    let (transition, secs) = transition_for(state, &source);
     let uniforms = UniversalAdjustments {
         fit_mode: default_fit,
         ..Default::default()
@@ -540,6 +575,7 @@ pub(crate) fn set_photo_host_source(
     state
         .host
         .set_source(monitor_id, source.clone(), None, uniforms);
+    state.host.set_transition_secs(monitor_id, secs);
     Ok(source)
 }
 
@@ -759,8 +795,13 @@ pub async fn monitor_apply_wallpaper(
     source: WallpaperSource,
 ) -> Result<(), String> {
     validate_monitor_id(&monitor_id)?;
+    let ticket = take_apply_ticket(&monitor_id);
     {
         let _apply = lock_monitor_apply(&monitor_id).await;
+        // A newer click arrived while this one waited behind a slower apply.
+        if !is_latest_apply(&monitor_id, ticket) {
+            return Ok(());
+        }
         apply_source(&app, &state, &photo, &monitor_id, &source).await?;
     }
     // The scheduler restarts this monitor's timer (and playlist position) from now.
@@ -864,6 +905,15 @@ pub async fn monitor_set_volume(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_queued_apply_runs() {
+        let first = take_apply_ticket("TEST-APPLY");
+        let second = take_apply_ticket("TEST-APPLY");
+        assert!(!is_latest_apply("TEST-APPLY", first));
+        assert!(is_latest_apply("TEST-APPLY", second));
+        assert!(!is_latest_apply("TEST-OTHER", 0));
+    }
 
     #[test]
     fn monitor_ids_are_unique_and_named() {

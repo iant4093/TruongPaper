@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "depthparallax",
+	"name": "Depth Parallax",
+	"description": "TruongPaper built-in depth parallax effect",
+	"group": "interactive",
+	"passes": [
+		{
+			"material": "materials/effects/depthparallax.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/depthparallax.json",
+		"shaders/effects/depthparallax.frag",
+		"shaders/effects/depthparallax.vert"
+	]
+}

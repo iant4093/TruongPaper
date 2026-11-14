@@ -58,6 +58,7 @@ precision highp float;
 #define ddx dFdx
 #define ddy(x) dFdy(-(x))
 #define GLSL 1
+#define sample we_sample
 "#;
 
 const LIGHTING_V1_STUB: &str = r#"
@@ -164,7 +165,9 @@ fn prepare_shader_stage(
     combos: &HashMap<String, i32>,
 ) -> IoResult<String> {
     // Recursively expand #include "..." directives via 4-layer VFS
-    let expanded_body = expand_includes_recursive(vfs, raw_source, 0)?;
+    let hoisted = hoist_sampler_declarations(raw_source);
+    let expanded_body =
+        crate::shader_compat::fixup_hlsl_source(&expand_includes_recursive(vfs, &hoisted, 0)?);
 
     let mut out = String::with_capacity(expanded_body.len() + 2048);
     out.push_str(WE_GLSL_PREAMBLE);
@@ -199,6 +202,34 @@ fn prepare_shader_stage(
     }
 
     Ok(out)
+}
+
+/// Moves the unconditional `uniform sampler2D` declarations of a shader above its first
+/// `#include`. Include headers (e.g. the blur helpers) sample `g_Texture0` themselves, but stock
+/// shaders declare their samplers after the `#include` line, which GLSL would reject.
+fn hoist_sampler_declarations(source: &str) -> String {
+    if !source.contains("#include") {
+        return source.to_string();
+    }
+    let mut depth = 0i32;
+    let (mut hoisted, mut rest) = (String::new(), String::new());
+    for line in source.lines() {
+        let t = line.trim();
+        if t.starts_with("#if") {
+            depth += 1;
+        } else if t.starts_with("#endif") {
+            depth -= 1;
+        }
+        let target = if depth == 0 && t.starts_with("uniform sampler2D") {
+            &mut hoisted
+        } else {
+            &mut rest
+        };
+        target.push_str(line);
+        target.push('\n');
+    }
+    hoisted.push_str(&rest);
+    hoisted
 }
 
 fn expand_includes_recursive(vfs: &WallpaperVfs, source: &str, depth: usize) -> IoResult<String> {
@@ -310,12 +341,239 @@ pub fn apply_fragment_texcoord_compatibility(frag_src: &str) -> String {
         return frag_src.to_string();
     }
 
-    frag_src
+    let replaced = frag_src
         .replace("v_TexCoord + CAST2(", "v_TexCoord.xy + CAST2(")
         .replace("v_TexCoord - CAST2(", "v_TexCoord.xy - CAST2(")
         .replace("v_TexCoord * CAST2(", "v_TexCoord.xy * CAST2(")
         .replace("v_TexCoord + vec2(", "v_TexCoord.xy + vec2(")
-        .replace("v_TexCoord - vec2(", "v_TexCoord.xy - vec2(")
+        .replace("v_TexCoord - vec2(", "v_TexCoord.xy - vec2(");
+    truncate_arithmetic_texcoord(&replaced)
+}
+
+/// HLSL truncates a wide `v_TexCoord` implicitly when it is an operand of vec2 arithmetic
+/// (`(v_TexCoord * 2.0 - 1.0 - center)`); GLSL rejects the mixed widths. Appends `.xy` to every
+/// bare `v_TexCoord` that sits directly next to an arithmetic operator.
+fn truncate_arithmetic_texcoord(src: &str) -> String {
+    const NAME: &str = "v_TexCoord";
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let is_op = |c: char| matches!(c, '*' | '/' | '+' | '-');
+    let mut out = String::with_capacity(src.len() + 16);
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with("varying") || t.starts_with("in ") || t.starts_with("//") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let mut rest = line;
+        let mut consumed = String::new();
+        while let Some(idx) = rest.find(NAME) {
+            let before = &rest[..idx];
+            let after = &rest[idx + NAME.len()..];
+            let word_start = !before
+                .chars()
+                .next_back()
+                .is_some_and(|c| is_ident(c) || c == '.');
+            let word_end = !after.chars().next().is_some_and(is_ident);
+            let next = after.trim_start().chars().next();
+            let prev = before.trim_end().chars().next_back();
+            // `a - b` and unary minus both count; `a-- ` never occurs in shaders.
+            let so_far = format!("{consumed}{before}");
+            let sampled = prev == Some(',')
+                && next == Some(')')
+                && so_far
+                    .rfind("texSample2D")
+                    .map(|i| &so_far[i..])
+                    .is_some_and(|seg| seg.matches('(').count() == seg.matches(')').count() + 1);
+            let arithmetic = next.is_some_and(is_op) || prev.is_some_and(is_op) || sampled;
+            consumed.push_str(before);
+            consumed.push_str(NAME);
+            if word_start && word_end && next != Some('.') && arithmetic {
+                consumed.push_str(".xy");
+            }
+            rest = after;
+        }
+        consumed.push_str(rest);
+        out.push_str(&consumed);
+        out.push('\n');
+    }
+    out
+}
+
+/// Rule 6: Wallpaper Engine compiles shaders with HLSL-style implicit truncation, so stock
+/// shaders assign a wider vector to a narrower one (`v_NoiseCoord = v_TexCoord;` with a `vec2`
+/// and a `vec4`). For whole-statement assignments between two declared global vectors, adds the
+/// swizzle GLSL needs (`v_NoiseCoord = v_TexCoord.xy;`).
+pub fn apply_truncating_assignment_compatibility(src: &str) -> String {
+    let mut widths: HashMap<String, usize> = HashMap::new();
+    for line in src.lines() {
+        let t = line.trim();
+        let decl = ["varying ", "uniform ", "in ", "out ", "attribute "]
+            .iter()
+            .find_map(|p| t.strip_prefix(p));
+        let Some(decl) = decl else { continue };
+        let decl = decl.split("//").next().unwrap_or(decl);
+        let mut parts = decl.split_whitespace();
+        let (Some(ty), Some(name)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let width = match ty {
+            "vec2" | "float2" => 2,
+            "vec3" | "float3" => 3,
+            "vec4" | "float4" => 4,
+            _ => continue,
+        };
+        widths.insert(name.trim_end_matches(';').to_string(), width);
+    }
+    if widths.is_empty() {
+        return src.to_string();
+    }
+    let ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let t = line.trim();
+        let rewritten = t
+            .strip_suffix(';')
+            .and_then(|stmt| stmt.split_once('='))
+            .and_then(|(lhs, rhs)| {
+                let (lhs, rhs) = (lhs.trim(), rhs.trim());
+                if !ident(lhs) || !ident(rhs) {
+                    return None;
+                }
+                let (&lw, &rw) = (widths.get(lhs)?, widths.get(rhs)?);
+                (rw > lw).then(|| format!("{lhs} = {rhs}.{};", &"xyzw"[..lw]))
+            });
+        match rewritten {
+            Some(stmt) => out.push_str(&stmt),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// HLSL converts scalars implicitly (`int hit = step(a, b);`, `uint i = x % 32;` with a float
+/// `x`); GLSL (and naga) reject those stores. Wraps the initializer of single-declaration
+/// `int` / `uint` / `float` / vector statements (which also covers scalar splats and truncation) in the matching constructor and turns `a % b` inside
+/// them into `mod(float(a), float(b))`.
+pub fn apply_scalar_conversion_compatibility(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 64);
+    for line in src.lines() {
+        out.push_str(&convert_scalar_decl(line).unwrap_or_else(|| line.to_string()));
+        out.push('\n');
+    }
+    out
+}
+
+fn convert_scalar_decl(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let t = line.trim();
+    let (ty, rest) = [
+        "uint ", "int ", "float ", "vec2 ", "vec3 ", "vec4 ", "float2 ", "float3 ", "float4 ",
+    ]
+    .iter()
+    .find_map(|p| t.strip_prefix(p).map(|r| (p.trim(), r)))?;
+    let (name, init) = rest.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    if init.starts_with('=') {
+        return None;
+    }
+    let init = init.trim().strip_suffix(';')?.trim();
+    // Several statements on one line (`float d = f(x); d = pow(d, .1);`).
+    if init.contains(';') {
+        return None;
+    }
+    if init.split("//").nth(1).is_some() || init.is_empty() {
+        return None;
+    }
+    let mut depth = 0i32;
+    for c in init.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    // Already an explicit conversion of the whole initializer.
+    let already = init.starts_with(&format!("{ty}(")) && {
+        let mut d = 0i32;
+        let mut whole = true;
+        for (i, c) in init.char_indices() {
+            match c {
+                '(' => d += 1,
+                ')' => {
+                    d -= 1;
+                    if d == 0 && i + 1 != init.len() {
+                        whole = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        whole
+    };
+    if already {
+        return None;
+    }
+    let init = rewrite_modulo(init);
+    Some(format!(
+        "{}{ty} {name} = {ty}({init});",
+        &line[..indent_len]
+    ))
+}
+
+/// `a % b` (simple operands) -> `mod(float(a), float(b))`.
+fn rewrite_modulo(expr: &str) -> String {
+    let mut s = expr.to_string();
+    // A few passes cover chained uses; each pass rewrites the leftmost `%`.
+    for _ in 0..4 {
+        let Some(pos) = s.find('%') else { break };
+        let (left, right) = (&s[..pos], &s[pos + 1..]);
+        let l = left.trim_end();
+        let lstart = if l.ends_with(')') {
+            let mut d = 0i32;
+            let mut start = 0;
+            for (i, c) in l.char_indices().rev() {
+                match c {
+                    ')' => d += 1,
+                    '(' => {
+                        d -= 1;
+                        if d == 0 {
+                            start = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            start
+        } else {
+            l.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+                .map_or(0, |i| i + 1)
+        };
+        let r = right.trim_start();
+        let rlen = r
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(r.len());
+        if rlen == 0 {
+            break;
+        }
+        s = format!(
+            "{}mod(float({}), float({})){}",
+            &l[..lstart],
+            &l[lstart..],
+            &r[..rlen],
+            &r[rlen..]
+        );
+    }
+    s
 }
 
 #[derive(Debug, Clone)]
@@ -358,9 +616,51 @@ pub fn translate_we_shader_pair(
     raw_vert_preprocessed: &str,
     raw_frag_preprocessed: &str,
 ) -> Result<TranslatedWeShaderPair, String> {
+    let first = match translate_we_shader_pair_strict(
+        label,
+        raw_vert_preprocessed,
+        raw_frag_preprocessed,
+    ) {
+        Ok(translated) => return Ok(translated),
+        Err(first) => first,
+    };
+    // Retry with HLSL-style lax builtin overloads (mixed vector widths).
+    let add = |src: &str| {
+        let overloads = crate::shader_compat::lax_builtin_overloads(src);
+        let marker = "#define sample we_sample\n";
+        match src.find(marker) {
+            Some(at) if !overloads.is_empty() => {
+                let at = at + marker.len();
+                Some(format!("{}{}{}", &src[..at], overloads, &src[at..]))
+            }
+            _ => None,
+        }
+    };
+    let (vert, frag) = (add(raw_vert_preprocessed), add(raw_frag_preprocessed));
+    if vert.is_none() && frag.is_none() {
+        return Err(first);
+    }
+    translate_we_shader_pair_strict(
+        label,
+        vert.as_deref().unwrap_or(raw_vert_preprocessed),
+        frag.as_deref().unwrap_or(raw_frag_preprocessed),
+    )
+    .map_err(|retry| format!("{first} [lax-overload retry: {retry}]"))
+}
+
+fn translate_we_shader_pair_strict(
+    label: &str,
+    raw_vert_preprocessed: &str,
+    raw_frag_preprocessed: &str,
+) -> Result<TranslatedWeShaderPair, String> {
     let linked_vert =
         apply_linked_varying_compatibility(raw_vert_preprocessed, raw_frag_preprocessed);
     let linked_frag = apply_fragment_texcoord_compatibility(raw_frag_preprocessed);
+    let linked_vert = apply_truncating_assignment_compatibility(&linked_vert);
+    let linked_frag = apply_truncating_assignment_compatibility(&linked_frag);
+    let linked_vert = apply_scalar_conversion_compatibility(&linked_vert);
+    let linked_frag = apply_scalar_conversion_compatibility(&linked_frag);
+    let linked_frag = crate::shader_compat::localize_fragment_varyings(&linked_vert, &linked_frag);
 
     let (vert_450, frag_450, uniform_fields, ubo_size) =
         upgrade_to_naga_glsl450(&linked_vert, &linked_frag);
@@ -372,14 +672,25 @@ pub fn translate_we_shader_pair(
             &naga::front::glsl::Options::from(naga::ShaderStage::Vertex),
             &vert_450,
         )
-        .map_err(|errs| format!("Vertex GLSL parse error in {label}: {errs:?}"))?;
+        .map_err(|errs| {
+            format!(
+                "Vertex GLSL parse error in {label}: {}",
+                describe_parse_errors(&vert_450, &errs)
+            )
+        })?;
 
+    let frag_450 = drop_unwritten_fragment_inputs(&frag_450, &vert_naga);
     let frag_naga = frontend
         .parse(
             &naga::front::glsl::Options::from(naga::ShaderStage::Fragment),
             &frag_450,
         )
-        .map_err(|errs| format!("Fragment GLSL parse error in {label}: {errs:?}"))?;
+        .map_err(|errs| {
+            format!(
+                "Fragment GLSL parse error in {label}: {}",
+                describe_parse_errors(&frag_450, &errs)
+            )
+        })?;
 
     let vertex_wgsl = naga_module_to_wgsl(&vert_naga)
         .map_err(|e| format!("Vertex shader validation error in {label}: {e}"))?;
@@ -398,6 +709,62 @@ pub fn translate_we_shader_pair(
     })
 }
 
+/// Each parse error's kind plus the offending source line, so logs show what failed.
+fn describe_parse_errors(src: &str, errs: &naga::front::glsl::ParseErrors) -> String {
+    let mut out = String::new();
+    for e in &errs.errors {
+        let line = e
+            .meta
+            .to_range()
+            .and_then(|r| src.get(..r.start).map(|head| head.matches('\n').count()))
+            .and_then(|n| src.lines().nth(n))
+            .unwrap_or("");
+        out.push_str(&format!("{:?} at `{}`; ", e.kind, line.trim()));
+    }
+    out
+}
+
+/// Stock shaders leave fragment varyings behind that the vertex stage does not write (unused
+/// leftovers such as `v_Scroll`, or ones the vertex stage only declares under an inactive combo).
+/// A pipeline rejects such an unmatched input, so each becomes a zero-initialised private global.
+fn drop_unwritten_fragment_inputs(frag_450: &str, vert: &naga::Module) -> String {
+    let written: std::collections::HashSet<u32> = vert
+        .entry_points
+        .iter()
+        .filter_map(|ep| ep.function.result.as_ref())
+        .flat_map(|result| {
+            let mut locations = Vec::new();
+            let mut push = |binding: &Option<naga::Binding>| {
+                if let Some(naga::Binding::Location { location, .. }) = binding {
+                    locations.push(*location);
+                }
+            };
+            push(&result.binding);
+            if let naga::TypeInner::Struct { members, .. } = &vert.types[result.ty].inner {
+                members.iter().for_each(|m| push(&m.binding));
+            }
+            locations
+        })
+        .collect();
+    let mut out = String::with_capacity(frag_450.len());
+    for line in frag_450.lines() {
+        let unwritten = line
+            .trim()
+            .strip_prefix("layout(location = ")
+            .and_then(|rest| rest.split_once(") in "))
+            .and_then(|(loc, decl)| {
+                let loc: u32 = loc.trim().parse().ok()?;
+                (!written.contains(&loc)).then_some(decl)
+            });
+        match unwritten {
+            Some(decl) => out.push_str(decl),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Validates a `naga::Module` and writes it back out as WGSL.
 pub fn naga_module_to_wgsl(module: &naga::Module) -> Result<String, String> {
     let info = naga::valid::Validator::new(
@@ -406,8 +773,19 @@ pub fn naga_module_to_wgsl(module: &naga::Module) -> Result<String, String> {
     )
     .validate(module)
     .map_err(|e| format!("{:?}", e.into_inner()))?;
-    naga::back::wgsl::write_string(module, &info, naga::back::wgsl::WriterFlags::empty())
-        .map_err(|e| e.to_string())
+    let wgsl =
+        naga::back::wgsl::write_string(module, &info, naga::back::wgsl::WriterFlags::empty())
+            .map_err(|e| e.to_string())?;
+    // `wgpu` re-parses the WGSL, and WGSL is stricter than the GLSL-derived IR (for example
+    // uniform array strides), so check the emitted text the same way before handing it over.
+    let reparsed = naga::front::wgsl::parse_str(&wgsl).map_err(|e| e.emit_to_string(&wgsl))?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&reparsed)
+    .map_err(|e| format!("{:?}", e.into_inner()))?;
+    Ok(wgsl)
 }
 
 /// Translates via [`translate_we_shader_pair`] and creates the two `wgpu::ShaderModule`s.
@@ -417,7 +795,37 @@ pub fn compile_we_shader_pair(
     raw_vert_preprocessed: &str,
     raw_frag_preprocessed: &str,
 ) -> Result<CompiledWeShaderPair, String> {
-    let translated = translate_we_shader_pair(label, raw_vert_preprocessed, raw_frag_preprocessed)?;
+    let translated = translate_we_shader_pair(label, raw_vert_preprocessed, raw_frag_preprocessed)
+        .inspect_err(|e| {
+            // Debug aid: `TRUONGPAPER_DUMP_FAILED_SHADERS=<dir>` keeps the preprocessed sources
+            // of every shader that failed to translate.
+            if let Ok(dir) = std::env::var("TRUONGPAPER_DUMP_FAILED_SHADERS") {
+                let stem: String = label
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                let base = std::path::Path::new(&dir).join(format!(
+                    "{stem}-{:08x}",
+                    raw_frag_preprocessed.len() ^ (raw_vert_preprocessed.len() << 12)
+                ));
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(base.with_extension("vert"), raw_vert_preprocessed);
+                let _ = std::fs::write(base.with_extension("frag"), raw_frag_preprocessed);
+                let _ = std::fs::write(base.with_extension("err"), e);
+            }
+        })?;
+
+    // Debug aid: `TRUONGPAPER_DUMP_WGSL=<dir>` keeps the translated WGSL of every shader.
+    if let Ok(dir) = std::env::var("TRUONGPAPER_DUMP_WGSL") {
+        let stem: String = label
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let _ = std::fs::create_dir_all(&dir);
+        let base = std::path::Path::new(&dir).join(stem);
+        let _ = std::fs::write(base.with_extension("vert.wgsl"), &translated.vertex_wgsl);
+        let _ = std::fs::write(base.with_extension("frag.wgsl"), &translated.fragment_wgsl);
+    }
 
     let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}_vert")),
@@ -488,6 +896,24 @@ fn upgrade_to_naga_glsl450(
     }
     let total_ubo_size = (current_offset + 15) & !15;
 
+    // std140 gives every array element a 16-byte stride, which `naga` only accepts for vector
+    // elements. Scalar arrays (`float g_AudioSpectrum16Left[16]`) live in the block as
+    // `vec4 <name>_WeArr[N]` and are copied into a private `float <name>[N]` at the top of
+    // `main`, so indexing and passing the array keep working. Byte layout is unchanged.
+    let scalar_arrays: Vec<(String, String, String)> = uniform_fields
+        .iter()
+        .filter_map(|f| {
+            let (name, rest) = f.name.split_once('[')?;
+            let len = rest.trim_end_matches(']').trim().to_string();
+            let vec = match normalize_glsl_type(&f.glsl_type) {
+                "float" => "vec4",
+                "int" => "ivec4",
+                _ => return None,
+            };
+            Some((name.to_string(), vec.to_string(), len))
+        })
+        .collect();
+
     let rewrite_stage = |src: &str,
                          is_vert: bool,
                          varying_locs: &mut HashMap<String, u32>,
@@ -497,14 +923,36 @@ fn upgrade_to_naga_glsl450(
         if !uniform_fields.is_empty() {
             out.push_str("layout(std140, set = 0, binding = 0) uniform WePassUniformBlock {\n");
             for f in &uniform_fields {
-                out.push_str(&format!(
-                    "    {} {};\n",
-                    normalize_glsl_type(&f.glsl_type),
-                    f.name
-                ));
+                let packed = scalar_arrays
+                    .iter()
+                    .find(|(name, _, _)| f.name.split('[').next() == Some(name.as_str()));
+                match packed {
+                    Some((name, vec, len)) => {
+                        out.push_str(&format!("    {vec} {name}_WeArr[{len}];\n"));
+                    }
+                    None => out.push_str(&format!(
+                        "    {} {};\n",
+                        normalize_glsl_type(&f.glsl_type),
+                        f.name
+                    )),
+                }
             }
             out.push_str("};\n");
+            for (name, vec, len) in &scalar_arrays {
+                let scalar = if vec == "ivec4" { "int" } else { "float" };
+                out.push_str(&format!("{scalar} {name}[{len}];\n"));
+            }
         }
+        let array_init: String = scalar_arrays
+            .iter()
+            .map(|(name, _, len)| {
+                format!(
+                    "for (int we_i = 0; we_i < {len}; ++we_i) {{ {name}[we_i] = {name}_WeArr[we_i].x; }}\n"
+                )
+            })
+            .collect();
+        let mut main_pending = !array_init.is_empty();
+        let mut in_main_signature = false;
 
         let mut attr_loc = 0u32;
         for line in src.lines() {
@@ -525,12 +973,31 @@ fn upgrade_to_naga_glsl450(
                 attr_loc += 1;
                 continue;
             }
+            if main_pending && (in_main_signature || t.starts_with("void main(")) {
+                in_main_signature = true;
+                if let Some(brace) = line.find('{') {
+                    out.push_str(&line[..=brace]);
+                    out.push('\n');
+                    out.push_str(&array_init);
+                    out.push_str(&line[brace + 1..]);
+                    out.push('\n');
+                    main_pending = false;
+                    in_main_signature = false;
+                    continue;
+                }
+            }
             if let Some(rest) = t.strip_prefix("varying ") {
                 let decl = rest.split(';').next().unwrap_or(rest);
                 let var_name = decl.split_whitespace().last().unwrap_or("").to_string();
+                // `varying vec2 v_TexCoord[4];` occupies one location per element.
+                let slots = var_name
+                    .split_once('[')
+                    .and_then(|(_, n)| n.trim_end_matches(']').trim().parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .max(1);
                 let loc = *varying_locs.entry(var_name).or_insert_with(|| {
                     let l = *next_loc;
-                    *next_loc += 1;
+                    *next_loc += slots;
                     l
                 });
                 let qualifier = if is_vert { "out" } else { "in" };
@@ -707,6 +1174,21 @@ pub const WE_BUILTIN_UNIFORMS: &[BuiltinUniform] = &[
         "Normalized desktop cursor position [0,1] on that monitor",
     ),
     bu(
+        "g_ParallaxPosition",
+        "vec2",
+        "Camera parallax position [0,1]; (0.5, 0.5) when parallax is off",
+    ),
+    bu(
+        "g_EffectTextureProjectionMatrix",
+        "mat4",
+        "Effect texture-space projection (identity)",
+    ),
+    bu(
+        "g_EffectTextureProjectionMatrixInverse",
+        "mat4",
+        "Inverse of g_EffectTextureProjectionMatrix (identity)",
+    ),
+    bu(
         "g_PointerPositionLast",
         "vec2",
         "Previous frame cursor position",
@@ -856,4 +1338,34 @@ pub const WE_BUILTIN_UNIFORMS: &[BuiltinUniform] = &[
 /// Looks up a built-in uniform by exact name.
 pub fn builtin_uniform(name: &str) -> Option<&'static BuiltinUniform> {
     WE_BUILTIN_UNIFORMS.iter().find(|u| u.name == name)
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_declarations_get_explicit_conversions() {
+        let out = apply_scalar_conversion_compatibility(
+            "\tint hit = step(a, b);\n\tuint f = (g + 1) % RES;\n\tfloat x = max(p, q);\nfloat y = float(z);\nint a = 1, b = 2;\n",
+        );
+        assert!(out.contains("int hit = int(step(a, b));"), "{out}");
+        assert!(
+            out.contains("uint f = uint(mod(float((g + 1)), float(RES)));"),
+            "{out}"
+        );
+        assert!(out.contains("float x = float(max(p, q));"), "{out}");
+        assert!(out.contains("float y = float(z);\n"), "{out}");
+        assert!(out.contains("int a = 1, b = 2;"), "{out}");
+    }
+
+    #[test]
+    fn wide_texcoord_in_arithmetic_is_truncated() {
+        let out = apply_fragment_texcoord_compatibility(
+            "varying vec4 v_TexCoord;\nvec2 uv = (v_TexCoord * 2.0 - 1.0) / 2.0;\nvec4 c = texSample2D(t, v_TexCoord);\nfloat a = v_TexCoord.z * 2.0;\n",
+        );
+        assert!(out.contains("(v_TexCoord.xy * 2.0 - 1.0)"), "{out}");
+        assert!(out.contains("texSample2D(t, v_TexCoord.xy)"), "{out}");
+        assert!(out.contains("v_TexCoord.z * 2.0"), "{out}");
+    }
 }

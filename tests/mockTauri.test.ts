@@ -54,6 +54,7 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   wallpaper_save_preset: { wallpaperId: 'workshop:2841928371', presetName: 'Night' },
   wallpaper_apply_preset: { wallpaperId: 'workshop:2841928371', presetId: 'missing' },
   playback_set_paused: { paused: true },
+  playback_next: { monitorId: 'DISPLAY-1' },
   monitor_set_volume: { monitorId: 'DISPLAY-1', volume: 0.5 },
   playlist_save: { playlist: { playlistId: 'x', name: 'X', mode: 'photos_only', intervalSeconds: 60, items: [{ kind: 'photo_api_draw' }] } },
   settings_update: { settings: { fpsCap: 120 } },
@@ -77,7 +78,7 @@ describe('createMockBackend (browser preview)', () => {
 
   it('rejects commands outside the contract', () => {
     const backend = createMockBackend();
-    expect(() => backend.handle('photo_list_albums')).toThrow(/Unhandled command/);
+    expect(() => backend.handle('photo_unknown_command')).toThrow(/Unhandled command/);
   });
 
   it('answers the plugin commands used by the UI', () => {

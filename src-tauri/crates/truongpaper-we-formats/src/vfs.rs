@@ -1,7 +1,9 @@
 //! 4-layer Virtual File System (`WeVirtualFileSystem`, spec section 2.1).
 //!
 //! Resolution order: (1) loose `<wallpaper_dir>/<path>`, (2) `scene.pkg`, (3) `gifscene.pkg`,
-//! (4) `<core_assets_dir>/<path>` (`we_core_assets/assets/`) then built-in virtual files.
+//! (4) `<core_assets_dir>/<path>` (`we_core_assets/assets/`), then the app's own bundled
+//! clean-room core assets (`resources/core-assets/assets/`, see [`set_bundled_assets_dir`]),
+//! then built-in virtual files.
 
 use crate::binary::{parse_pkg_index, PkgArchive};
 use memmap2::Mmap;
@@ -10,6 +12,21 @@ use std::fs::File;
 use std::io::{Cursor, Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
+
+static BUNDLED_ASSETS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Registers the app's bundled core-assets tree (our own implementations of the stock effects and
+/// shader headers). Every [`WeVirtualFileSystem`] mounted afterwards falls back to it when a file is
+/// in neither the wallpaper nor the real Wallpaper Engine core assets. First call wins.
+pub fn set_bundled_assets_dir(dir: PathBuf) {
+    let _ = BUNDLED_ASSETS_DIR.set(dir);
+}
+
+/// The directory registered with [`set_bundled_assets_dir`], if any.
+pub fn bundled_assets_dir() -> Option<&'static Path> {
+    BUNDLED_ASSETS_DIR.get().map(PathBuf::as_path)
+}
 
 /// A memory-mapped `.pkg` plus its parsed index. Entry reads are zero-copy slices of the mapping.
 pub struct MappedPkg {
@@ -41,7 +58,12 @@ pub struct WeVirtualFileSystem {
     pub scene_pkg: Option<MappedPkg>,
     pub gifscene_pkg: Option<MappedPkg>,
     pub core_assets_dir: PathBuf,
+    /// Our own bundled stand-ins for stock effects and includes; consulted after `core_assets_dir`.
+    pub bundled_assets_dir: Option<PathBuf>,
     pub builtin_virtual_files: HashMap<&'static str, &'static [u8]>,
+    /// `(root, canonical root)` pairs computed at mount, so opens do not canonicalize the root.
+    /// An entry is only used while its `root` still equals the current (public) field.
+    canonical_roots: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Alias used by the spec text.
@@ -86,6 +108,80 @@ fn open_file_asset(path: &Path) -> IoResult<VfsAsset<'static>> {
     Ok(VfsAsset::File(file, size))
 }
 
+/// `true` when `meta` describes a symlink, or on Windows any reparse point (junction, mount point).
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `true` when `root/rel` (or any directory on the way) is a link, so it needs the canonical check.
+/// `Err` means a component does not exist or cannot be inspected.
+fn path_has_link(root: &Path, rel: &str) -> IoResult<bool> {
+    let mut cur = root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        cur.push(comp);
+        if is_link(&std::fs::symlink_metadata(&cur)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Opens `root/rel` when it is a regular file that stays inside `root`. `Ok(None)` means no such
+/// file in this layer (including a path that cannot be canonicalized); a symlink or junction that
+/// points outside `root` is `PermissionDenied`, so untrusted wallpaper folders cannot read
+/// arbitrary local files.
+///
+/// Plain files (no link on the way, checked with `symlink_metadata`) are opened directly. Only
+/// linked paths are canonicalized, against `canonical_root` cached at mount.
+fn open_contained(
+    root: &Path,
+    canonical_root: Option<&Path>,
+    rel: &str,
+) -> IoResult<Option<VfsAsset<'static>>> {
+    let candidate = root.join(rel);
+    match path_has_link(root, rel) {
+        Ok(false) => {
+            return match open_file_asset(&candidate) {
+                Ok(asset) if candidate.is_file() => Ok(Some(asset)),
+                _ => Ok(None),
+            };
+        }
+        Ok(true) => {}
+        Err(_) => return Ok(None),
+    }
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let Ok(real) = candidate.canonicalize() else {
+        return Ok(None);
+    };
+    let real_root = match canonical_root {
+        Some(r) => r.to_path_buf(),
+        None => match root.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        },
+    };
+    if !real.starts_with(&real_root) {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("Rejected link escaping the wallpaper folder: {rel}"),
+        ));
+    }
+    open_file_asset(&real).map(Some)
+}
+
 impl WeVirtualFileSystem {
     pub fn mount(wallpaper_dir: PathBuf, core_assets_dir: PathBuf) -> Self {
         let scene_pkg = MappedPkg::open(&wallpaper_dir.join("scene.pkg")).ok();
@@ -117,13 +213,44 @@ impl WeVirtualFileSystem {
             include_bytes!("shader_fallbacks/perspective.glsl"),
         );
 
-        Self {
+        let mut vfs = Self {
             wallpaper_dir,
             scene_pkg,
             gifscene_pkg,
             core_assets_dir,
+            bundled_assets_dir: bundled_assets_dir().map(Path::to_path_buf),
             builtin_virtual_files,
-        }
+            canonical_roots: Vec::new(),
+        };
+        vfs.refresh_canonical_roots();
+        vfs
+    }
+
+    fn refresh_canonical_roots(&mut self) {
+        let roots = [
+            Some(self.wallpaper_dir.clone()),
+            Some(self.core_assets_dir.clone()),
+            self.bundled_assets_dir.clone(),
+        ];
+        self.canonical_roots = roots
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.canonicalize().ok().map(|c| (r, c)))
+            .collect();
+    }
+
+    fn canonical_root(&self, root: &Path) -> Option<&Path> {
+        self.canonical_roots
+            .iter()
+            .find(|(r, _)| r == root)
+            .map(|(_, c)| c.as_path())
+    }
+
+    /// Overrides the bundled-assets layer (tests and tools that do not use the global).
+    pub fn with_bundled_assets_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.bundled_assets_dir = dir;
+        self.refresh_canonical_roots();
+        self
     }
 
     /// Normalizes a Wallpaper Engine virtual path and rejects any `..` traversal component.
@@ -158,9 +285,12 @@ impl WeVirtualFileSystem {
         let rel = Self::sanitize_virtual_path(virtual_path)?;
 
         // Layer 1: loose file in the wallpaper directory.
-        let loose_path = self.wallpaper_dir.join(&rel);
-        if loose_path.is_file() {
-            return open_file_asset(&loose_path);
+        if let Some(asset) = open_contained(
+            &self.wallpaper_dir,
+            self.canonical_root(&self.wallpaper_dir),
+            &rel,
+        )? {
+            return Ok(asset);
         }
 
         // Layer 2: scene.pkg.
@@ -178,12 +308,22 @@ impl WeVirtualFileSystem {
         }
 
         // Layer 4a: core Wallpaper Engine assets directory.
-        let core_path = self.core_assets_dir.join(&rel);
-        if core_path.is_file() {
-            return open_file_asset(&core_path);
+        if let Some(asset) = open_contained(
+            &self.core_assets_dir,
+            self.canonical_root(&self.core_assets_dir),
+            &rel,
+        )? {
+            return Ok(asset);
         }
 
-        // Layer 4b: built-in in-memory virtual files.
+        // Layer 4b: bundled clean-room core assets.
+        if let Some(bundled) = &self.bundled_assets_dir {
+            if let Some(asset) = open_contained(bundled, self.canonical_root(bundled), &rel)? {
+                return Ok(asset);
+            }
+        }
+
+        // Layer 4c: built-in in-memory virtual files.
         if let Some(bytes) = self.builtin_virtual_files.get(rel.as_str()) {
             return Ok(VfsAsset::Bytes(bytes));
         }
@@ -297,6 +437,29 @@ mod tests {
     }
 
     #[test]
+    fn bundled_assets_sit_between_core_assets_and_builtins() {
+        let tmp = TempDir::new("bundled");
+        let (wall, core, bundled) = (
+            tmp.0.join("wall"),
+            tmp.0.join("core"),
+            tmp.0.join("bundled"),
+        );
+        for d in [&wall, &core, &bundled] {
+            fs::create_dir_all(d.join("shaders")).unwrap();
+        }
+        fs::write(wall.join("w.txt"), b"wall").unwrap();
+        fs::write(bundled.join("w.txt"), b"bundled-w").unwrap();
+        fs::write(core.join("shaders/common_blur.h"), b"real").unwrap();
+        fs::write(bundled.join("shaders/common_blur.h"), b"ours").unwrap();
+        fs::write(bundled.join("shaders/common.h"), b"ours-common").unwrap();
+        let vfs = WeVirtualFileSystem::mount(wall, core).with_bundled_assets_dir(Some(bundled));
+        assert_eq!(vfs.read_bytes("w.txt").unwrap(), b"wall");
+        assert_eq!(vfs.read_bytes("shaders/common_blur.h").unwrap(), b"real");
+        assert_eq!(vfs.read_bytes("shaders/common.h").unwrap(), b"ours-common");
+        // beats built-in
+    }
+
+    #[test]
     fn rejects_path_traversal() {
         assert!(WeVirtualFileSystem::sanitize_virtual_path("../secret").is_err());
         assert!(WeVirtualFileSystem::sanitize_virtual_path("a/../../b").is_err());
@@ -314,6 +477,39 @@ mod tests {
         assert!(vfs.exists("shaders/commands/copy.vert"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_the_wallpaper_dir_is_denied() {
+        let tmp = TempDir::new("symlink");
+        let (wall, outside) = (tmp.0.join("wall"), tmp.0.join("outside"));
+        fs::create_dir_all(wall.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        fs::write(wall.join("real.txt"), b"ok").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), wall.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, wall.join("sub/dir")).unwrap();
+        std::os::unix::fs::symlink(wall.join("real.txt"), wall.join("inner.txt")).unwrap();
+
+        let vfs = WeVirtualFileSystem::mount(wall.clone(), tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("real.txt").unwrap(), b"ok");
+        // A link that stays inside the folder is fine.
+        assert_eq!(vfs.read_bytes("inner.txt").unwrap(), b"ok");
+        for p in ["link.txt", "sub/dir/secret.txt"] {
+            assert_eq!(
+                vfs.read_bytes(p).unwrap_err().kind(),
+                ErrorKind::PermissionDenied,
+                "{p}"
+            );
+        }
+        assert!(!vfs.exists("link.txt"));
+
+        // The mounted folder itself may be reached through a symlink.
+        let alias = tmp.0.join("alias");
+        std::os::unix::fs::symlink(&wall, &alias).unwrap();
+        let vfs = WeVirtualFileSystem::mount(alias, tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("real.txt").unwrap(), b"ok");
+    }
+
     #[test]
     fn mapped_pkg_slice_is_bounds_checked() {
         let tmp = TempDir::new("oob");
@@ -323,5 +519,47 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         let pkg = MappedPkg::open(&path).unwrap();
         assert!(pkg.read_entry("x.bin").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_contained_and_plain_files_skip_canonicalize() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new("links");
+        let wall = tmp.0.join("wall");
+        let outside = tmp.0.join("outside");
+        fs::create_dir_all(wall.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(wall.join("sub/a.txt"), b"plain").unwrap();
+        fs::write(wall.join("real.txt"), b"real").unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        symlink(outside.join("secret.txt"), wall.join("evil.txt")).unwrap();
+        symlink(&outside, wall.join("evildir")).unwrap();
+        symlink(wall.join("real.txt"), wall.join("inner.txt")).unwrap();
+
+        let vfs = WeVirtualFileSystem::mount(wall, tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("sub/a.txt").unwrap(), b"plain");
+        assert_eq!(vfs.read_bytes("inner.txt").unwrap(), b"real");
+        for p in ["evil.txt", "evildir/secret.txt"] {
+            let err = vfs.read_bytes(p).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::PermissionDenied, "{p}");
+        }
+        assert_eq!(
+            vfs.read_bytes("missing.txt").unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_link_falls_through_to_scene_pkg() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new("dangling");
+        let wall = tmp.0.join("wall");
+        fs::create_dir_all(&wall).unwrap();
+        fs::write(wall.join("scene.pkg"), build_pkg(&[("x.txt", b"from-pkg")])).unwrap();
+        symlink(tmp.0.join("nowhere"), wall.join("x.txt")).unwrap();
+        let vfs = WeVirtualFileSystem::mount(wall, tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("x.txt").unwrap(), b"from-pkg");
     }
 }

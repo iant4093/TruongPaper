@@ -1,0 +1,16 @@
+{
+	"passes": [
+		{
+			"shader": "effects/shine_downsample2",
+			"blending": "normal",
+			"depthtest": "disabled",
+			"depthwrite": "disabled",
+			"cullmode": "nocull",
+			"textures": [
+				null,
+				"util/white",
+				"util/clouds_256"
+			]
+		}
+	]
+}

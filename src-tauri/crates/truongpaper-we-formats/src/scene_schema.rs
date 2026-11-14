@@ -28,6 +28,28 @@ pub enum UserConditionSpec {
     },
 }
 
+/// A vector-shaped field (like `padding`) that some scenes store as `"X Y"` and others as a
+/// single scalar number applied to every component. Always deserializes to its `"X Y..."`
+/// string form so callers can use [`parse_vec2_or`]/[`parse_vec3_or`] on it either way.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct FlexibleVecString(pub String);
+
+impl<'de> Deserialize<'de> for FlexibleVecString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Number(f64),
+        }
+        Ok(Self(match Repr::deserialize(deserializer)? {
+            Repr::Text(s) => s,
+            Repr::Number(n) => n.to_string(),
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UserBoundValue<T> {
@@ -66,6 +88,17 @@ impl<T: Clone> UserBoundValue<T> {
         }
     }
 
+    /// Instance-level `scriptproperties` stored next to the script, if any.
+    pub fn script_properties(&self) -> Option<&HashMap<String, serde_json::Value>> {
+        match self {
+            Self::Bound {
+                scriptproperties: Some(p),
+                ..
+            } => Some(p),
+            _ => None,
+        }
+    }
+
     /// The attached SceneScript source, if any.
     pub fn script(&self) -> Option<&str> {
         match self {
@@ -89,6 +122,55 @@ fn user_prop_value<'a>(
     }
 }
 
+/// Whether a property value satisfies a binding `condition` string (a combo value such as `"2"`,
+/// or `"1"`/`"true"` for a checked bool). Numbers compare numerically, so `2.0` matches `"2"`.
+pub fn condition_matches(actual: &serde_json::Value, condition: &str) -> bool {
+    let cond = condition.trim();
+    match actual {
+        serde_json::Value::String(s) => s.trim() == cond,
+        serde_json::Value::Bool(b) => {
+            let truthy = matches!(cond, "1" | "true");
+            let falsy = matches!(cond, "0" | "false");
+            (*b && truthy) || (!*b && falsy)
+        }
+        serde_json::Value::Number(n) => match (n.as_f64(), cond.parse::<f64>()) {
+            (Some(a), Ok(c)) => (a - c).abs() < 1e-9,
+            _ => n.to_string() == cond,
+        },
+        other => *other == cond,
+    }
+}
+
+/// Resolves a raw JSON value that may be a `{ "user": ..., "value": ... }` binding (used for
+/// SceneScript `scriptproperties` and particle `instanceoverride` entries). Non-binding values
+/// are returned unchanged; a condition binding resolves to `true`/`false` like a bool.
+pub fn resolve_json_binding(
+    raw: &serde_json::Value,
+    user_props: &UserPropertyMap,
+) -> serde_json::Value {
+    let Some(obj) = raw.as_object().filter(|o| o.contains_key("user")) else {
+        return raw.clone();
+    };
+    let default = obj.get("value").cloned().unwrap_or(serde_json::Value::Null);
+    let spec: Option<UserConditionSpec> = serde_json::from_value(obj["user"].clone()).ok();
+    match spec {
+        Some(UserConditionSpec::PropertyName(key))
+        | Some(UserConditionSpec::Conditional {
+            name: key,
+            condition: None,
+        }) => user_prop_value(user_props, &key)
+            .cloned()
+            .unwrap_or(default),
+        Some(UserConditionSpec::Conditional {
+            name,
+            condition: Some(cond),
+        }) => user_prop_value(user_props, &name)
+            .map(|v| serde_json::Value::Bool(condition_matches(v, &cond)))
+            .unwrap_or(default),
+        None => default,
+    }
+}
+
 /// Evaluates a UserBoundValue<bool> (such as layer or effect `visible`) against current project.json values
 pub fn resolve_bound_bool(bound: &UserBoundValue<bool>, user_props: &UserPropertyMap) -> bool {
     match bound {
@@ -106,11 +188,7 @@ pub fn resolve_bound_bool(bound: &UserBoundValue<bool>, user_props: &UserPropert
                         return *value;
                     };
                     if let Some(expected_cond) = condition {
-                        let actual_str = match actual {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        actual_str == *expected_cond
+                        condition_matches(actual, expected_cond)
                     } else {
                         actual.as_bool().unwrap_or(*value)
                     }
@@ -205,6 +283,26 @@ pub fn parse_user_properties(json: &str) -> serde_json::Result<UserPropertyMap> 
 }
 
 /// Treats an explicit JSON `null` like a missing field.
+/// Plain optional field that Wallpaper Engine may also write as a user-property binding
+/// (`{ "user": "...", "value": ... }`, e.g. `parallaxDepth` in 3233141951): takes the binding's
+/// `value` (the editor default); `null` -> `None`.
+fn unbound<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let mut v = serde_json::Value::deserialize(deserializer)?;
+    if let Some(inner) = v.as_object_mut().and_then(|o| o.remove("value")) {
+        v = inner;
+    }
+    if v.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(v)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -281,7 +379,7 @@ pub struct SceneGeneral {
     pub orthogonalprojection: OrthogonalProjection,
     #[serde(default = "default_clear_color")]
     pub clearcolor: UserBoundValue<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub clearenabled: Option<bool>,
     #[serde(default)]
     pub cameraparallax: Option<UserBoundValue<bool>>,
@@ -297,9 +395,9 @@ pub struct SceneGeneral {
     pub bloomstrength: Option<UserBoundValue<f32>>,
     #[serde(default)]
     pub bloomthreshold: Option<UserBoundValue<f32>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub ambientcolor: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub skylightcolor: Option<String>,
 }
 fn default_clear_color() -> UserBoundValue<String> {
@@ -308,9 +406,9 @@ fn default_clear_color() -> UserBoundValue<String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneObject {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub id: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub parent: Option<i32>,
     #[serde(default)]
     pub name: String,
@@ -324,33 +422,40 @@ pub struct SceneObject {
     pub angles: UserBoundValue<String>,
     #[serde(default)]
     pub size: Option<UserBoundValue<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub alignment: Option<String>,
+    /// Composition layers: start from the scene behind the layer (`true`, the default) or
+    /// from transparent (only the child layers are captured).
+    #[serde(default, deserialize_with = "unbound")]
+    pub copybackground: Option<bool>,
     #[serde(default = "default_alpha")]
     pub alpha: UserBoundValue<f32>,
     #[serde(default = "default_brightness")]
     pub brightness: UserBoundValue<f32>,
     #[serde(default = "default_color")]
     pub color: UserBoundValue<String>,
-    #[serde(default, rename = "colorBlendMode")]
+    #[serde(default, rename = "colorBlendMode", deserialize_with = "unbound")]
     pub color_blend_mode: Option<i32>,
-    #[serde(default, rename = "parallaxDepth")]
+    #[serde(default, rename = "parallaxDepth", deserialize_with = "unbound")]
     pub parallax_depth: Option<String>,
 
     // Layer kind payloads
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub image: Option<String>,
-    #[serde(default)]
+    /// 3D model objects: VFS path of a static `.mdl` mesh.
+    #[serde(default, deserialize_with = "unbound")]
+    pub model: Option<String>,
+    #[serde(default, deserialize_with = "unbound")]
     pub particle: Option<String>,
     #[serde(default)]
     pub sound: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub playbackmode: Option<String>,
     #[serde(default)]
     pub volume: Option<UserBoundValue<f32>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub mintime: Option<f32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub maxtime: Option<f32>,
     #[serde(default)]
     pub text: Option<UserBoundValue<String>>,
@@ -358,17 +463,21 @@ pub struct SceneObject {
     #[serde(default)]
     pub pointsize: Option<UserBoundValue<f32>>,
     /// Text layers: `systemfont_*` name or a VFS path to a `.ttf`/`.otf`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub font: Option<String>,
     /// Text layers: `left` / `center` / `right`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub horizontalalign: Option<String>,
     /// Text layers: `top` / `center` / `bottom`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unbound")]
     pub verticalalign: Option<String>,
-    /// Text layers: inner margin in scene units.
+    /// Text layers: where the text box hangs from `origin` (`none` = follow the text alignment).
+    #[serde(default, deserialize_with = "unbound")]
+    pub anchor: Option<String>,
+    /// Text layers: inner margin in scene units, usually `"x y"` (like `origin`/`scale`), but
+    /// some scenes store a single scalar number applied to every component.
     #[serde(default)]
-    pub padding: Option<UserBoundValue<f32>>,
+    pub padding: Option<UserBoundValue<FlexibleVecString>>,
     #[serde(
         default,
         rename = "animationlayers",
@@ -377,6 +486,10 @@ pub struct SceneObject {
     pub animation_layers: Vec<ScenePuppetAnimation>,
     #[serde(default)]
     pub effects: Vec<SceneEffectRef>,
+    /// Particle layers: per-instance overrides (`count`, `rate`, `size`, `alpha`, `lifetime`,
+    /// `speed`, `colorn`, `brightness`); values may be bound to user properties.
+    #[serde(default)]
+    pub instanceoverride: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -694,6 +807,20 @@ mod tests {
             parse_scene_json(r#"{ "general": { "orthogonalprojection": { "auto": true } } }"#)
                 .unwrap();
         assert!(auto_proj.general.orthogonalprojection.auto);
+
+        // Regression (3233141951 & co.): plain fields written as user-property bindings.
+        let bound = parse_scene_json(
+            r#"{ "general": {}, "objects": [ { "name": "x",
+                "parallaxDepth": { "user": "depth", "value": "0.5 0.5" },
+                "alignment": { "user": "a", "value": "topleft" },
+                "colorBlendMode": { "value": 2 }, "font": null } ] }"#,
+        )
+        .unwrap();
+        let o = &bound.objects[0];
+        assert_eq!(o.parallax_depth.as_deref(), Some("0.5 0.5"));
+        assert_eq!(o.alignment.as_deref(), Some("topleft"));
+        assert_eq!(o.color_blend_mode, Some(2));
+        assert_eq!(o.font, None);
         assert_eq!(auto_proj.general.orthogonalprojection.height, 1080.0);
     }
 
@@ -705,6 +832,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scene.objects[0].name, "x");
+    }
+
+    #[test]
+    fn text_layer_padding_is_a_vec2_string_not_a_scalar() {
+        // WE stores text `padding` as an "x y" vector (like `origin`/`scale`), not a bare
+        // number; a scene with a text layer failed to load entirely when this was typed as
+        // `UserBoundValue<f32>`.
+        let scene = parse_scene_json(
+            r#"{ "general": {}, "objects": [ { "name": "t", "padding": "32.00000 32.00000" } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            scene.objects[0].padding.as_ref().unwrap().default_value().0,
+            "32.00000 32.00000"
+        );
+    }
+
+    #[test]
+    fn text_layer_padding_also_accepts_a_bare_scalar() {
+        let scene =
+            parse_scene_json(r#"{ "general": {}, "objects": [ { "name": "t", "padding": 6 } ] }"#)
+                .unwrap();
+        assert_eq!(
+            scene.objects[0].padding.as_ref().unwrap().default_value().0,
+            "6"
+        );
     }
 
     #[test]
@@ -859,6 +1012,40 @@ mod tests {
         assert_eq!(
             again.objects[0].alpha.user_property_name(),
             Some("opacity_slider")
+        );
+    }
+
+    #[test]
+    fn condition_matching_handles_bools_numbers_and_strings() {
+        use serde_json::json;
+        assert!(condition_matches(&json!(true), "1"));
+        assert!(condition_matches(&json!(false), "0"));
+        assert!(!condition_matches(&json!(false), "1"));
+        assert!(condition_matches(&json!(2), "2"));
+        assert!(condition_matches(&json!(2.0), "2"));
+        assert!(condition_matches(&json!("2"), "2"));
+        assert!(!condition_matches(&json!("3"), "2"));
+    }
+
+    #[test]
+    fn json_bindings_resolve_with_defaults_and_conditions() {
+        use serde_json::json;
+        let mut props = UserPropertyMap::new();
+        assert_eq!(
+            resolve_json_binding(&json!({"user": "a", "value": 1}), &props),
+            json!(1)
+        );
+        props.insert("a".into(), json!({"type": "slider", "value": 7}));
+        props.insert("m".into(), json!("2"));
+        assert_eq!(
+            resolve_json_binding(&json!({"user": "a", "value": 1}), &props),
+            json!(7)
+        );
+        let cond = json!({"user": {"name": "m", "condition": "2"}, "value": false});
+        assert_eq!(resolve_json_binding(&cond, &props), json!(true));
+        assert_eq!(
+            resolve_json_binding(&json!("plain"), &props),
+            json!("plain")
         );
     }
 }

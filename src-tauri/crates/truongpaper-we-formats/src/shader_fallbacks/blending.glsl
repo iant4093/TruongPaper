@@ -12,6 +12,8 @@ vec3 ApplyBlending(int mode, vec3 base, vec3 layer, float amount) {
     else if (mode == 12) result = mix(base - (1.0 - 2.0 * layer) * base * (1.0 - base), base + (2.0 * layer - 1.0) * (sqrt(max(base, vec3(0.0))) - base), step(vec3(0.5), layer));
     else if (mode == 18) result = abs(base - layer);
     else if (mode == 19) result = base + layer - 2.0 * base * layer;
+    // 30 is the effect default of `tint`: the colour multiplies the image (white = no change).
+    else if (mode == 30) result = base * layer;
     if (mode == 5 || mode == 10) return result;
     return mix(base, result, amount);
 }

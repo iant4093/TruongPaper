@@ -1,5 +1,7 @@
 # 06 — Repository Layout, `README.md`, CI/CD & Auto-Update Release Specification (Aligned with `TruongFlix`)
 
+> Historical design spec, written before implementation. The shipped app differs in places; see [RELEASE-READINESS.md](RELEASE-READINESS.md) and the code for current behavior.
+
 > **2026-11-10 release-readiness override:** Push/PR builds produce test installers only. Publishing requires a manual CI run on `main` with `publish: true` after desktop acceptance testing. The UI now follows the user-requested neutral dark theme in `src/styles/theme.css`.
 
 > **Reference Standard**: [`https://github.com/iant4093/TruongFlix`](https://github.com/iant4093/TruongFlix)  

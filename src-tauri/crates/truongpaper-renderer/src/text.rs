@@ -57,6 +57,9 @@ pub struct TextStyle {
     pub halign: HAlign,
     pub valign: VAlign,
     pub padding: f32,
+    /// Whether `padding` may inset the text inside its box (see [`layout_text`]). Off for a
+    /// box hung from its origin by the text alignment, whose text edge stays on the origin.
+    pub inset_padding: bool,
 }
 
 impl Default for TextStyle {
@@ -67,6 +70,7 @@ impl Default for TextStyle {
             halign: HAlign::Center,
             valign: VAlign::Center,
             padding: 0.0,
+            inset_padding: true,
         }
     }
 }
@@ -130,17 +134,29 @@ pub fn measure_text(metrics: &impl TextMetrics, text: &str, padding: f32) -> (f3
     )
 }
 
-/// Places every line of `text` inside a `size` box according to the style's alignment/padding.
+/// Places every line of `text` inside a `size` box according to the style's alignment.
+///
+/// The saved `size` of a text layer is the editor's measured box. Newer scenes save it as the
+/// text plus `2 * padding` (2134765860: a 302 x 226 clock with padding 82 next to its 202 x 126
+/// shadow with padding 32, both right-aligned to the same edge), older ones as the bare text
+/// (3122339805: 23-unit headers with padding 32). So the inset is the padding only as far as
+/// the box has room for it around the text block: `clamp((size.h - block_h) / 2, 0, padding)`,
+/// and per line never more than the horizontal slack, so text never leaves its box.
 pub fn layout_text(
     metrics: &impl TextMetrics,
     text: &str,
     size: (f32, f32),
     style: &TextStyle,
 ) -> Vec<LaidOutLine> {
-    let pad = style.padding.max(0.0);
     let lines = lines_of(text);
     let line_h = metrics.line_height();
     let block_h = lines.len() as f32 * line_h;
+    let max_pad = if style.inset_padding {
+        style.padding.max(0.0)
+    } else {
+        0.0
+    };
+    let pad = ((size.1 - block_h) / 2.0).clamp(0.0, max_pad);
     let avail_w = (size.0 - 2.0 * pad).max(0.0);
     let avail_h = (size.1 - 2.0 * pad).max(0.0);
     let top = match style.valign {
@@ -153,10 +169,11 @@ pub fn layout_text(
         .enumerate()
         .map(|(i, line)| {
             let width = metrics.line_width(line);
+            let pad_x = pad.min(((size.0 - width) / 2.0).max(0.0));
             let x = match style.halign {
-                HAlign::Left => pad,
+                HAlign::Left => pad_x,
                 HAlign::Center => pad + (avail_w - width) / 2.0,
-                HAlign::Right => size.0 - pad - width,
+                HAlign::Right => size.0 - pad_x - width,
             };
             LaidOutLine {
                 text: (*line).to_string(),
@@ -168,24 +185,47 @@ pub fn layout_text(
         .collect()
 }
 
-/// [`TextMetrics`] for an `ab_glyph` font at `px` pixels per em height.
+/// Scene units per em for one text `pointsize` point. Wallpaper Engine rasterizes text at
+/// 300 DPI (`300 / 72` units per point): across the sampled Workshop scenes a one-line text
+/// box is ~4.2 x pointsize x the font's line-height ratio.
+pub const TEXT_UNITS_PER_POINT: f32 = 300.0 / 72.0;
+
+/// [`TextMetrics`] for an `ab_glyph` font at a Wallpaper Engine `pointsize`.
 pub struct FontMetrics<'a> {
     font: &'a FontVec,
     scale: PxScale,
+    pointsize: f32,
 }
 
 impl<'a> FontMetrics<'a> {
-    pub fn new(font: &'a FontVec, px: f32) -> Self {
+    pub fn new(font: &'a FontVec, pointsize: f32) -> Self {
         Self {
             font,
-            scale: PxScale::from(px.clamp(1.0, 2048.0)),
+            scale: PxScale::from(text_px_scale(font, pointsize)),
+            pointsize,
         }
     }
+}
+
+/// `ab_glyph` scale (ascent-to-descent height in units) for `pointsize`.
+pub fn text_px_scale(font: &FontVec, pointsize: f32) -> f32 {
+    let em = pointsize * TEXT_UNITS_PER_POINT;
+    let ratio = font
+        .units_per_em()
+        .filter(|u| *u > 0.0)
+        .map(|u| font.height_unscaled() / u)
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or(1.0);
+    (em * ratio).clamp(1.0, 4096.0)
 }
 
 impl TextMetrics for FontMetrics<'_> {
     fn advance(&self, c: char) -> f32 {
         let f = self.font.as_scaled(self.scale);
+        if let Some(fb) = fallback_font_for(self.font, c) {
+            let fs = fb.as_scaled(PxScale::from(text_px_scale(fb, self.pointsize)));
+            return fs.h_advance(fs.glyph_id(c));
+        }
         f.h_advance(f.glyph_id(c))
     }
     fn ascent(&self) -> f32 {
@@ -198,6 +238,11 @@ impl TextMetrics for FontMetrics<'_> {
         self.font.as_scaled(self.scale).line_gap()
     }
     fn kern(&self, left: char, right: char) -> f32 {
+        if fallback_font_for(self.font, left).is_some()
+            || fallback_font_for(self.font, right).is_some()
+        {
+            return 0.0;
+        }
         let f = self.font.as_scaled(self.scale);
         f.kern(f.glyph_id(left), f.glyph_id(right))
     }
@@ -225,11 +270,42 @@ impl TextBitmap {
     }
 }
 
+/// Grows a text box that is too small for `text` (scripts often write longer strings than the
+/// editor text the box was sized for; Wallpaper Engine does not clip them). The box grows away
+/// from the text alignment: left-aligned text grows to the right, top-aligned text downward,
+/// centered text on both sides. Returns `(size, center offset)` in layer units (y up).
+pub fn grow_text_box(
+    metrics: &impl TextMetrics,
+    text: &str,
+    style: &TextStyle,
+    size: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    let (mw, mh) = measure_text(metrics, text, 0.0);
+    let (w, h) = (size.0.max(mw.ceil()), size.1.max(mh.ceil()));
+    let (gw, gh) = (w - size.0, h - size.1);
+    let dx = match style.halign {
+        HAlign::Left => gw / 2.0,
+        HAlign::Center => 0.0,
+        HAlign::Right => -gw / 2.0,
+    };
+    let dy = match style.valign {
+        VAlign::Top => -gh / 2.0,
+        VAlign::Center => 0.0,
+        VAlign::Bottom => gh / 2.0,
+    };
+    ((w, h), (dx, dy))
+}
+
 /// Bitmap size for a layer: the layer size, or the measured text when the layer has none.
 pub fn bitmap_size(font: &FontVec, text: &str, style: &TextStyle, layer: (f32, f32)) -> (u32, u32) {
     let clamp = |v: f32| (v.ceil().max(1.0) as u32).min(MAX_TEXT_BITMAP_DIMENSION);
     let valid = |v: f32| v.is_finite() && v >= 1.0;
     let (mut w, mut h) = layer;
+    if valid(w) && valid(h) {
+        let ((gw, gh), _) =
+            grow_text_box(&FontMetrics::new(font, style.pointsize), text, style, layer);
+        return (clamp(gw), clamp(gh));
+    }
     if !valid(w) || !valid(h) {
         let (mw, mh) = measure_text(
             &FontMetrics::new(font, style.pointsize),
@@ -261,6 +337,19 @@ pub fn rasterize(
         let mut x = line.x;
         let mut prev: Option<ab_glyph::GlyphId> = None;
         for c in line.text.chars() {
+            if let Some(fb) = fallback_font_for(font, c) {
+                // The scene's font lacks this glyph (CJK): draw it from a system font.
+                let fscale = PxScale::from(text_px_scale(fb, style.pointsize));
+                let fs = fb.as_scaled(fscale);
+                let id = fs.glyph_id(c);
+                prev = None;
+                let glyph = id.with_scale_and_position(fscale, point(x, line.baseline));
+                x += fs.h_advance(id);
+                if let Some(outlined) = fb.outline_glyph(glyph) {
+                    blit(&mut bitmap, &outlined);
+                }
+                continue;
+            }
             let id = scaled.glyph_id(c);
             if let Some(p) = prev {
                 x += scaled.kern(p, id);
@@ -271,20 +360,87 @@ pub fn rasterize(
             let Some(outlined) = font.outline_glyph(glyph) else {
                 continue;
             };
-            let bounds = outlined.px_bounds();
-            outlined.draw(|gx, gy, coverage| {
-                let px = bounds.min.x as i64 + gx as i64;
-                let py = bounds.min.y as i64 + gy as i64;
-                if px < 0 || py < 0 || px >= width as i64 || py >= height as i64 {
-                    return;
-                }
-                let idx = ((py as u32 * width + px as u32) * 4 + 3) as usize;
-                let a = (coverage.clamp(0.0, 1.0) * 255.0).round() as u16;
-                bitmap.rgba[idx] = (bitmap.rgba[idx] as u16 + a).min(255) as u8;
-            });
+            blit(&mut bitmap, &outlined);
         }
     }
     bitmap
+}
+
+/// Adds an outlined glyph's coverage into the bitmap's alpha channel.
+fn blit(bitmap: &mut TextBitmap, outlined: &ab_glyph::OutlinedGlyph) {
+    let (width, height) = (bitmap.width, bitmap.height);
+    let bounds = outlined.px_bounds();
+    outlined.draw(|gx, gy, coverage| {
+        let px = bounds.min.x as i64 + gx as i64;
+        let py = bounds.min.y as i64 + gy as i64;
+        if px < 0 || py < 0 || px >= width as i64 || py >= height as i64 {
+            return;
+        }
+        let idx = ((py as u32 * width + px as u32) * 4 + 3) as usize;
+        let a = (coverage.clamp(0.0, 1.0) * 255.0).round() as u16;
+        bitmap.rgba[idx] = (bitmap.rgba[idx] as u16 + a).min(255) as u8;
+    });
+}
+
+/// CJK-capable system fonts tried, in order, for characters a scene's font lacks.
+const CJK_FALLBACK_FONTS: &[&str] = &[
+    "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\YuGothR.ttc",
+    r"C:\Windows\Fonts\yugothic.ttf",
+    r"C:\Windows\Fonts\msgothic.ttc",
+    r"C:\Windows\Fonts\simsun.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+];
+
+/// The `idx`th fallback font, read from disk on first use and then shared. `None` when the
+/// file is missing or unreadable.
+fn cjk_fallback_font(idx: usize) -> Option<&'static FontVec> {
+    static FONTS: [std::sync::OnceLock<Option<FontVec>>; CJK_FALLBACK_FONTS.len()] =
+        [const { std::sync::OnceLock::new() }; CJK_FALLBACK_FONTS.len()];
+    FONTS
+        .get(idx)?
+        .get_or_init(|| {
+            std::fs::read(CJK_FALLBACK_FONTS[idx])
+                .ok()
+                .and_then(font_from_bytes)
+        })
+        .as_ref()
+}
+
+/// True for characters worth a fallback lookup (not whitespace, controls or ASCII).
+fn wants_fallback(c: char) -> bool {
+    !c.is_ascii() && !c.is_whitespace() && !c.is_control()
+}
+
+/// A system font that has a glyph for `c`, when `font` has none.
+fn fallback_font_for(font: &FontVec, c: char) -> Option<&'static FontVec> {
+    if !wants_fallback(c) || font.glyph_id(c).0 != 0 {
+        return None;
+    }
+    // A glyph no fallback has would otherwise read every fallback file again on each call.
+    static MISSING: std::sync::Mutex<Option<std::collections::HashSet<char>>> =
+        std::sync::Mutex::new(None);
+    if MISSING
+        .lock()
+        .is_ok_and(|m| m.as_ref().is_some_and(|set| set.contains(&c)))
+    {
+        return None;
+    }
+    // Later fonts are only read when the earlier ones lack the glyph.
+    let found = (0..CJK_FALLBACK_FONTS.len())
+        .filter_map(cjk_fallback_font)
+        .find(|f| f.glyph_id(c).0 != 0);
+    if found.is_none() {
+        if let Ok(mut m) = MISSING.lock() {
+            m.get_or_insert_with(Default::default).insert(c);
+        }
+    }
+    found
 }
 
 /// Inputs that determine a rasterized bitmap.
@@ -377,9 +533,11 @@ pub fn load_font(vfs: &WeVirtualFileSystem, font: Option<&str>) -> Result<FontVe
             match vfs.read_bytes(name) {
                 Ok(bytes) => match font_from_bytes(bytes) {
                     Some(f) => return Ok(f),
-                    None => tracing::warn!("font {name} is not a valid font file"),
+                    None => {
+                        tracing::debug!("font {name} is not a valid font file; using a system font")
+                    }
                 },
-                Err(e) => tracing::warn!("cannot read font {name}: {e}"),
+                Err(e) => tracing::debug!("cannot read font {name}: {e}; using a system font"),
             }
         } else {
             for path in system_font_candidates(name) {
@@ -425,6 +583,35 @@ mod tests {
         }
     }
 
+    /// Regression (3122339805): script text longer than the editor box is not clipped; the box
+    /// grows away from the alignment.
+    #[test]
+    fn long_text_grows_the_box_away_from_the_alignment() {
+        let box_ = (30.0, 10.0);
+        let st = |h| style(h, VAlign::Center, 0.0);
+        assert_eq!(
+            grow_text_box(&Fixed, "abcde", &st(HAlign::Left), box_),
+            ((50.0, 10.0), (10.0, 0.0))
+        );
+        assert_eq!(
+            grow_text_box(&Fixed, "abcde", &st(HAlign::Right), box_),
+            ((50.0, 10.0), (-10.0, 0.0))
+        );
+        assert_eq!(
+            grow_text_box(
+                &Fixed,
+                "ab\ncd",
+                &style(HAlign::Center, VAlign::Top, 0.0),
+                box_
+            ),
+            ((30.0, 20.0), (0.0, -5.0))
+        );
+        assert_eq!(
+            grow_text_box(&Fixed, "ab", &st(HAlign::Left), box_),
+            (box_, (0.0, 0.0))
+        );
+    }
+
     #[test]
     fn measure_includes_padding_and_longest_line() {
         assert_eq!(measure_text(&Fixed, "ab\nabcd", 5.0), (50.0, 30.0));
@@ -454,18 +641,69 @@ mod tests {
         assert_eq!((l[0].x, l[0].baseline), (70.0, 30.0 + 8.0));
     }
 
+    /// Regression (3122339805): the default padding of 32 must not push left-aligned header
+    /// text out of a one-line box saved without padding.
     #[test]
-    fn padding_shrinks_the_available_area() {
-        let size = (100.0, 40.0);
-        let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 6.0));
-        assert_eq!((l[0].x, l[0].baseline), (6.0, 14.0));
+    fn padding_does_not_inset_a_box_saved_without_it() {
+        let size = (100.0, 10.0);
+        let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 32.0));
+        assert_eq!((l[0].x, l[0].baseline), (0.0, 8.0));
         let l = layout_text(
             &Fixed,
             "abc",
             size,
-            &style(HAlign::Right, VAlign::Bottom, 6.0),
+            &style(HAlign::Right, VAlign::Bottom, 32.0),
         );
-        assert_eq!((l[0].x, l[0].baseline), (64.0, 24.0 + 8.0));
+        assert_eq!((l[0].x, l[0].baseline), (70.0, 8.0));
+        // Text wider than the horizontal slack is not pushed out either.
+        let l = layout_text(
+            &Fixed,
+            "abcdefghi",
+            (100.0, 74.0),
+            &style(HAlign::Left, VAlign::Top, 32.0),
+        );
+        assert_eq!(l[0].x, 5.0);
+    }
+
+    /// Regression (2134765860): a box saved as text + 2 x padding insets by the padding, so a
+    /// clock (padding 82) and its shadow (padding 32) right-align to the same edge.
+    #[test]
+    fn padding_insets_a_box_saved_with_it() {
+        let right_edge = |size: (f32, f32), pad: f32| {
+            let l = layout_text(
+                &Fixed,
+                "12:08:40",
+                size,
+                &style(HAlign::Right, VAlign::Center, pad),
+            );
+            -size.0 / 2.0 + l[0].x + l[0].width
+        };
+        let clock = right_edge((80.0 + 164.0, 10.0 + 164.0), 82.0);
+        let shadow = right_edge((80.0 + 64.0, 10.0 + 64.0), 32.0);
+        assert_eq!(clock, shadow);
+        assert_eq!(clock, 40.0);
+        // A box hung from its origin by alignment keeps the text on its edge.
+        let hung = TextStyle {
+            inset_padding: false,
+            ..style(HAlign::Right, VAlign::Bottom, 32.0)
+        };
+        let l = layout_text(&Fixed, "abc", (94.0, 74.0), &hung);
+        assert_eq!((l[0].x, l[0].baseline), (64.0, 72.0));
+    }
+
+    #[test]
+    fn padding_is_capped_by_the_box() {
+        let size = (100.0, 40.0);
+        let l = layout_text(&Fixed, "abc", size, &style(HAlign::Left, VAlign::Top, 32.0));
+        // Only 15 units of room around one 10-unit line.
+        assert_eq!((l[0].x, l[0].baseline), (15.0, 23.0));
+        let l = layout_text(
+            &Fixed,
+            "abc",
+            size,
+            &style(HAlign::Right, VAlign::Bottom, 32.0),
+        );
+        assert_eq!((l[0].x, l[0].baseline), (55.0, 23.0));
     }
 
     #[test]
@@ -541,6 +779,100 @@ mod tests {
         let (w, h) = bitmap_size(&font, "Hi", &style, (0.0, 0.0));
         assert!(w > 1 && h > 1);
         let bmp = rasterize(&font, "Hi", w, h, &style);
+        assert!(bmp.rgba.chunks_exact(4).any(|p| p[3] > 128));
+    }
+
+    #[test]
+    fn text_bitmap_uses_the_layer_box_not_the_pointsize() {
+        // A text layer's texture is its scene-unit size; `pointsize` only scales the glyphs in it.
+        let vfs = WeVirtualFileSystem::mount(
+            std::env::temp_dir().join("tp-no-wallpaper"),
+            std::env::temp_dir().join("tp-no-wallpaper-core"),
+        );
+        let Ok(font) = load_font(&vfs, None) else {
+            return; // no system font on this machine
+        };
+        let small = TextStyle {
+            pointsize: 10.0,
+            ..TextStyle::default()
+        };
+        let large = TextStyle {
+            pointsize: 45.0,
+            ..TextStyle::default()
+        };
+        assert_eq!(
+            bitmap_size(&font, "12:34", &small, (626.0, 366.0)),
+            (626, 366)
+        );
+        assert_eq!(
+            bitmap_size(&font, "12:34", &large, (626.0, 366.0)),
+            (626, 366)
+        );
+        let ink = |style: &TextStyle| {
+            rasterize(&font, "12:34", 626, 366, style)
+                .rgba
+                .chunks_exact(4)
+                .map(|p| p[3] as u64)
+                .sum::<u64>()
+        };
+        assert!(ink(&large) > ink(&small) * 4);
+    }
+
+    /// Regression (3122339805): `pointsize` is in points at 300 DPI, so one line of 9 pt text
+    /// fills a ~23-unit header box (em ~37 units).
+    #[test]
+    fn pointsize_maps_to_300_dpi_em() {
+        let vfs = WeVirtualFileSystem::mount(
+            std::env::temp_dir().join("tp-no-wallpaper"),
+            std::env::temp_dir().join("tp-no-wallpaper-core"),
+        );
+        let Ok(font) = load_font(&vfs, None) else {
+            return;
+        };
+        let m = FontMetrics::new(&font, 9.0);
+        let em = 9.0 * TEXT_UNITS_PER_POINT;
+        let h = m.ascent() - m.descent();
+        let ratio = font.height_unscaled() / font.units_per_em().unwrap();
+        assert!((h - em * ratio).abs() < 0.5, "{h} vs {}", em * ratio);
+        assert!((37.0..38.0).contains(&em));
+    }
+
+    #[test]
+    fn fallback_fonts_are_lazy_and_shared() {
+        assert!(cjk_fallback_font(CJK_FALLBACK_FONTS.len()).is_none());
+        for i in 0..CJK_FALLBACK_FONTS.len() {
+            let (a, b) = (cjk_fallback_font(i), cjk_fallback_font(i));
+            assert_eq!(
+                a.map(|f| f as *const FontVec),
+                b.map(|f| f as *const FontVec)
+            );
+        }
+        // ASCII never triggers a fallback lookup.
+        assert!(!wants_fallback('a'));
+    }
+
+    #[test]
+    fn cjk_text_falls_back_to_a_system_font() {
+        assert!(!wants_fallback('a') && !wants_fallback(' ') && wants_fallback('\u{3042}'));
+        let Some(cjk) = (0..CJK_FALLBACK_FONTS.len()).find_map(cjk_fallback_font) else {
+            return; // no CJK system font on this machine
+        };
+        if cjk.glyph_id('\u{3042}').0 == 0 {
+            return;
+        }
+        let vfs = WeVirtualFileSystem::mount(
+            std::env::temp_dir().join("truongpaper-text-none"),
+            std::env::temp_dir().join("truongpaper-text-none-core"),
+        );
+        let Ok(font) = load_font(&vfs, None) else {
+            return;
+        };
+        let style = TextStyle {
+            pointsize: 24.0,
+            ..TextStyle::default()
+        };
+        let (w, h) = bitmap_size(&font, "\u{3042}\u{3044}", &style, (0.0, 0.0));
+        let bmp = rasterize(&font, "\u{3042}\u{3044}", w, h, &style);
         assert!(bmp.rgba.chunks_exact(4).any(|p| p[3] > 128));
     }
 }

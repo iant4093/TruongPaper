@@ -1,6 +1,6 @@
 // src/components/views/MonitorsView.tsx
 // §2.5 View 4: "Monitors & Fit" View
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Copy, Lock } from 'lucide-react';
 import { currentWallpaperForMonitor, useAppStore } from '../../store/useAppStore';
@@ -57,6 +57,8 @@ const VolumeSlider: React.FC<{ monitor: MonitorInfo; onError: (message: string) 
 };
 
 export const MonitorsView: React.FC = () => {
+  const loaded = useAppStore((s) => s.loaded);
+  const loadFailed = useAppStore((s) => s.loadFailed);
   const monitors = useAppStore((s) => s.monitors);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const settings = useAppStore((s) => s.settings);
@@ -67,11 +69,11 @@ export const MonitorsView: React.FC = () => {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const [msg, setMsg] = useState<string | null>(null);
-  const showsOptions = [
+  const showsOptions = useMemo(() => [
     ['photo_api', 'Photos'] as const,
     ...wallpapers.filter((w) => w.type !== 'photo').map((w) => [`w:${w.wallpaperId}`, w.title] as const),
     ...playlists.map((p) => [`p:${p.playlistId}`, `Playlist: ${p.name}`] as const),
-  ];
+  ], [wallpapers, playlists]);
   const setShows = (monitor: MonitorInfo, key: string) => {
     const source = sourceFromKey(key);
     const label = showsOptions.find(([k]) => k === key)?.[1] ?? 'Photos';
@@ -107,7 +109,7 @@ export const MonitorsView: React.FC = () => {
       }
       toast.success(`Showing ${describeSource(active.activeSource, lookup)} on all displays`);
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
+      toast.error(err, 'Could not show it on every display');
     }
   };
   const report = (action: Promise<unknown>) => {
@@ -171,7 +173,11 @@ export const MonitorsView: React.FC = () => {
             </button>
           );
         })}
-        {monitors.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No displays detected.</div>}
+        {monitors.length === 0 && (
+          <div role="status" style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+            {loaded ? 'No displays detected.' : loadFailed ? 'Could not load your displays. Use Retry above.' : 'Loading…'}
+          </div>
+        )}
       </div>
 
       {monitors.length > 0 && (

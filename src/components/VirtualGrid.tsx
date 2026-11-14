@@ -8,6 +8,10 @@ const ROW_GAP = 20;
 const COL_GAP = 16;
 const INFO_HEIGHT = 112; // keep in sync with .wallpaper-info
 const OVERSCAN_ROWS = 2;
+/** Cards mounted before the grid has been measured. */
+export const FIRST_RENDER_CAP = 24;
+/** Scroll offsets are kept in steps of this many pixels; the overscan rows cover the gap. */
+const SCROLL_STEP = 64;
 
 function scrollParent(node: HTMLElement | null): HTMLElement | null {
   for (let el = node?.parentElement ?? null; el; el = el.parentElement) {
@@ -38,6 +42,8 @@ export function VirtualGrid<T>({ items, getKey, renderItem, label, minColumn = 2
   const rowHeight = colWidth * 0.625 + INFO_HEIGHT + ROW_GAP;
   const totalRows = Math.ceil(items.length / cols);
   const windowed = items.length > VIRTUALIZE_ABOVE && width > 0 && viewport.height > 0;
+  // Before the first measure a big list shows only a first screenful, not every card.
+  const unmeasured = items.length > VIRTUALIZE_ABOVE && !windowed;
 
   const measure = useCallback(() => {
     const node = ref.current;
@@ -46,8 +52,9 @@ export function VirtualGrid<T>({ items, getKey, renderItem, label, minColumn = 2
     const scroller = scrollParent(node);
     if (!scroller) { setViewport((v) => (v.height === 0 && v.top === 0 ? v : { top: 0, height: 0 })); return; }
     const offset = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-    const next = { top: Math.max(0, scroller.scrollTop - offset), height: scroller.clientHeight };
-    setViewport((v) => (Math.abs(v.top - next.top) < 1 && v.height === next.height ? v : next));
+    const top = Math.floor(Math.max(0, scroller.scrollTop - offset) / SCROLL_STEP) * SCROLL_STEP;
+    const next = { top, height: scroller.clientHeight };
+    setViewport((v) => (v.top === next.top && v.height === next.height ? v : next));
   }, []);
 
   useLayoutEffect(() => {
@@ -75,7 +82,7 @@ export function VirtualGrid<T>({ items, getKey, renderItem, label, minColumn = 2
     endRow = Math.min(totalRows, Math.ceil((viewport.top + viewport.height) / rowHeight) + OVERSCAN_ROWS);
   }
   const start = startRow * cols;
-  const end = Math.min(items.length, endRow * cols);
+  const end = Math.min(items.length, unmeasured ? FIRST_RENDER_CAP : endRow * cols);
   const visible = useMemo(() => items.slice(start, end), [items, start, end]);
 
   const lastIndex = Math.max(0, items.length - 1);

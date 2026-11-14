@@ -18,10 +18,11 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import { confirmAction, toast } from '../../store/feedback';
 import { parseImportLink } from '../../lib/importLinks';
-import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, plural } from '../../lib/format';
+import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, plural } from '../../lib/format';
 import type { FitMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 import { Dropdown } from '../Dropdown';
+import { PhotoTransitionControls } from '../SourceDetails';
 
 const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
@@ -38,14 +39,38 @@ const PhotoBadges: React.FC<{ photo: PhotoItem }> = ({ photo }) => (
   </div>
 );
 
+/** Photo status events replace every photo object, so compare by what the tile shows. */
+const PhotoTileMedia = React.memo(
+  ({ photo }: { photo: PhotoItem }) => (
+    <>
+      <Thumb src={photoPreviewSrc(photo)} alt={photoAlbumName(photo)} height={112} lazy contain />
+      <PhotoBadges photo={photo} />
+      <div className="photo-meta">{photoDims(photo)} · {formatBytes(photo.bytes)}</div>
+    </>
+  ),
+  (a, b) =>
+    a.photo.id === b.photo.id &&
+    a.photo.featured === b.photo.featured &&
+    a.photo.bytes === b.photo.bytes &&
+    a.photo.albumSlug === b.photo.albumSlug,
+);
+
 const PhotoTile: React.FC<{ photo: PhotoItem; children: React.ReactNode }> = ({ photo, children }) => (
   <article className="card photo-tile">
-    <Thumb src={photoPreviewSrc(photo)} alt={photoAlbumName(photo)} height={112} lazy contain />
-    <PhotoBadges photo={photo} />
-    <div className="photo-meta">{photoDims(photo)} · {formatBytes(photo.bytes)}</div>
+    <PhotoTileMedia photo={photo} />
     <div className="photo-actions">{children}</div>
   </article>
 );
+
+/** Long lists show this many tiles first. */
+const TILE_PAGE = 60;
+
+const ShowMore: React.FC<{ shown: number; total: number; onMore: () => void }> = ({ shown, total, onMore }) =>
+  total > shown ? (
+    <div style={{ marginTop: 10 }}>
+      <button type="button" className="button" onClick={onMore}>Show more ({total - shown})</button>
+    </div>
+  ) : null;
 
 export const PhotosApiView: React.FC = () => {
   const photoStatus = useAppStore((s) => s.photoStatus);
@@ -76,7 +101,11 @@ export const PhotosApiView: React.FC = () => {
   const [albumInput, setAlbumInput] = useState('');
   const [albumMsg, setAlbumMsg] = useState<string | null>(null);
   const [cacheDraft, setCacheDraft] = useState<number | null>(null);
-  const [photoActionPending, setPhotoActionPending] = useState(false);
+  // A counter, so the first action to finish does not re-enable buttons while another still runs.
+  const [pendingActions, setPendingActions] = useState(0);
+  const photoActionPending = pendingActions > 0;
+  const [favoritesShown, setFavoritesShown] = useState(TILE_PAGE);
+  const [queueShown, setQueueShown] = useState(TILE_PAGE);
   const favoritesSection = useRef<HTMLElement>(null);
   const catalogSection = useRef<HTMLDivElement>(null);
 
@@ -92,14 +121,14 @@ export const PhotosApiView: React.FC = () => {
   const favorites = photoStatus?.favoritePhotos ?? [];
 
   const runPhotoAction = async (action: () => Promise<void>, done?: string) => {
-    setPhotoActionPending(true);
+    setPendingActions((n) => n + 1);
     try {
       await action();
       if (done) toast.success(done);
     } catch (error) {
       toast.error(error);
     } finally {
-      setPhotoActionPending(false);
+      setPendingActions((n) => n - 1);
     }
   };
 
@@ -107,7 +136,9 @@ export const PhotosApiView: React.FC = () => {
   useEffect(() => {
     if (cacheDraft === null) return;
     const t = window.setTimeout(() => {
-      void setCacheLimit(cacheDraft).finally(() => setCacheDraft(null));
+      setCacheLimit(cacheDraft)
+        .catch((error) => toast.error(error, 'Could not change the storage limit'))
+        .finally(() => setCacheDraft(null));
     }, 400);
     return () => window.clearTimeout(t);
   }, [cacheDraft, setCacheLimit]);
@@ -233,12 +264,12 @@ export const PhotosApiView: React.FC = () => {
 
 
       {/* Filter Controls Card */}
-      <div className="card" style={{ padding: 16 }}>
+      <div className="card" style={{ padding: 16, marginTop: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Photo source</div>
         <SegmentedControl
           value={mode}
           options={PHOTO_POOL_OPTIONS}
-          onChange={(next) => void setPhotoFilter(next, next === 'featured' ? true : featuredOnly)}
+          onChange={(next) => void runPhotoAction(() => setPhotoFilter(next, next === 'featured' ? true : featuredOnly))}
         />
         {mode === 'albums' && (
           <div style={{ marginTop: 12 }}>
@@ -246,10 +277,18 @@ export const PhotosApiView: React.FC = () => {
               label="Featured Only"
               description="Only draw featured photos from the enabled albums"
               checked={featuredOnly}
-              onChange={(next) => void setPhotoFilter('albums', next)}
+              onChange={(next) => void runPhotoAction(() => setPhotoFilter('albums', next))}
             />
           </div>
         )}
+        <div className="settings-field" style={{ marginTop: 12 }}>
+          <span>Change photo every</span>
+          <Dropdown<number> label="Change photo every" value={settings?.rotationIntervalSeconds ?? 1800}
+            options={ROTATION_INTERVALS.map((r) => [r.seconds, r.label] as const)}
+            onChange={(rotationIntervalSeconds) => void runPhotoAction(() => updateSettings({ rotationIntervalSeconds }), 'Saved')} />
+          <span className="view-subtitle">For displays showing photos. Playlists keep their own timer.</span>
+        </div>
+        <PhotoTransitionControls />
         <div className="settings-field" style={{ marginTop: 12 }}>
           <span>Photo fit</span>
           <Dropdown<FitMode> label="Photo fit" value={settings?.defaultFitMode ?? 'fill'}
@@ -262,7 +301,7 @@ export const PhotosApiView: React.FC = () => {
             label="Match photo orientation to display"
             description="Offline photos and automatic rotation match the selected display."
             checked={settings?.skipMismatchedOrientation ?? true}
-            onChange={(next) => void updateSettings({ skipMismatchedOrientation: next })}
+            onChange={(next) => void runPhotoAction(() => updateSettings({ skipMismatchedOrientation: next }))}
           />
         </div>
       </div>
@@ -283,7 +322,7 @@ export const PhotosApiView: React.FC = () => {
             <div style={cardGrid}>
               {publicCatalog.map((album) => (
                 <div key={album.albumId} className="card" style={{ padding: 12 }}>
-                  <Thumb src={album.coverThumbnailUrl} alt={album.title} height={110} />
+                  <Thumb src={album.coverThumbnailUrl} alt={album.title} height={110} lazy />
                   <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                     <Badge>{album.category}</Badge>
                     <Badge tone="muted">{album.imageCount} photos</Badge>
@@ -294,7 +333,7 @@ export const PhotosApiView: React.FC = () => {
                     className="button button-primary"
                     style={{ width: '100%', marginTop: 10, fontSize: 12 }}
                     disabled={savedSlugs.has(album.slug)}
-                    onClick={() => void addAlbum(album.slug, album.title)}
+                    onClick={() => void runPhotoAction(async () => { await addAlbum(album.slug, album.title); }, 'Saved')}
                   >
                     {savedSlugs.has(album.slug) ? 'Saved' : 'Save & Enable Album'}
                   </button>
@@ -327,7 +366,7 @@ export const PhotosApiView: React.FC = () => {
       {savedAlbums.length ? <div style={cardGrid}>
         {savedAlbums.map((album) => (
           <div key={album.albumSlug} className="card" style={{ padding: 12 }}>
-            <Thumb src={album.coverThumbnailUrl} alt={album.displayName} height={90} />
+            <Thumb src={album.coverThumbnailUrl} alt={album.displayName} height={90} lazy />
             <div className="album-title">{album.displayName}</div>
             {album.imageCount !== undefined && <div className="view-subtitle" style={{ marginTop: 2 }}>{plural(album.imageCount, 'photo')}</div>}
             <label className="album-switch">
@@ -354,7 +393,7 @@ export const PhotosApiView: React.FC = () => {
         <p className="photo-section-description">Favorites stay on disk and can come up again when they match your photo filters.</p>
         {favorites.length ? (
           <div style={cardGrid}>
-            {favorites.map((photo) => (
+            {favorites.slice(0, favoritesShown).map((photo) => (
               <PhotoTile key={photo.id} photo={photo}>
                 <button type="button" className="button button-primary"
                   disabled={!activeMonitorId || photoActionPending || currentPhoto?.id === photo.id}
@@ -372,21 +411,22 @@ export const PhotosApiView: React.FC = () => {
             ))}
           </div>
         ) : <div className="view-subtitle">Add a wallpaper to favorites to find it here later.</div>}
+        <ShowMore shown={favoritesShown} total={favorites.length} onMore={() => setFavoritesShown((n) => n + TILE_PAGE)} />
       </section>
 
       {/* Up Next Queue */}
       <SectionTitle>{formatOfflinePhotoCount(queue.length)}</SectionTitle>
       <div style={cardGrid}>
-        {queue.map((photo, idx) => (
+        {queue.slice(0, queueShown).map((photo, idx) => (
           <PhotoTile key={photo.id} photo={photo}>
               {idx === 0 && (
                 <button
                   type="button"
                   className="button button-primary"
-                  disabled={photoActionPending}
+                  disabled={photoActionPending || !activeMonitorId}
                   onClick={() => void runPhotoAction(() => rotateNextPhoto(activeMonitorId))}
                 >
-                  <SkipForward size={12} /> Apply Now
+                  <SkipForward size={12} /> Show next
                 </button>
               )}
               <button
@@ -407,6 +447,7 @@ export const PhotosApiView: React.FC = () => {
           </div>
         )}
       </div>
+      <ShowMore shown={queueShown} total={queue.length} onMore={() => setQueueShown((n) => n + TILE_PAGE)} />
 
       {/* Storage & history Bar */}
       <SectionTitle>Storage & history</SectionTitle>
@@ -419,6 +460,7 @@ export const PhotosApiView: React.FC = () => {
         </div>
         <div
           role="progressbar"
+          aria-label="Photo storage used"
           aria-valuenow={Math.round((cached / Math.max(maxCache, 1)) * 100)}
           aria-valuemin={0}
           aria-valuemax={100}
@@ -455,7 +497,7 @@ export const PhotosApiView: React.FC = () => {
             label="Start over when every photo has been shown"
             description="Recommended. When off, only new photos and matching favorites rotate."
             checked={settings?.exhaustionAutoReset ?? true}
-            onChange={(next) => void updateSettings({ exhaustionAutoReset: next })}
+            onChange={(next) => void runPhotoAction(() => updateSettings({ exhaustionAutoReset: next }))}
           />
         </div>
 

@@ -2,16 +2,16 @@ import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useSt
 import { Images, Search, X } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { toast } from '../../store/feedback';
-import { WALLPAPER_TYPE_LABEL, OFFLINE_NOTICE, offlinePhotosForDisplay, photoPreviewSrc } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, OFFLINE_NOTICE, offlinePhotosForDisplay, photoPreviewSrc, plural, wallpaperPreviewSrc } from '../../lib/format';
 import { useSlashToFocus } from '../../lib/hooks';
-import type { WallpaperItem, WallpaperType } from '../../types/ipc';
+import type { Playlist, WallpaperItem, WallpaperSource, WallpaperType } from '../../types/ipc';
 import { Dropdown } from '../Dropdown';
 import { LocalImport } from '../LocalImport';
 import { ViewHeader, SegmentedControl } from '../ui';
 import { VirtualGrid } from '../VirtualGrid';
 import { WallpaperCard } from '../WallpaperCard';
 
-type LibraryFilter = 'all' | 'favorites' | WallpaperType;
+type LibraryFilter = 'all' | 'favorites' | 'playlists' | WallpaperType;
 
 const TYPE_FILTERS = [
   ['photo', 'Photos'],
@@ -30,6 +30,8 @@ const SORT_OPTIONS = [
 ] as const satisfies ReadonlyArray<readonly [LibrarySort, string]>;
 const LIBRARY_PREFS_KEY = 'truongpaper.library';
 const PHOTOS_ID = '__photography__';
+/** Library tile ids for playlists, so they never clash with wallpaper ids. */
+const PLAYLIST_PREFIX = 'playlist:';
 
 interface LibraryPrefs { filter: LibraryFilter; sort: LibrarySort }
 
@@ -66,19 +68,19 @@ export function sortLibrary(items: WallpaperItem[], sort: LibrarySort): Wallpape
   }
 }
 
-type Entry = { id: string; kind: 'photos' } | { id: string; kind: 'wallpaper'; item: WallpaperItem };
+type Entry = { id: string; kind: 'photos' } | { id: string; kind: 'wallpaper'; item: WallpaperItem } | { id: string; kind: 'playlist'; playlist: Playlist };
 
 export const AllWallpapersView: React.FC<{
   onOpenDetails: () => void;
   onNavigate: (tab: 'workshop') => void;
 }> = ({ onOpenDetails, onNavigate }) => {
   const wallpapers = useAppStore((s) => s.wallpapers);
+  const playlists = useAppStore((s) => s.playlists);
+  const selectPlaylist = useAppStore((s) => s.selectPlaylist);
   const photoStatus = useAppStore((s) => s.photoStatus);
   const matchOrientation = useAppStore((s) => s.settings?.skipMismatchedOrientation ?? true);
   const monitors = useAppStore((s) => s.monitors);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
-  const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
-  const selectedPhotoSource = useAppStore((s) => s.selectedPhotoSource);
   const selectWallpaper = useAppStore((s) => s.selectWallpaper);
   const selectPhotoSource = useAppStore((s) => s.selectPhotoSource);
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
@@ -105,31 +107,57 @@ export const AllWallpapersView: React.FC<{
     () => photoPreviewSrc(currentPhoto ?? offlinePhotosForDisplay(photoStatus, activeMonitor, matchOrientation)[0]),
     [currentPhoto, photoStatus, activeMonitor, matchOrientation],
   );
+  /** A playlist tile shows its first wallpaper, or the current photo for photo-only lists. */
+  const playlistPreview = (playlist: Playlist) => {
+    const first = playlist.items.find((i) => i.kind === 'workshop');
+    const item = first && first.kind === 'workshop' ? wallpapers.find((w) => w.wallpaperId === first.wallpaperId) : undefined;
+    return wallpaperPreviewSrc(item) ?? photoPreview;
+  };
   const installedTypes = useMemo(() => new Set(wallpapers.map((w) => w.type)), [wallpapers]);
   const filters = TYPE_FILTERS.filter(([type]) => installedTypes.has(type));
-  const filter = selectedFilter === 'all' || selectedFilter === 'favorites' || installedTypes.has(selectedFilter) ? selectedFilter : 'all';
+  const filter = selectedFilter === 'all' || selectedFilter === 'favorites' || (selectedFilter === 'playlists' && playlists.length > 0) || installedTypes.has(selectedFilter as WallpaperType) ? selectedFilter : 'all';
   const search = deferredQuery.trim().toLowerCase();
   const favoriteCount = useMemo(() => wallpapers.filter((w) => w.isFavorite).length, [wallpapers]);
 
   const entries = useMemo<Entry[]>(() => {
-    const matching = wallpapers.filter((w) =>
+    const matching = filter === 'playlists' ? [] : wallpapers.filter((w) =>
       (filter === 'all' || (filter === 'favorites' ? w.isFavorite : w.type === filter)) && matchesLibrarySearch(w, search));
     const list: Entry[] = sortLibrary(matching, sort).map((item) => ({ id: item.wallpaperId, kind: 'wallpaper', item }));
+    // Playlists sit right after Photography, so they are easy to set like any wallpaper.
+    if (filter === 'all' || filter === 'playlists') {
+      const lists = playlists
+        .filter((p) => !search || p.name.toLowerCase().includes(search) || 'playlist'.includes(search))
+        .map((playlist): Entry => ({ id: PLAYLIST_PREFIX + playlist.playlistId, kind: 'playlist', playlist }));
+      list.unshift(...lists);
+    }
     if (filter === 'all' && 'ian truong photography photos'.includes(search)) list.unshift({ id: PHOTOS_ID, kind: 'photos' });
     return list;
-  }, [wallpapers, filter, search, sort]);
+  }, [wallpapers, playlists, filter, search, sort]);
 
+  const applySeq = useRef(0);
   const apply = useCallback(async (id: string) => {
     if (!activeMonitorId) return;
+    // Clicks are never blocked: the newest one wins, and older ones finish silently.
+    const seq = ++applySeq.current;
     setApplying(id);
-    const title = id === PHOTOS_ID ? 'Photography' : useAppStore.getState().wallpapers.find((w) => w.wallpaperId === id)?.title ?? 'Wallpaper';
+    const st = useAppStore.getState();
+    const playlistId = id.startsWith(PLAYLIST_PREFIX) ? id.slice(PLAYLIST_PREFIX.length) : null;
+    const title = id === PHOTOS_ID ? 'Photography'
+      : playlistId ? `playlist “${st.playlists.find((p) => p.playlistId === playlistId)?.name ?? 'Playlist'}”`
+        : st.wallpapers.find((w) => w.wallpaperId === id)?.title ?? 'Wallpaper';
+    const source: WallpaperSource = id === PHOTOS_ID ? { kind: 'photo_api' }
+      : playlistId ? { kind: 'playlist', playlistId } : { kind: 'workshop', wallpaperId: id };
     try {
-      await applyMonitorSource(activeMonitorId, id === PHOTOS_ID ? { kind: 'photo_api' } : { kind: 'workshop', wallpaperId: id });
-      toast.success(`Now showing ${title}`);
-    } catch (err) { toast.error(err, `Could not set ${title}`); }
-    finally { setApplying(null); }
+      await applyMonitorSource(activeMonitorId, source);
+      if (seq === applySeq.current) toast.success(`Now showing ${title}`);
+    } catch (err) { if (seq === applySeq.current) toast.error(err, `Could not set ${title}`); }
+    finally { if (seq === applySeq.current) setApplying(null); }
   }, [activeMonitorId, applyMonitorSource]);
-  const select = useCallback((id: string) => { if (id === PHOTOS_ID) selectPhotoSource(); else selectWallpaper(id); }, [selectPhotoSource, selectWallpaper]);
+  const select = useCallback((id: string) => {
+    if (id === PHOTOS_ID) selectPhotoSource();
+    else if (id.startsWith(PLAYLIST_PREFIX)) selectPlaylist(id.slice(PLAYLIST_PREFIX.length));
+    else selectWallpaper(id);
+  }, [selectPhotoSource, selectPlaylist, selectWallpaper]);
   const details = useCallback((id: string) => { select(id); onOpenDetails(); }, [select, onOpenDetails]);
   const favorite = useCallback((id: string, next: boolean) => {
     setWallpaperFavorite(id, next).then(
@@ -138,8 +166,10 @@ export const AllWallpapersView: React.FC<{
     );
   }, [setWallpaperFavorite]);
 
-  const canApply = !!activeMonitorId && applying === null;
-  const emptyLibrary = wallpapers.length === 0;
+  const canApply = !!activeMonitorId;
+  const loaded = useAppStore((s) => s.loaded);
+  const loadFailed = useAppStore((s) => s.loadFailed);
+  const emptyLibrary = loaded && wallpapers.length === 0;
 
   return (
     <div>
@@ -163,7 +193,8 @@ export const AllWallpapersView: React.FC<{
       </div>
       <div className="library-filters">
         <SegmentedControl<LibraryFilter> value={filter}
-          options={[['all', 'All'], ['favorites', favoriteCount ? `Favorites (${favoriteCount})` : 'Favorites'], ...filters]} onChange={setFilter} />
+          options={[['all', 'All'], ['favorites', favoriteCount ? `Favorites (${favoriteCount})` : 'Favorites'],
+            ...(playlists.length ? [['playlists', `Playlists (${playlists.length})`] as const] : []), ...filters]} onChange={setFilter} />
       </div>
       {emptyLibrary && (
         <div className="empty-state" role="status">
@@ -175,20 +206,27 @@ export const AllWallpapersView: React.FC<{
           </div>
         </div>
       )}
+      {!loaded && (loadFailed
+        ? <div className="view-loading" role="status">Could not load your library. Use Retry above.</div>
+        : <div className="view-loading" role="status">Loading…</div>)}
       <VirtualGrid items={entries} getKey={(e) => e.id} label="Wallpapers"
-        renderItem={(entry, cell) => entry.kind === 'photos' ? (
+        renderItem={(entry, cell) => entry.kind === 'playlist' ? (
+          <WallpaperCard id={entry.id} title={entry.playlist.name} preview={playlistPreview(entry.playlist)}
+            kind={`Playlist · ${plural(entry.playlist.items.length, 'item')}`}
+            active={activeSource?.kind === 'playlist' && activeSource.playlistId === entry.playlist.playlistId}
+            canApply={canApply} applying={applying === entry.id} tabIndex={cell.tabIndex} onApply={apply} onDetails={details} />
+        ) : entry.kind === 'photos' ? (
           <WallpaperCard id={PHOTOS_ID} title="Ian Truong Photography" preview={photoPreview}
-            kind="Photography · rotating photos" selected={selectedPhotoSource}
+            kind="Photography · rotating photos"
             active={activeSource?.kind === 'photo_api'} canApply={canApply} applying={applying === PHOTOS_ID}
-            tabIndex={cell.tabIndex} onSelect={select} onApply={apply} onDetails={details} />
+            tabIndex={cell.tabIndex} onApply={apply} onDetails={details} />
         ) : (
-          <WallpaperCard id={entry.id} title={entry.item.title} preview={entry.item.previewPath}
+          <WallpaperCard id={entry.id} title={entry.item.title} preview={wallpaperPreviewSrc(entry.item)}
             kind={WALLPAPER_TYPE_LABEL[entry.item.type]} badge={entry.item.windowsOnly ? 'Windows only' : undefined}
             audioReactive={entry.item.audioReactive} favorite={!!entry.item.isFavorite}
-            selected={entry.id === selectedWallpaperId}
             active={activeSource?.kind === 'workshop' && activeSource.wallpaperId === entry.id}
             canApply={canApply} applying={applying === entry.id} tabIndex={cell.tabIndex}
-            onSelect={select} onApply={apply} onDetails={details} onFavorite={favorite} />
+            onApply={apply} onDetails={details} onFavorite={favorite} />
         )} />
       {!emptyLibrary && !entries.some((e) => e.kind === 'wallpaper') && entries.length <= 1 && (search || filter !== 'all') && (
         <div className="empty-state" role="status">

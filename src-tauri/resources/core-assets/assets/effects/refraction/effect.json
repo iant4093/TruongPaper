@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "refraction",
+	"name": "Refraction",
+	"description": "TruongPaper built-in refraction effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/refraction.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/refraction.json",
+		"shaders/effects/refraction.frag",
+		"shaders/effects/refraction.vert"
+	]
+}

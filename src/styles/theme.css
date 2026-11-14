@@ -194,8 +194,8 @@ input.button { cursor: text; }
 .wallpaper-card .thumbnail { aspect-ratio: 16 / 10; border: 1px solid #3b3b3b; border-radius: 7px; }
 .wallpaper-card .thumbnail > * { position: absolute; inset: 0; }
 .wallpaper-select { width: 100%; border: 0; background: transparent; color: inherit; padding: 0; text-align: left; border-radius: 7px; display: block; position: relative; }
-.wallpaper-select:hover .thumbnail { border-color: #868686; }
-.wallpaper-select[aria-pressed='true'] .thumbnail { border-color: #c4c4c4; box-shadow: 0 0 0 1px #c4c4c4; }
+.wallpaper-card.is-current .thumbnail { border-color: #c4c4c4; box-shadow: 0 0 0 1px #c4c4c4; }
+.wallpaper-select:focus-visible { outline: 2px solid #bbb; outline-offset: 2px; }
 .wallpaper-info { display: flex; flex-direction: column; gap: 2px; height: 112px; padding: 10px 1px 0; overflow: hidden; }
 .wallpaper-title { font-size: 13px; font-weight: 500; color: #e8e8e8; line-height: 1.35; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; min-height: 35px; }
 .wallpaper-meta { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-muted); }
@@ -381,3 +381,56 @@ input.button { cursor: text; }
 .tray-display { max-width: 100%; }
 .tray-wallpaper-preview { min-height: 160px; }
 .tray-offline { display: flex; align-items: center; justify-content: center; gap: 6px; }
+
+/* Sidebar status line (replaces floating toasts in Studio). */
+.status-banner-slot { min-height: 0; margin-bottom: 6px; }
+.status-banner { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 9px; border-radius: 6px; border: 1px solid #3a3a3a; border-left-width: 3px; background: #262626; color: var(--text-secondary); font-size: 12px; animation: status-in 140ms ease-out both; }
+.status-success { border-left-color: #5f9b72; }
+.status-info { border-left-color: #8a8a8a; }
+.status-error { border-left-color: #c46a6a; color: var(--danger-text); }
+.status-error .status-banner-text { -webkit-line-clamp: 5; }
+.status-banner-text { flex: 1; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.status-banner-undo { border: 0; background: transparent; color: var(--text-primary); font-size: 12px; text-decoration: underline; padding: 0 2px; cursor: pointer; }
+.status-banner-close { border: 0; background: transparent; color: var(--text-muted); width: 18px; height: 18px; display: grid; place-items: center; border-radius: 4px; flex-shrink: 0; cursor: pointer; }
+.status-banner-close:hover { color: var(--text-primary); background: #333; }
+@keyframes status-in { from { opacity: 0; } to { opacity: 1; } }
+@media (max-width: 799px) { .status-banner-slot { position: fixed; left: 60px; bottom: 76px; width: 240px; z-index: 2000; } }
+
+
+/* Shared text and number fields. */
+.text-input { width: 100%; min-height: 34px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: #1c1c1c; color: var(--text-primary); font: inherit; font-size: 13px; }
+.text-input:focus { outline: none; border-color: #bbb; box-shadow: 0 0 0 2px #bbb4; }
+input[type='number'].text-input { width: 90px; }
+
+/* Playlist form (Playlists page and the details drawer). */
+.playlist-editor { display: grid; gap: 14px; }
+.playlist-editor .settings-field { margin-bottom: 0; }
+.playlist-editor-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.playlist-editor-row .settings-field { margin-bottom: 0; }
+.playlist-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; max-height: 340px; overflow-y: auto; padding: 2px; }
+.playlist-editor.is-compact .playlist-picks { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 300px; }
+.playlist-pick { display: grid; gap: 3px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; min-width: 0; }
+.playlist-pick-thumb { position: relative; display: block; border-radius: 7px; overflow: hidden; border: 1px solid #3b3b3b; aspect-ratio: 16 / 10; }
+.playlist-pick-thumb .thumbnail { position: absolute; inset: 0; border: 0; border-radius: 0; }
+.playlist-pick:hover .playlist-pick-thumb { border-color: #868686; }
+.playlist-pick.is-on .playlist-pick-thumb { border-color: #c4c4c4; box-shadow: 0 0 0 1px #c4c4c4; }
+.playlist-pick-check { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: #000a; border: 1px solid #ffffff80; color: #111; }
+.playlist-pick.is-on .playlist-pick-check { background: #e6e6e6; border-color: #e6e6e6; }
+.playlist-pick-title { font-size: 12px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-pick-kind { font-size: 11px; color: var(--text-muted); }
+.playlist-pick:focus-visible { outline: 2px solid #bbb; outline-offset: 2px; border-radius: 7px; }
+
+/* Photo and playlist settings inside the details drawer. */
+.source-settings { display: grid; gap: 14px; padding: 14px 16px 16px; }
+.source-settings .settings-field { margin-bottom: 0; }
+.source-settings > .button { justify-self: start; }
+.source-settings .inspector-danger { padding: 4px 0 0; border-top: 1px solid #2d2d2d; padding-top: 12px; }
+.photo-source-inspector .source-settings { padding: 0; }
+
+/* Workshop results: every card the same height, image fills its frame. */
+.workshop-result { display: flex; flex-direction: column; height: 100%; }
+.workshop-result .thumbnail { height: auto !important; aspect-ratio: 16 / 9; flex-shrink: 0; }
+.workshop-result .thumbnail img { object-fit: cover; }
+.workshop-result-body { display: flex; flex-direction: column; flex: 1; }
+.workshop-result-stats { margin-top: auto; padding-top: 14px; }
+.workshop-result-unrated { color: var(--text-muted); }

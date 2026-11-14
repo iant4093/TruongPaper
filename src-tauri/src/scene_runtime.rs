@@ -17,8 +17,13 @@
 
 use std::collections::{HashMap, HashSet};
 use truongpaper_audio::{effective_volume, SoundLayerPlan, SoundPlaybackMode};
-use truongpaper_renderer::{CameraState, DiagnosticsLog, SceneGraph, ScriptProperty};
-use truongpaper_scenescript::{CursorEventKind, LayerState, SceneScriptEngine};
+use truongpaper_renderer::{
+    CameraState, DiagnosticsLog, SceneGraph, SceneLayer, SceneLayerKind, ScriptProperty,
+};
+use truongpaper_scenescript::{
+    CursorEventKind, FrameInput, InputState, LayerState, SceneLayers, SceneScriptEngine,
+    LOAD_BUDGET,
+};
 use truongpaper_we_formats::scene_schema::{resolve_bound_bool, resolve_bound_value};
 use truongpaper_we_formats::WeVirtualFileSystem;
 
@@ -38,16 +43,6 @@ pub fn cursor_screen_position(cursor_norm: [f32; 2], monitor_size: [f32; 2]) -> 
 fn finite_cursor(c: [f32; 2]) -> [f32; 2] {
     let f = |v: f32| if v.is_finite() { v } else { 0.5 };
     [f(c[0]), f(c[1])]
-}
-
-/// Local time of day in `[0, 1)` from UTC (no timezone database is available here); hosts that
-/// know the local offset call [`SceneRuntime::set_time_of_day`].
-fn utc_time_of_day() -> f32 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    ((secs % 86_400.0) / 86_400.0) as f32
 }
 
 /// JS expression for a slot's initial value: `register_property_script` evaluates it as code.
@@ -78,7 +73,23 @@ fn initial_value_expr(prop: Option<ScriptProperty>, raw: &str) -> String {
             };
             visible.to_string()
         }
-        None => js_string(),
+        // Effect constants: `0.3` is a number, `"1 0 0"` a `Vec2`/`Vec3`/`Vec4`.
+        None => {
+            let nums: Option<Vec<f32>> = raw
+                .trim_matches('"')
+                .split_whitespace()
+                .map(|p| p.parse::<f32>().ok().filter(|n| n.is_finite()))
+                .collect();
+            match nums.as_deref() {
+                Some([n]) => format!("{n}"),
+                Some(v @ [_, _]) => format!("new Vec2({}, {})", v[0], v[1]),
+                Some(v @ [_, _, _]) => format!("new Vec3({}, {}, {})", v[0], v[1], v[2]),
+                Some(v @ [_, _, _, _]) => {
+                    format!("new Vec4({}, {}, {}, {})", v[0], v[1], v[2], v[3])
+                }
+                _ => js_string(),
+            }
+        }
     }
 }
 
@@ -116,21 +127,78 @@ impl SoundRng {
     }
 }
 
+/// Normalizes a user-property JSON object to `{ key: value }`: `project.json`-style property
+/// objects (`{ "type": .., "value": v }`) are unwrapped to `v`. Invalid JSON is returned as is
+/// (the caller reports the parse error).
+fn plain_properties_json(json: &str) -> String {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let plain: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::Object(mut o) if o.contains_key("value") => {
+                (k, o.remove("value").unwrap_or_default())
+            }
+            other => (k, other),
+        })
+        .collect();
+    serde_json::Value::Object(plain).to_string()
+}
+
 pub struct SceneRuntime {
     graph: SceneGraph,
     engine: SceneScriptEngine,
     camera: CameraState,
     /// `(layer index, SceneScript layer name = SceneLayer::key())`, unique names only.
     script_layers: Vec<(usize, String)>,
+    /// Graph layer index each `script_layers` entry resolves to (`find_layer`, fixed at load).
+    layer_idx: Vec<Option<usize>>,
     /// Layer state the script context currently holds (last push or pull).
     synced: HashMap<String, LayerState>,
+    /// Last value each slot produced (the script step only reports changes).
+    slot_values: HashMap<String, String>,
     registered_slots: Vec<String>,
     skipped_slots: Vec<String>,
+    /// Slots dropped at run time for overrunning the frame budget repeatedly.
+    disabled_slots: Vec<String>,
+    /// Slots dropped for throwing on every frame (subset reported separately in diagnostics).
+    failed_slots: Vec<String>,
+    /// Something other than a slot result may have written graph properties since the slots
+    /// were last applied (user properties, script layer writes, animations, load).
+    reapply_all: bool,
+    /// `render_epoch` seen at the last apply.
+    applied_epoch: u64,
     elapsed: f32,
     paused: bool,
     time_of_day: Option<f32>,
     /// Notes merged in by the host (e.g. [`truongpaper_renderer::SceneRenderer::diagnostics`]).
     extra_diagnostics: DiagnosticsLog,
+    script_stats: ScriptStats,
+}
+
+/// Wall-clock cost of the per-frame script step. Printed on drop when the
+/// `TRUONGPAPER_SCRIPT_STATS` environment variable is set (profiling aid).
+#[derive(Debug, Default, Clone, Copy)]
+struct ScriptStats {
+    frames: u32,
+    total: std::time::Duration,
+    max: std::time::Duration,
+}
+
+impl Drop for SceneRuntime {
+    fn drop(&mut self) {
+        let st = self.script_stats;
+        if st.frames > 0 && std::env::var_os("TRUONGPAPER_SCRIPT_STATS").is_some() {
+            eprintln!(
+                "script_stats frames={} total_ms={:.3} avg_us={:.1} max_us={:.1}",
+                st.frames,
+                st.total.as_secs_f64() * 1e3,
+                st.total.as_secs_f64() * 1e6 / f64::from(st.frames),
+                st.max.as_secs_f64() * 1e6
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for SceneRuntime {
@@ -181,30 +249,40 @@ impl SceneRuntime {
             engine,
             camera: CameraState::new(),
             script_layers,
+            layer_idx: Vec::new(),
             synced: HashMap::new(),
+            slot_values: HashMap::new(),
+            failed_slots: Vec::new(),
+            reapply_all: true,
+            applied_epoch: 0,
             registered_slots: Vec::new(),
             skipped_slots: Vec::new(),
+            disabled_slots: Vec::new(),
             elapsed: 0.0,
             paused: false,
             time_of_day: None,
             extra_diagnostics: DiagnosticsLog::default(),
+            script_stats: ScriptStats::default(),
         };
 
-        for (_, key) in &rt.script_layers {
-            let s = rt.graph_layer_state(key);
-            rt.engine
-                .register_layer(key, s.origin, s.scale, s.angles, s.alpha, s.visible)?;
-        }
-        // register_layer has no size/color: sync the full state once.
-        rt.push_layers()?;
+        rt.layer_idx = rt
+            .script_layers
+            .iter()
+            .map(|(_, key)| rt.graph.find_layer(key))
+            .collect();
+        // Layers (full state), groups and hierarchy go to the script context in one call.
+        rt.register_scene_layers()?;
+        rt.engine.begin_load(LOAD_BUDGET);
 
-        if let Some(json) = user_props_json {
+        let initial_props = user_props_json.map(plain_properties_json);
+        if let Some(json) = &initial_props {
             if let Err(err) = rt.engine.apply_user_properties(json) {
                 tracing::warn!("scene {scene_path}: user properties not passed to scripts: {err}");
             }
         }
 
         let mut init_outputs = Vec::new();
+        let mut pre_visible: HashMap<String, bool> = HashMap::new();
         for slot in rt.graph.property_scripts() {
             let layer_key = slot
                 .slot_key
@@ -221,11 +299,17 @@ impl SceneRuntime {
             } else {
                 slot.initial_value.clone()
             };
-            match rt.engine.register_property_script(
+            if prop == Some(ScriptProperty::Visible) {
+                if let Ok(Some(st)) = rt.engine.layer_state(&layer_key) {
+                    pre_visible.insert(slot.slot_key.clone(), st.visible);
+                }
+            }
+            match rt.engine.register_property_script_with_props(
                 &slot.slot_key,
                 &layer_key,
                 &slot.script,
                 &initial_value_expr(prop, &raw),
+                &slot.script_properties_json,
             ) {
                 Ok(value) => {
                     rt.registered_slots.push(slot.slot_key.clone());
@@ -244,14 +328,69 @@ impl SceneRuntime {
         if !rt.registered_slots.is_empty() {
             rt.pull_layers()?;
         }
-        for (slot, value) in init_outputs {
+        for (slot, mut value) in init_outputs {
+            // `init` assigning `thisLayer.visible` writes the bound property itself; `update`
+            // then receives that value, so it must not be overwritten by the stale initial one.
+            if slot.ends_with("/visible") {
+                if let Some(layer_key) = slot.rsplit_once('/').map(|(k, _)| k) {
+                    if let Ok(Some(st)) = rt.engine.layer_state(layer_key) {
+                        if pre_visible.get(&slot).is_some_and(|b| *b != st.visible) {
+                            value = st.visible.to_string();
+                            if let Err(err) = rt.engine.set_slot_bool(&slot, st.visible) {
+                                tracing::warn!("scene {scene_path}: {slot}: {err}");
+                            }
+                        }
+                    }
+                }
+            }
             rt.graph.apply_script_output(&slot, &value);
         }
+        // Scripts only exist now: give each its `applyUserProperties(all values)` call, as
+        // Wallpaper Engine does at load, so saved origin/scale/... settings take effect.
+        if let Some(json) = &initial_props {
+            if !rt.registered_slots.is_empty() && json != "{}" {
+                if let Err(err) = rt.engine.apply_user_properties(json) {
+                    tracing::warn!("scene {scene_path}: applyUserProperties at load: {err}");
+                }
+                rt.pull_layers()?;
+            }
+        }
+        // Nothing plays in a wallpaper host without media integration: tell scripts so.
+        if !rt.registered_slots.is_empty() {
+            if let Err(err) = rt.engine.dispatch_media_idle() {
+                tracing::warn!("scene {scene_path}: media idle events: {err}");
+            }
+            rt.pull_layers()?;
+        }
+        rt.engine.end_load();
+        rt.settle_scripts();
         Ok(rt)
+    }
+
+    /// Runs one zero-length script frame so `update` outputs (text, origin, visibility) are in
+    /// the graph before anything is drawn: a text layer must never show its editor placeholder.
+    fn settle_scripts(&mut self) {
+        if self.registered_slots.is_empty() {
+            return;
+        }
+        let cursor = [0.5, 0.5];
+        let world = cursor_world_position(cursor, self.scene_size());
+        if let Err(err) = self.step_scripts(0.0, cursor, world, false, &[0.0; 64], &[0.0; 64]) {
+            tracing::warn!(
+                "scene {}: SceneScript settle failed: {err}",
+                self.graph.scene_path
+            );
+        }
     }
 
     pub fn graph(&self) -> &SceneGraph {
         &self.graph
+    }
+
+    /// Mutable graph access for diagnostic tools (layer isolation in `scene_probe`).
+    #[doc(hidden)]
+    pub fn graph_mut(&mut self) -> &mut SceneGraph {
+        &mut self.graph
     }
 
     pub fn camera(&self) -> &CameraState {
@@ -272,7 +411,7 @@ impl SceneRuntime {
         self.paused = paused;
     }
 
-    /// Overrides `engine.timeOfDay` (`[0,1]`); `None` falls back to UTC.
+    /// Overrides `engine.timeOfDay` (`[0,1]`); `None` uses the script runtime's local clock.
     pub fn set_time_of_day(&mut self, time_of_day: Option<f32>) {
         self.time_of_day = time_of_day
             .filter(|t| t.is_finite())
@@ -289,6 +428,17 @@ impl SceneRuntime {
             log.push(format!(
                 "SceneScript {slot} skipped: failed to compile or start"
             ));
+        }
+        for slot in &self.disabled_slots {
+            if self.failed_slots.contains(slot) {
+                log.push(format!(
+                    "SceneScript {slot} disabled: its update threw on every frame"
+                ));
+            } else {
+                log.push(format!(
+                    "SceneScript {slot} disabled: repeatedly exceeded its time budget"
+                ));
+            }
         }
         log.extend(self.extra_diagnostics.to_vec());
         log.to_vec()
@@ -328,7 +478,9 @@ impl SceneRuntime {
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         self.elapsed += dt;
         let world = cursor_world_position(cursor_norm, self.scene_size());
+        self.graph.step_animations(self.elapsed);
         if !self.registered_slots.is_empty() {
+            let started = std::time::Instant::now();
             if let Err(err) =
                 self.step_scripts(dt, cursor_norm, world, left_down, left_64, right_64)
             {
@@ -337,6 +489,10 @@ impl SceneRuntime {
                     self.graph.scene_path
                 );
             }
+            let took = started.elapsed();
+            self.script_stats.frames += 1;
+            self.script_stats.total += took;
+            self.script_stats.max = self.script_stats.max.max(took);
         }
         // Parallax uses the pointer in scene orientation (y up), like cursorWorldPosition.
         let [x, y] = finite_cursor(cursor_norm);
@@ -357,19 +513,72 @@ impl SceneRuntime {
     ) -> anyhow::Result<()> {
         self.push_layers()?;
         let screen = cursor_screen_position(cursor_norm, self.graph.monitor_size.to_array());
-        let tod = self.time_of_day.unwrap_or_else(utc_time_of_day);
-        self.engine.set_input_state(screen, left_down, tod)?;
-        let outputs = self
-            .engine
-            .step_frame(dt, self.elapsed, world, left_64, right_64)?;
-        self.pull_layers()?;
-        // Registration order keeps multiple slots on one layer deterministic.
+        let stepped = self.engine.step_frame_diff(&FrameInput {
+            dt,
+            runtime: self.elapsed,
+            cursor_world: world,
+            input: Some(InputState {
+                cursor_screen: screen,
+                left_down,
+                time_of_day: self.time_of_day,
+            }),
+            left_64,
+            right_64,
+        });
+        self.drop_disabled_slots();
+        let out = stepped?;
+        self.apply_pulled(out.layers);
+        let mut changed: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(out.slots.len());
+        for (slot, value) in out.slots {
+            changed.insert(slot.clone());
+            self.slot_values.insert(slot, value);
+        }
+        // Registration order keeps multiple slots on one layer deterministic. Slot results
+        // must keep winning over other writers (animations, script layer state, user
+        // properties), so every slot is re-applied whenever one of those may have written the
+        // graph; otherwise only the slots whose value changed are applied.
+        let epoch = self.graph.render_epoch();
+        let all = std::mem::take(&mut self.reapply_all)
+            || self.graph.has_animations()
+            || epoch != self.applied_epoch;
+        self.applied_epoch = epoch;
         for slot in &self.registered_slots {
-            if let Some(value) = outputs.get(slot) {
+            if !all && !changed.contains(slot) {
+                continue;
+            }
+            if let Some(value) = self.slot_values.get(slot) {
                 self.graph.apply_script_output(slot, value);
             }
         }
         Ok(())
+    }
+
+    /// Forgets slots the engine disabled (frame-budget circuit breaker).
+    fn drop_disabled_slots(&mut self) {
+        self.failed_slots.extend(self.engine.take_failed_slots());
+        for slot in self.engine.take_disabled_slots() {
+            tracing::warn!(
+                "scene {}: SceneScript '{slot}' disabled after repeated frame-budget overruns",
+                self.graph.scene_path
+            );
+            self.registered_slots.retain(|s| *s != slot);
+            self.slot_values.remove(&slot);
+            self.disabled_slots.push(slot);
+        }
+    }
+
+    /// Brings back slots the breaker disabled: a property change may be what they were waiting
+    /// for, and a disabled slot otherwise stays off for the rest of the scene.
+    fn reenable_disabled_slots(&mut self) {
+        for (slot, value) in self.engine.reenable_disabled_slots() {
+            self.disabled_slots.retain(|s| *s != slot);
+            self.failed_slots.retain(|s| *s != slot);
+            if !self.registered_slots.contains(&slot) {
+                self.registered_slots.push(slot.clone());
+            }
+            self.slot_values.insert(slot, value);
+        }
     }
 
     /// Forwards a desktop cursor event (`cursorMove/Down/Up/Click`) to every script.
@@ -382,6 +591,10 @@ impl SceneRuntime {
             return Ok(());
         }
         let world = cursor_world_position(cursor_norm, self.scene_size());
+        if !self.engine.has_cursor_handler(kind) {
+            // No script listens: only the cursor input changes, no layer traffic.
+            return self.engine.dispatch_cursor_event(kind, world[0], world[1]);
+        }
         self.push_layers()?;
         self.engine
             .dispatch_cursor_event(kind, world[0], world[1])?;
@@ -392,10 +605,22 @@ impl SceneRuntime {
     /// Applies changed user properties (JSON object of `key: value`) to the scene graph (bound
     /// values re-resolve) and calls `applyUserProperties(changedProps)` on every script.
     pub fn apply_user_properties(&mut self, changed_json: &str) -> anyhow::Result<()> {
-        self.graph.apply_user_properties(changed_json)?;
+        let changed_json = plain_properties_json(changed_json);
+        self.reapply_all = true;
+        self.reenable_disabled_slots();
+        self.graph.apply_user_properties(&changed_json)?;
+        // Instance-level `scriptproperties` bound to the changed properties.
+        for slot in self.graph.property_scripts() {
+            if slot.script_properties_json != "{}" && self.registered_slots.contains(&slot.slot_key)
+            {
+                self.engine
+                    .update_script_properties(&slot.slot_key, &slot.script_properties_json)?;
+            }
+        }
         self.push_layers()?;
-        self.engine.apply_user_properties(changed_json)?;
+        self.engine.apply_user_properties(&changed_json)?;
         self.pull_layers()?;
+        self.settle_scripts();
         Ok(())
     }
 
@@ -449,6 +674,88 @@ impl SceneRuntime {
         self.graph.scene_size.to_array()
     }
 
+    /// Registers every script layer (full state), the transform-only parents (groups, as
+    /// non-enumerable pseudo layers) and the parent/child links for `getParent()/getChildren()`
+    /// in a single script call.
+    #[allow(clippy::map_entry)]
+    fn register_scene_layers(&mut self) -> anyhow::Result<()> {
+        let mut layers: Vec<LayerState> = self
+            .script_layers
+            .iter()
+            .map(|(_, key)| self.graph_layer_state(key))
+            .collect();
+        for s in &layers {
+            self.synced.insert(s.name.clone(), s.clone());
+        }
+        let mut keys: HashMap<usize, String> = HashMap::new();
+        let mut used: HashSet<String> = HashSet::new();
+        for l in &self.graph.layers {
+            let k = l.key();
+            used.insert(k.clone());
+            keys.entry(l.object_index).or_insert(k);
+        }
+        let mut groups = Vec::new();
+        let mut parents = Vec::new();
+        for l in &self.graph.layers {
+            let mut child = l.object_index;
+            let mut parent = l.parent_object;
+            let mut hops = 0;
+            while let Some(p) = parent {
+                hops += 1;
+                if hops > 256 {
+                    break;
+                }
+                if !keys.contains_key(&p) {
+                    let Some((name, t)) = self.graph.object_node(p) else {
+                        break;
+                    };
+                    let mut key = if name.is_empty() {
+                        format!("#{p}")
+                    } else {
+                        name.to_string()
+                    };
+                    if !used.insert(key.clone()) {
+                        key = format!("#{p}");
+                        used.insert(key.clone());
+                    }
+                    layers.push(LayerState {
+                        name: key.clone(),
+                        origin: t.origin.to_array(),
+                        scale: t.scale.to_array(),
+                        angles: t.angles.to_array(),
+                        size: [0.0; 2],
+                        color: [1.0; 3],
+                        alpha: 1.0,
+                        visible: true,
+                        text: String::new(),
+                    });
+                    groups.push(key.clone());
+                    keys.insert(p, key);
+                }
+                parents.push((keys[&child].clone(), keys[&p].clone()));
+                child = p;
+                parent = self.graph.object_parent(p);
+                if parents.iter().any(|(c, _)| *c == keys[&child]) {
+                    break;
+                }
+            }
+        }
+        parents.sort();
+        parents.dedup();
+        let ids: Vec<(String, i32)> = self
+            .graph
+            .layers
+            .iter()
+            .filter_map(|l| l.id.map(|id| (l.key(), id)))
+            .collect();
+        self.engine.register_scene_layers(&SceneLayers {
+            layers: &layers,
+            parents: &parents,
+            group_keys: &groups,
+            ids: &ids,
+        })
+    }
+
     fn graph_layer_state(&self, key: &str) -> LayerState {
         let layer = self.graph.find_layer(key).map(|i| &self.graph.layers[i]);
         match layer {
@@ -480,13 +787,23 @@ impl SceneRuntime {
         }
     }
 
+    /// True when the graph layer behind `script_layers[i]` still matches `st` (no allocation).
+    fn layer_matches(&self, i: usize, st: &LayerState) -> bool {
+        let Some(l) = self.layer_idx[i].map(|li| &self.graph.layers[li]) else {
+            return self.graph_layer_state(&self.script_layers[i].1) == *st;
+        };
+        layer_equals(l, st)
+    }
+
     /// Sends host-side changes (script outputs, user properties) to the script context.
     fn push_layers(&mut self) -> anyhow::Result<()> {
-        let changed: Vec<LayerState> = self
-            .script_layers
-            .iter()
-            .map(|(_, key)| self.graph_layer_state(key))
-            .filter(|s| self.synced.get(&s.name) != Some(s))
+        let changed: Vec<LayerState> = (0..self.script_layers.len())
+            .filter(|&i| {
+                self.synced
+                    .get(&self.script_layers[i].1)
+                    .is_none_or(|st| !self.layer_matches(i, st))
+            })
+            .map(|i| self.graph_layer_state(&self.script_layers[i].1))
             .collect();
         if changed.is_empty() {
             return Ok(());
@@ -500,8 +817,16 @@ impl SceneRuntime {
 
     /// `thisLayer` write-back: applies layers whose script-side state changed since the last sync.
     fn pull_layers(&mut self) -> anyhow::Result<usize> {
+        let changed = self.engine.changed_layers()?;
+        Ok(self.apply_pulled(changed))
+    }
+
+    /// Applies script-side layer changes to the graph; layers equal to the synced copy are
+    /// skipped (compared in place).
+    fn apply_pulled(&mut self, layers: Vec<LayerState>) -> usize {
         let mut applied = 0;
-        for s in self.engine.layer_states()? {
+        self.reapply_all |= !layers.is_empty();
+        for s in layers {
             if self.synced.get(&s.name) == Some(&s) {
                 continue;
             }
@@ -518,10 +843,31 @@ impl SceneRuntime {
                 applied += 1;
             }
             self.graph.apply_layer_text(&s.name, &s.text);
-            self.synced.insert(s.name.clone(), s);
+            match self.synced.get_mut(&s.name) {
+                Some(cur) => *cur = s,
+                None => {
+                    self.synced.insert(s.name.clone(), s);
+                }
+            }
         }
-        Ok(applied)
+        applied
     }
+}
+
+/// Field-by-field comparison of a graph layer with a script-side state.
+fn layer_equals(l: &SceneLayer, st: &LayerState) -> bool {
+    let text_eq = match &l.kind {
+        SceneLayerKind::Text { text, .. } => *text == st.text,
+        _ => st.text.is_empty(),
+    };
+    text_eq
+        && l.transform.origin.to_array() == st.origin
+        && l.transform.scale.to_array() == st.scale
+        && l.transform.angles.to_array() == st.angles
+        && l.transform.size.to_array() == st.size
+        && l.color.to_array() == st.color
+        && l.alpha == st.alpha
+        && l.visible == st.visible
 }
 
 #[cfg(test)]
@@ -646,6 +992,105 @@ mod tests {
         assert_eq!(initial_value_expr(Some(Visible), "0"), "false");
         assert_eq!(initial_value_expr(Some(Visible), "true"), "true");
         assert_eq!(initial_value_expr(None, "x"), r#""x""#);
+        assert_eq!(initial_value_expr(None, "0.3"), "0.3");
+        assert_eq!(initial_value_expr(None, "0.5 0 1"), "new Vec3(0.5, 0, 1)");
+    }
+
+    #[test]
+    fn init_assigning_this_layer_visible_survives_update_returning_value() {
+        let t = scene_dir("initvisible");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Viz", "image": "models/solid.json",
+                "visible": { "script": "export function init() { thisLayer.visible = false; }\nexport function update(v) { return v; }", "value": true } },
+              { "name": "Ret", "image": "models/solid.json",
+                "visible": { "script": "export function init(v) { return false; }\nexport function update(v) { return v; }", "value": true } }
+            ]
+        }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        for _ in 0..3 {
+            rt.step(0.016, [0.5, 0.5], false, &[0.0; 64], &[0.0; 64]);
+        }
+        assert!(!layer(&rt, "Viz").visible);
+        assert!(!layer(&rt, "Ret").visible);
+    }
+
+    #[test]
+    fn effect_visible_script_hides_album_art_without_media() {
+        let t = scene_dir("mediaidle");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Art", "image": "models/solid.json",
+                "effects": [ { "file": "effects/tint/effect.json",
+                  "visible": { "script": "export function mediaThumbnailChanged(e) { thisObject.visible = e.hasThumbnail; }", "value": false },
+                  "passes": [] } ] },
+              { "name": "Plain", "image": "models/solid.json" }
+            ]
+        }"#,
+        );
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        assert!(!layer(&rt, "Art").visible);
+        assert!(layer(&rt, "Plain").visible);
+    }
+
+    #[test]
+    fn effect_constant_script_output_reaches_the_graph() {
+        let t = scene_dir("effectconstlive");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Bg", "image": "models/solid.json",
+                "effects": [ { "file": "effects/tint/effect.json", "passes": [ { "constantshadervalues": {
+                  "color": { "script": "export function update(v) { return new Vec3(0.5, 0.25, 1); }",
+                             "value": "0.25 0.5 1" },
+                  "alpha": { "script": "export function update(v) { return 0.75; }", "value": 1 } } } ] } ] }
+            ]
+        }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        step(&mut rt);
+        let live = rt
+            .graph()
+            .effect_constant_overrides(0, 0, 0)
+            .expect("scripted constants are live");
+        let floats = |k: &str| truongpaper_renderer::scene_renderer::json_value_floats(&live[k]);
+        assert_eq!(floats("color"), Some(vec![0.5, 0.25, 1.0]));
+        assert_eq!(floats("alpha"), Some(vec![0.75]));
+    }
+
+    #[test]
+    fn effect_constant_scripts_run_and_share_state() {
+        let t = scene_dir("effectconst");
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Bg", "image": "models/solid.json",
+                "effects": [ { "file": "effects/tint/effect.json", "passes": [ { "constantshadervalues": {
+                  "color": { "script": "export function init(v) { shared.bg = v; }\nexport function update(v) { shared.bg = v; return v; }",
+                             "value": "0.25 0.5 1" } } } ] } ] },
+              { "name": "Reader", "image": "models/solid.json",
+                "color": { "script": "export function update(v) { return new Vec3(1, 1, 1).mix(shared.bg, 1); }",
+                           "value": "1 1 1" } }
+            ]
+        }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        assert!(rt
+            .script_slots()
+            .contains(&"Bg/effect.0.0.color".to_string()));
+        step(&mut rt);
+        assert_eq!(layer(&rt, "Reader").color.to_array(), [0.25, 0.5, 1.0]);
     }
 
     #[test]
@@ -656,31 +1101,31 @@ mod tests {
         assert_eq!(rt.skipped_script_slots(), ["Broken/scale"]);
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
-            [960.0, 540.0, 0.0]
-        );
-
-        assert!(step(&mut rt));
-        assert_eq!(
-            layer(&rt, "Hero").transform.origin.to_array(),
             [970.0, 540.0, 0.0]
         );
-        // thisLayer / thisScene writes come back into the graph.
-        assert_eq!(
-            layer(&rt, "Mover").transform.origin.to_array(),
-            [100.0, 105.0, 0.0]
-        );
-        assert_eq!(layer(&rt, "Hero").color.to_array(), [1.0, 0.0, 0.0]);
-        let hero_world = layer(&rt, "Hero").world_matrix.w_axis;
-        assert_eq!((hero_world.x, hero_world.y), (970.0, 540.0));
 
         assert!(step(&mut rt));
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
             [980.0, 540.0, 0.0]
         );
+        // thisLayer / thisScene writes come back into the graph.
         assert_eq!(
             layer(&rt, "Mover").transform.origin.to_array(),
             [100.0, 110.0, 0.0]
+        );
+        assert_eq!(layer(&rt, "Hero").color.to_array(), [1.0, 0.0, 0.0]);
+        let hero_world = layer(&rt, "Hero").world_matrix.w_axis;
+        assert_eq!((hero_world.x, hero_world.y), (980.0, 540.0));
+
+        assert!(step(&mut rt));
+        assert_eq!(
+            layer(&rt, "Hero").transform.origin.to_array(),
+            [990.0, 540.0, 0.0]
+        );
+        assert_eq!(
+            layer(&rt, "Mover").transform.origin.to_array(),
+            [100.0, 115.0, 0.0]
         );
         assert!((rt.elapsed() - 0.032).abs() < 1e-6);
     }
@@ -694,7 +1139,7 @@ mod tests {
         assert!(!step(&mut rt));
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
-            [960.0, 540.0, 0.0]
+            [970.0, 540.0, 0.0]
         );
         assert_eq!(rt.elapsed(), 0.0);
         assert_eq!(rt.camera().time, 0.0);
@@ -702,7 +1147,7 @@ mod tests {
         assert!(step(&mut rt));
         assert_eq!(
             layer(&rt, "Hero").transform.origin.to_array(),
-            [970.0, 540.0, 0.0]
+            [980.0, 540.0, 0.0]
         );
     }
 
@@ -761,12 +1206,62 @@ mod tests {
             ] }"#,
         );
         let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
-        assert_eq!(text_of(&rt, "Clock"), "init");
-        step(&mut rt);
+        // The editor placeholder ("init") is never exposed: scripts settle before the first draw.
         assert_eq!(text_of(&rt, "Clock"), "tick 1");
         assert_eq!(text_of(&rt, "Other"), "set by script");
         step(&mut rt);
         assert_eq!(text_of(&rt, "Clock"), "tick 2");
+        step(&mut rt);
+        assert_eq!(text_of(&rt, "Clock"), "tick 3");
+    }
+
+    #[test]
+    fn text_script_reaches_text_layer_sharing_a_name_with_a_picture() {
+        let t = TempDir::new("text-dup");
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } }, "objects": [
+                { "name": "Same", "image": "models/pic.json", "size": "100 100" },
+                { "name": "Same", "size": "100 20",
+                  "text": { "script": "export function update(v) { return '12:34'; }", "value": "<Clock>" } }
+            ] }"#,
+        );
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
+        let texts: Vec<_> = rt
+            .graph()
+            .layers
+            .iter()
+            .filter_map(|l| match &l.kind {
+                truongpaper_renderer::SceneLayerKind::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["12:34".to_string()]);
+    }
+
+    #[test]
+    fn text_scripts_reach_text_layers_sharing_one_name() {
+        let t = TempDir::new("text-dup2");
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 100, "height": 100 } }, "objects": [
+                { "id": 1, "name": "Clock", "size": "100 20",
+                  "text": { "script": "export function update(v) { return 'one'; }", "value": "<Clock>" } },
+                { "id": 2, "name": "Clock", "size": "100 20",
+                  "text": { "script": "export function update(v) { return 'two'; }", "value": "<Clock>" } }
+            ] }"#,
+        );
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, [100.0, 100.0]).unwrap();
+        let texts: Vec<_> = rt
+            .graph()
+            .layers
+            .iter()
+            .filter_map(|l| match &l.kind {
+                truongpaper_renderer::SceneLayerKind::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["one".to_string(), "two".to_string()]);
     }
 
     #[test]
@@ -924,5 +1419,216 @@ mod tests {
     fn missing_scene_is_an_error() {
         let t = TempDir::new("missing");
         assert!(SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).is_err());
+    }
+
+    fn bound_scene() -> TempDir {
+        let t = TempDir::new("bound");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 10, "height": 10 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{ "general": { "orthogonalprojection": { "width": 1000, "height": 1000 } }, "objects": [
+                { "name": "Gate", "image": "models/solid.json",
+                  "visible": { "user": { "name": "mode", "condition": "2" }, "value": false } },
+                { "name": "Pick", "image": "models/solid.json",
+                  "visible": { "user": { "name": "flag", "condition": "1" }, "value": false } },
+                { "name": "Fx", "image": "models/solid.json",
+                  "effects": [ { "file": "effects/x/effect.json",
+                    "visible": { "user": "fxon", "value": true },
+                    "passes": [ { "constantshadervalues": { "amount": { "user": "amt", "value": 0.5 } } } ] } ] },
+                { "name": "Scripted", "image": "models/solid.json",
+                  "alpha": { "script": "export var scriptProperties = createScriptProperties().addCheckbox({ name: 'on', value: false }).finish();\nexport function update(v) { return scriptProperties.on ? 1 : 0.2; }",
+                             "scriptproperties": { "on": { "user": "flag", "value": false } }, "value": 1 } },
+                { "name": "Moved", "image": "models/solid.json",
+                  "origin": { "script": "let x = 5;\nexport function update(v) { return new Vec3(x, 7, 0); }\nexport function applyUserProperties(p) { if (p.px !== undefined) x = p.px; }", "value": "0 0 0" } }
+            ] }"#,
+        );
+        t
+    }
+
+    #[test]
+    fn condition_bindings_and_saved_values_apply_at_load_and_live() {
+        let t = bound_scene();
+        // Saved values arrive both as plain values and as project.json property objects.
+        let props = r#"{"mode": {"type":"combo","value":"2"}, "flag": true, "px": 40}"#;
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", Some(props), MONITOR).unwrap();
+        step(&mut rt);
+        assert!(
+            layer(&rt, "Gate").visible,
+            "combo condition matches at load"
+        );
+        assert!(layer(&rt, "Pick").visible, "bool matches condition \"1\"");
+        assert_eq!(
+            layer(&rt, "Scripted").alpha,
+            1.0,
+            "bound scriptproperties at load"
+        );
+        assert_eq!(
+            layer(&rt, "Moved").transform.origin.x,
+            40.0,
+            "applyUserProperties at load"
+        );
+
+        rt.apply_user_properties(r#"{"mode": "3", "flag": false, "px": 80}"#)
+            .unwrap();
+        step(&mut rt);
+        assert!(!layer(&rt, "Gate").visible);
+        assert!(!layer(&rt, "Pick").visible);
+        assert_eq!(
+            layer(&rt, "Scripted").alpha,
+            0.2,
+            "scriptproperties re-bound live"
+        );
+        assert_eq!(layer(&rt, "Moved").transform.origin.x, 80.0);
+    }
+
+    #[test]
+    fn render_epoch_changes_only_for_baked_bindings() {
+        let t = bound_scene();
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        let e0 = rt.graph().render_epoch();
+        rt.apply_user_properties(r#"{"mode": "3"}"#).unwrap();
+        assert_eq!(rt.graph().render_epoch(), e0);
+        rt.apply_user_properties(r#"{"amt": 2}"#).unwrap();
+        let e1 = rt.graph().render_epoch();
+        assert!(e1 > e0, "effect shader constant is baked into the GPU plan");
+        rt.apply_user_properties(r#"{"fxon": false}"#).unwrap();
+        assert!(rt.graph().render_epoch() > e1, "effect visibility too");
+    }
+
+    /// Persica's clock: origin = screenResolution / 100 * percent, in a 3840x2160 scene.
+    #[test]
+    fn percent_of_screen_origin_scripts_stay_on_canvas_on_retina() {
+        let t = TempDir::new("percent-origin");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 100, "height": 50 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 3840, "height": 2160 } },
+            "objects": [ { "name": "Clock", "image": "models/solid.json",
+              "origin": { "script": "let ox = 960; let oy = 1035;\nexport function update(v) { return new Vec3(ox, oy, v.z); }\nexport function applyUserProperties(p) { if (p.cx != undefined) ox = (engine.screenResolution.x/100)*p.cx; if (p.cy != undefined) oy = (engine.screenResolution.y/100)*p.cy; }",
+                          "value": "1920 1080 0" } } ]
+            }"#,
+        );
+        let props = r#"{"cx":100,"cy":100}"#;
+        let origin = |monitor: [f32; 2]| {
+            let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", Some(props), monitor).unwrap();
+            step(&mut rt);
+            layer(&rt, "Clock").transform.origin.to_array()
+        };
+        // Physical pixels put the layer off the top of the 2160-high canvas...
+        assert_eq!(origin([3456.0, 2234.0])[1], 2234.0);
+        // ...the logical size the desktop host passes keeps it near the centre.
+        let logical = crate::desktop_host::scene_monitor_size(3456, 2234, 2.0);
+        assert_eq!(logical, [1728.0, 1117.0]);
+        let o = origin(logical);
+        assert_eq!((o[0], o[1]), (1728.0, 1117.0));
+        assert!(o[1] < 2160.0);
+    }
+
+    #[test]
+    fn hanging_script_is_disabled_and_others_keep_running() {
+        let t = TempDir::new("breaker");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 100, "height": 50 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Hang", "image": "models/solid.json", "origin": "0 0 0",
+                "alpha": { "script": "let n = 0; export function update(v) { if (n++ > 0) { while (true) {} } return v; }", "value": 1 } },
+              { "name": "Move", "image": "models/solid.json", "origin": "0 0 0",
+                "scale": { "script": "export function update(v) { return new Vec3(v.x + 1, 1, 1); }", "value": "1 1 1" } } ]
+            }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        assert_eq!(rt.script_slots().len(), 2);
+        for _ in 0..4 {
+            step(&mut rt);
+        }
+        assert_eq!(rt.script_slots().len(), 1, "{:?}", rt.script_slots());
+        assert!(rt.diagnostics().iter().any(|d| d.contains("disabled")));
+        let before = layer(&rt, "Move").transform.scale.x;
+        step(&mut rt);
+        assert!(layer(&rt, "Move").transform.scale.x > before);
+    }
+
+    #[test]
+    fn throwing_script_is_disabled_and_reported_and_unchanged_slots_stay_applied() {
+        let t = TempDir::new("thrower");
+        t.write(
+            "models/solid.json",
+            br#"{ "solidlayer": true, "width": 100, "height": 50 }"#,
+        );
+        t.write(
+            "scene.json",
+            br#"{
+            "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+            "objects": [
+              { "name": "Bad", "image": "models/solid.json", "origin": "0 0 0",
+                "alpha": { "script": "let n = 0; export function update(v) { if (n++ > 0) throw new Error('boom'); return v; }", "value": 1 } },
+              { "name": "Still", "image": "models/solid.json", "origin": "0 0 0",
+                "scale": { "script": "export function update(v) { return new Vec3(2, 2, 2); }", "value": "1 1 1" } } ]
+            }"#,
+        );
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        rt.engine
+            .set_error_disable_after(std::time::Duration::from_millis(30));
+        rt.engine.set_error_disable_min_frames(2);
+        step(&mut rt);
+        step(&mut rt);
+        step(&mut rt);
+        step(&mut rt);
+        assert_eq!(rt.script_slots().len(), 1, "{:?}", rt.script_slots());
+        assert!(rt
+            .diagnostics()
+            .iter()
+            .any(|d| d.contains("threw on every frame")));
+        // A property written by someone else is restored once user properties change, and a
+        // value that did not change is not lost.
+        assert_eq!(layer(&rt, "Still").transform.scale.x, 2.0);
+        rt.apply_user_properties("{}").unwrap();
+        step(&mut rt);
+        assert_eq!(layer(&rt, "Still").transform.scale.x, 2.0);
+        // The disabled slot is re-enabled by the property change.
+        assert_eq!(rt.script_slots().len(), 2, "{:?}", rt.script_slots());
+        assert!(!rt
+            .diagnostics()
+            .iter()
+            .any(|d| d.contains("threw on every frame")));
+    }
+
+    #[test]
+    fn cursor_events_without_handlers_leave_layers_alone() {
+        let t = scene_dir("nohandler");
+        let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        step(&mut rt);
+        let before = layer(&rt, "Hero").transform.origin;
+        rt.dispatch_cursor(CursorEventKind::Move, [0.1, 0.9])
+            .unwrap();
+        assert_eq!(layer(&rt, "Hero").transform.origin, before);
+    }
+
+    #[test]
+    fn push_skips_unchanged_layers() {
+        let t = scene_dir("pushnoop");
+        let rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
+        for i in 0..rt.script_layers.len() {
+            let key = rt.script_layers[i].1.clone();
+            let st = rt.synced.get(&key).cloned().unwrap();
+            assert_eq!(rt.layer_matches(i, &st), rt.graph_layer_state(&key) == st);
+        }
+        let key = rt.script_layers[0].1.clone();
+        let mut st = rt.synced.get(&key).cloned().unwrap();
+        st.alpha += 0.5;
+        assert!(!rt.layer_matches(0, &st));
     }
 }

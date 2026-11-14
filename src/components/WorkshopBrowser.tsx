@@ -1,5 +1,5 @@
 import { Dropdown } from './Dropdown';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronLeft, ChevronRight, Search, SlidersHorizontal, Star } from 'lucide-react';
 import type { WorkshopBrowsePage, WorkshopBrowseQuery, WorkshopSort } from '../types/ipc';
@@ -25,6 +25,7 @@ export const WorkshopBrowser: React.FC = () => {
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
   const wallpapers = useAppStore((s) => s.wallpapers);
   const guest = useAppStore((s) => s.guestAvailability);
+  const installedIds = useMemo(() => new Set(wallpapers.map((w) => w.workshopId)), [wallpapers]);
   const loadGuestAvailability = useAppStore((s) => s.loadGuestAvailability);
   const previewRequest = useRef(0);
   const top = useRef<HTMLDivElement>(null);
@@ -67,8 +68,18 @@ export const WorkshopBrowser: React.FC = () => {
   };
   const changePage = (page: number) => {
     setQuery((q) => ({ ...q, page }));
-    top.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    scrollToTop(top.current);
   };
+  // Steam pages hold 30 results, so use a column count that divides 30 (no half-empty last row).
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [cols, setCols] = useState(3);
+  useEffect(() => {
+    const node = gridRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => setCols(columnsFor(entry.contentRect.width)));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
   const selectFilter = (name: string, label: string) => {
     const group = data?.tagGroups.find((g) => g.name === name);
     return <div className="workshop-filter" key={name}><span>{label}</span>
@@ -118,16 +129,17 @@ export const WorkshopBrowser: React.FC = () => {
     {error && <div className="workshop-error" role="alert"><span>{error}</span><button className="button" onClick={() => setRetry((n) => n + 1)}>Retry</button></div>}
     {previewError && <div className="workshop-error" role="alert"><span>{previewError}</span>
       {/^(sign in to steam|steam login required)/i.test(previewError) && <button className="button" onClick={openAuth}>Sign in</button>}</div>}
-    <div className="wallpaper-grid workshop-browse-grid" aria-busy={loading}>
+    <div ref={gridRef} className="wallpaper-grid workshop-browse-grid" aria-busy={loading}
+      style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
       {!loading && !error && data?.items.map((item) => <button key={item.workshopId} type="button" className="workshop-result card" aria-label={`Preview ${item.title}`} onClick={() => void preview(item.workshopId)} disabled={!!previewing}>
-        <Thumb src={item.previewUrl} alt={item.title} height={150} />
-        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{guest[item.workshopId] === 'available' && <span className="workshop-mirror-badge" title="Available on GGNetwork, a third-party mirror">GGNetwork</span>}{wallpapers.some((w) => w.workshopId === item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
+        <Thumb src={item.previewUrl} alt={item.title} height={150} lazy />
+        <div className="workshop-result-body"><div className="workshop-result-type"><span>{workshopTypeFromTags(item.tags)}</span><span>{guest[item.workshopId] === 'available' && <span className="workshop-mirror-badge" title="Available on GGNetwork, a third-party mirror">GGNetwork</span>}{installedIds.has(item.workshopId) ? 'Installed' : previewing === item.workshopId ? 'Opening…' : ''}</span></div>
           <div className="workshop-result-title" title={item.title}>{item.title}</div>
           <div className="workshop-result-author">{item.author || 'Workshop creator'}</div>
-          <div className="workshop-result-stats"><span>{count(item.subscribers)} subscribers</span>{item.rating > 0 && <span aria-label={`${item.rating} out of 5 stars`}><Star size={11} fill="currentColor" />{item.rating}/5</span>}</div>
+          <div className="workshop-result-stats"><span>{count(item.subscribers)} subscribers</span>{item.rating > 0 ? <span aria-label={`${item.rating} out of 5 stars`}><Star size={11} fill="currentColor" />{item.rating}/5</span> : <span className="workshop-result-unrated">Not rated</span>}</div>
         </div>
       </button>)}
-      {loading && Array.from({ length: 9 }, (_, i) => <div className="workshop-skeleton card" key={i}><div /><span /></div>)}
+      {loading && Array.from({ length: cols * 2 }, (_, i) => <div className="workshop-skeleton card" key={i}><div /><span /></div>)}
     </div>
     {!loading && !error && data?.items.length === 0 && <div className="workshop-empty">No wallpapers match these filters. Try a different search or clear the filters.</div>}
     {data && data.totalPages > 1 && <div className="workshop-pagination">
@@ -137,3 +149,16 @@ export const WorkshopBrowser: React.FC = () => {
     </div>}
   </div>;
 };
+
+/** Largest column count dividing a 30-result page that keeps tiles at least 200 px wide. */
+export function columnsFor(width: number): number {
+  return [6, 5, 3, 2].find((n) => width / n - 16 >= 200) ?? 1;
+}
+
+/** Scrolls the nearest scrolling container so the top of `node` is visible. */
+function scrollToTop(node: HTMLElement | null) {
+  let el = node?.parentElement ?? null;
+  while (el && !(el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(getComputedStyle(el).overflowY))) el = el.parentElement;
+  if (el) el.scrollTop = 0;
+  else node?.scrollIntoView?.({ block: 'start' });
+}

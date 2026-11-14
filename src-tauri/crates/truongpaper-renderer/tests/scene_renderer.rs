@@ -7,8 +7,9 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 use truongpaper_renderer::json::Value;
 use truongpaper_renderer::scene_renderer::{
     downsample_spectrum, json_value_floats, layer_vertex_attributes, map_material_constants,
-    plan_video_upload, reflect_texture_slots, vertex_attribute_locations, video_frame_to_rgba,
-    VideoUpload, EMBEDDED_VIDEO_FORMAT, QUAD_INDICES, SCENE_COMPOSITE_WGSL, SCENE_PARTICLE_WGSL,
+    plan_video_upload, reflect_texture_slots, vertex_attribute_locations,
+    vertex_wants_pixel_positions, video_frame_to_rgba, VideoUpload, EMBEDDED_VIDEO_FORMAT,
+    QUAD_INDICES, SCENE_COMPOSITE_WGSL, SCENE_PARTICLE_WGSL,
 };
 use truongpaper_renderer::{
     layer_quad_vertices, pack_uniform_block, parse_uniform_comment_metadata, preprocess_we_shader,
@@ -400,4 +401,106 @@ fn bgra_frames_of_the_texture_size_upload_without_conversion() {
     };
     assert!(plan_video_upload(&short, 2, 1).is_none());
     assert!(plan_video_upload(&frame, 2, 0).is_none());
+}
+
+#[test]
+fn scalar_constant_fills_every_component_of_a_vector_uniform() {
+    // e.g. a user "blur" slider (1.5) bound to the vec2 `scale` of a blur pass.
+    let meta = parse_uniform_comment_metadata(
+        "uniform vec2 g_Scale; // {\"material\":\"scale\",\"default\":\"1 1\"}\n",
+    );
+    let constants = HashMap::from([("scale".to_string(), Value::Number(1.5))]);
+    let mapped = map_material_constants(&meta, &constants);
+    assert_eq!(mapped["g_Scale"], vec![1.5, 1.5]);
+}
+
+/// Regression (2887099508): a composition layer captures the screen region behind its own
+/// (scaled) bounds, so its layer rect corners map to the FBO corners.
+#[test]
+fn composition_capture_maps_the_layer_rect_onto_its_fbo() {
+    use truongpaper_renderer::scene_renderer::layer_local_projection;
+    use truongpaper_renderer::{build_pass_matrices, composition_capture_matrix, LayerTransform};
+    let scene = Vec2::new(200.0, 100.0);
+    let transform = LayerTransform {
+        origin: Vec3::new(150.0, 50.0, 0.0),
+        scale: Vec3::new(2.0, 1.0, 0.0),
+        size: Vec2::new(25.0, 100.0),
+        ..LayerTransform::default()
+    };
+    let m = build_pass_matrices(scene, &transform, Vec2::ZERO);
+    let local = layer_local_projection(transform.size);
+    let cap = composition_capture_matrix(false, local, m.model_view_projection);
+    // Layer spans x 125..175 of 200 -> clip x 0.25..0.75, full height.
+    for (screen, fbo) in [
+        (Vec4::new(0.25, -1.0, 0.0, 1.0), Vec2::new(-1.0, -1.0)),
+        (Vec4::new(0.75, 1.0, 0.0, 1.0), Vec2::new(1.0, 1.0)),
+        (Vec4::new(0.5, 0.0, 0.0, 1.0), Vec2::ZERO),
+    ] {
+        let p = cap * screen;
+        let got = Vec2::new(p.x / p.w, p.y / p.w);
+        assert!((got - fbo).length() < 1e-4, "{screen:?} -> {got:?}");
+        assert_eq!(p.z, 0.0);
+    }
+    assert_eq!(
+        composition_capture_matrix(true, local, m.model_view_projection),
+        Mat4::IDENTITY
+    );
+}
+
+#[test]
+fn depth_parallax_builtins_are_finite_and_centred() {
+    use truongpaper_renderer::scene_renderer::{builtin_uniform_floats, UniformValues};
+    let v = UniformValues::default();
+    // At rest the parallax position is the centre; an all-zero value made the stock
+    // depthparallax vertex shader normalise a zero vector and blank the layer (scene 3118949804).
+    assert_eq!(
+        builtin_uniform_floats("g_ParallaxPosition", &v),
+        Some(vec![0.5, 0.5])
+    );
+    for name in [
+        "g_EffectTextureProjectionMatrix",
+        "g_EffectTextureProjectionMatrixInverse",
+    ] {
+        assert_eq!(
+            builtin_uniform_floats(name, &v),
+            Some(Mat4::IDENTITY.to_cols_array().to_vec()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn layer_composite_texture_names_parse_to_layer_ids() {
+    use truongpaper_renderer::scene_renderer::parse_layer_composite;
+    assert_eq!(
+        parse_layer_composite("_rt_imageLayerComposite_589_a"),
+        Some(589)
+    );
+    assert_eq!(
+        parse_layer_composite("_rt_imageLayerComposite_12_b"),
+        Some(12)
+    );
+    assert_eq!(parse_layer_composite("_rt_imageLayerComposite_x_a"), None);
+    assert_eq!(parse_layer_composite("_rt_FullFrameBuffer"), None);
+}
+
+#[test]
+fn custom_vertex_shaders_that_forward_positions_get_pixel_space_quads() {
+    // 3141421197 "myfirstshader": `v_Position = a_Position.xy` feeds a ray-marcher that expects
+    // layer pixels, projected with `g_ModelViewProjectionMatrix`.
+    let custom = "uniform mat4 g_ModelViewProjectionMatrix;\nvoid main() {\n\tgl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n\tv_Position.xy = a_Position.xy;\n}\n";
+    assert!(vertex_wants_pixel_positions(custom));
+    // Stock effect passes only project the clip-space quad.
+    let stock = "uniform mat4 g_ModelViewProjectionMatrix;\nvoid main() {\n\tgl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n\tv_TexCoord = a_TexCoord;\n}\n";
+    assert!(!vertex_wants_pixel_positions(stock));
+    let clip = "void main() {\n\tgl_Position = vec4(a_Position, 1.0);\n\tv_Pos = a_Position;\n}\n";
+    assert!(!vertex_wants_pixel_positions(clip));
+}
+
+#[test]
+fn additive_light_blend_mode_31_uses_the_backdrop_blend_path() {
+    use truongpaper_renderer::scene_renderer::{is_color_blend_mode, SCENE_COMPOSITE_WGSL};
+    assert!(is_color_blend_mode(31));
+    assert!(SCENE_COMPOSITE_WGSL.contains("case 31: { rgb = b + l; }"));
+    assert!(!is_color_blend_mode(0) && !is_color_blend_mode(30));
 }

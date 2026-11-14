@@ -262,6 +262,111 @@ pub fn next_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BACKOFF)
 }
 
+const SCENE_BLOCKED_MESSAGE: &str = "Scene disabled after repeated GPU errors or renderer crashes";
+/// Uncaptured wgpu errors of one scene within [`FAULT_WINDOW`] that mark it `load_failed`.
+const FAULT_ERROR_LIMIT: usize = 5;
+/// Window in which [`FAULT_ERROR_LIMIT`] errors count as "repeated".
+const FAULT_WINDOW: Duration = Duration::from_secs(10);
+/// Render-thread panics while one scene was active that mark it `load_failed`.
+const FAULT_PANIC_LIMIT: u32 = 2;
+
+/// Crash-loop guard: remembers which scene was being loaded or drawn, counts the GPU errors and
+/// render-thread panics it caused, and blocks it once it keeps doing so. Without it a scene that
+/// triggers a deterministic validation error is restored and reloaded after every restart of the
+/// renderer, which shows a black desktop in a loop.
+#[derive(Debug, Default)]
+pub struct FaultLedger {
+    /// Scene being loaded or drawn right now.
+    current: Option<String>,
+    errors: HashMap<String, Vec<Instant>>,
+    panics: HashMap<String, u32>,
+    /// Blocked scenes and when they were blocked. A block expires after [`FAULT_BLOCK_FOR`], so a
+    /// one-off driver hiccup does not hide a wallpaper until the app restarts.
+    blocked: HashMap<String, Instant>,
+    /// Blocked since the last [`Self::take_newly_blocked`].
+    fresh: Vec<String>,
+}
+
+/// How long a blocked scene stays blocked.
+const FAULT_BLOCK_FOR: Duration = Duration::from_secs(10 * 60);
+
+impl FaultLedger {
+    pub fn set_current(&mut self, key: Option<&str>) {
+        if self.current.as_deref() != key {
+            self.current = key.map(str::to_owned);
+        }
+    }
+
+    pub fn is_blocked(&self, key: &str) -> bool {
+        self.blocked_at(key, Instant::now())
+    }
+
+    fn blocked_at(&self, key: &str, now: Instant) -> bool {
+        self.blocked
+            .get(key)
+            .is_some_and(|t| now.saturating_duration_since(*t) < FAULT_BLOCK_FOR)
+    }
+
+    fn block(&mut self, key: &str) {
+        let now = Instant::now();
+        if !self.blocked_at(key, now) {
+            self.blocked.insert(key.to_string(), now);
+            self.fresh.push(key.to_string());
+        }
+        self.errors.remove(key);
+        self.panics.remove(key);
+    }
+
+    /// An uncaptured GPU error happened. Returns the scene it was blamed on when this blocked it.
+    pub fn note_error(&mut self, now: Instant) -> Option<String> {
+        let key = self.current.clone()?;
+        if self.blocked_at(&key, now) {
+            return None;
+        }
+        let log = self.errors.entry(key.clone()).or_default();
+        log.retain(|t| now.saturating_duration_since(*t) < FAULT_WINDOW);
+        log.push(now);
+        if log.len() >= FAULT_ERROR_LIMIT {
+            self.block(&key);
+            return Some(key);
+        }
+        None
+    }
+
+    /// The render thread panicked. Returns the scene blamed when this blocked it.
+    pub fn note_panic(&mut self) -> Option<String> {
+        let key = self.current.take()?;
+        let n = self.panics.entry(key.clone()).or_insert(0);
+        *n += 1;
+        if *n >= FAULT_PANIC_LIMIT && !self.is_blocked(&key) {
+            self.block(&key);
+            return Some(key);
+        }
+        None
+    }
+
+    pub fn take_newly_blocked(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fresh)
+    }
+}
+
+static SCENE_FAULTS: Mutex<Option<FaultLedger>> = Mutex::new(None);
+
+fn with_faults<R>(f: impl FnOnce(&mut FaultLedger) -> R) -> R {
+    f(SCENE_FAULTS.lock().get_or_insert_with(FaultLedger::default))
+}
+
+fn scene_blocked(desc: &SceneDescriptor) -> bool {
+    with_faults(|l| l.is_blocked(&scene_key(desc)))
+}
+
+/// Pixel size of the host scene target: finite, within `1..=MAX_SCENE_TARGET_DIMENSION`.
+/// (`f32::clamp` passes NaN through and `NaN as u32` is 0, which `create_texture` rejects.)
+fn scene_target_dimension(v: f32) -> u32 {
+    let v = if v.is_finite() { v } else { 1.0 };
+    v.clamp(1.0, MAX_SCENE_TARGET_DIMENSION).round() as u32
+}
+
 /// How an old and a new monitor layout differ (by monitor id).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GeometryDiff {
@@ -739,6 +844,8 @@ pub struct SurfaceTarget {
     /// Physical pixels.
     pub width: u32,
     pub height: u32,
+    /// Backing scale (physical pixels per logical point); 1.0 where pixels are the unit.
+    pub scale_factor: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -880,6 +987,7 @@ mod platform {
                             surface,
                             width,
                             height,
+                            scale_factor: scale as f32,
                         }),
                         Err(err) => tracing::warn!("desktop surface for {monitor_id}: {err}"),
                     }
@@ -939,7 +1047,9 @@ mod platform {
     impl DesktopSurfaces {
         pub fn new() -> Self {
             let (tx, rx) = channel();
-            win_desktop::spawn_desktop_lifecycle_watcher(tx);
+            if let Err(error) = win_desktop::spawn_desktop_lifecycle_watcher(tx) {
+                tracing::warn!("desktop lifecycle watcher not started: {error}");
+            }
             Self {
                 hwnds: Vec::new(),
                 events: rx,
@@ -1012,6 +1122,7 @@ mod platform {
                             surface,
                             width: width as u32,
                             height: height as u32,
+                            scale_factor: 1.0,
                         }),
                         Err(err) => {
                             tracing::warn!("desktop surface for {}: {err}", m.device_name)
@@ -1093,12 +1204,21 @@ mod platform {
 
 /// `MacVideoDecoder` as a [`VideoFrameSource`] (BGRA frames, row stride may be padded).
 #[cfg(target_os = "macos")]
-struct MacVideoSource(truongpaper_platform::mac_video::MacVideoDecoder);
+struct MacVideoSource {
+    decoder: truongpaper_platform::mac_video::MacVideoDecoder,
+    /// Pixel buffer handed back by the renderer after an upload, reused for the next frame.
+    pool: Vec<u8>,
+}
 
 #[cfg(target_os = "macos")]
 impl VideoFrameSource for MacVideoSource {
     fn latest_frame(&mut self) -> Option<truongpaper_renderer::VideoFrame> {
-        let (width, height, stride, data) = self.0.copy_latest_bgra_frame()?;
+        let mut data = std::mem::take(&mut self.pool);
+        let Some((width, height, stride)) = self.decoder.copy_latest_bgra_frame_into(&mut data)
+        else {
+            self.pool = data;
+            return None;
+        };
         Some(truongpaper_renderer::VideoFrame {
             width,
             height,
@@ -1110,17 +1230,21 @@ impl VideoFrameSource for MacVideoSource {
 
     fn apply_settings(&mut self, settings: VideoPlaybackSettings) {
         let s = settings.clamped();
-        self.0.set_rate(s.speed);
-        self.0.set_volume(s.effective_volume());
-        self.0.set_muted(s.is_effectively_muted());
+        self.decoder.set_rate(s.speed);
+        self.decoder.set_volume(s.effective_volume());
+        self.decoder.set_muted(s.is_effectively_muted());
     }
 
     fn set_paused(&mut self, paused: bool) {
         if paused {
-            self.0.pause();
+            self.decoder.pause();
         } else {
-            self.0.play();
+            self.decoder.play();
         }
+    }
+
+    fn recycle_frame(&mut self, frame: truongpaper_renderer::VideoFrame) {
+        self.pool = frame.data;
     }
 }
 
@@ -1162,7 +1286,10 @@ fn open_embedded_videos(
         #[cfg(target_os = "macos")]
         match truongpaper_platform::mac_video::MacVideoDecoder::open(&mp4) {
             Ok(decoder) => {
-                let mut source = MacVideoSource(decoder);
+                let mut source = MacVideoSource {
+                    decoder,
+                    pool: Vec::new(),
+                };
                 // Muted until the render loop makes this monitor the scene's sound owner.
                 source.apply_settings(VideoPlaybackSettings {
                     muted: true,
@@ -1263,6 +1390,29 @@ fn coalesce_jobs(jobs: Vec<PhotoJob>) -> Vec<PhotoJob> {
     out
 }
 
+/// Hands freed heap pages back to macOS. After a large scene or photo is dropped, the system
+/// allocator keeps its empty pages (over 200 MB was measured), and Activity Monitor counts
+/// them against TruongPaper until something else needs the memory.
+fn release_free_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone means "all zones", and a goal of 0 means "as much as possible".
+        unsafe {
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+/// Waits for the GPU so wgpu destroys the dropped textures and buffers, then returns the freed
+/// heap pages. Without the poll the relief runs before the device side is released.
+fn release_gpu_and_heap(device: &wgpu::Device) {
+    device.poll(wgpu::Maintain::Wait);
+    release_free_memory();
+}
+
 struct PhotoWorker {
     jobs: mpsc::Sender<PhotoJob>,
     done: mpsc::Receiver<PhotoDone>,
@@ -1301,6 +1451,236 @@ impl PhotoWorker {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Scene load worker (CPU stage of a scene load, off the shared render thread)
+// ---------------------------------------------------------------------------------------------
+
+struct SceneJob {
+    monitor_id: String,
+    generation: u64,
+    desc: SceneDescriptor,
+    monitor_size: [f32; 2],
+}
+
+/// CPU half of a scene: the mounted VFS and the runtime (graph + script context). The GPU half
+/// is built from it on the render thread by [`finish_scene_gpu`].
+struct SceneCpu {
+    vfs: WeVirtualFileSystem,
+    runtime: SceneRuntime,
+    /// Textures decoded on the worker; the render thread only uploads them.
+    textures: truongpaper_renderer::PredecodedTextures,
+}
+
+/// Newest scene generation per monitor, shared with the load worker so a superseded job can
+/// stop between stages.
+#[derive(Clone, Default)]
+struct LatestGenerations(Arc<parking_lot::Mutex<HashMap<String, u64>>>);
+
+impl LatestGenerations {
+    fn note(&self, monitor: &str, generation: u64) {
+        self.0.lock().insert(monitor.to_string(), generation);
+    }
+
+    /// Unknown monitors count as current (jobs built outside the host, such as in tests).
+    fn is_current(&self, monitor: &str, generation: u64) -> bool {
+        self.0.lock().get(monitor).is_none_or(|g| *g == generation)
+    }
+
+    /// Forgets monitors that are gone. A job still queued for one counts as current again
+    /// (unknown monitor); the host discards its result because the monitor no longer exists.
+    fn retain_monitors(&self, live: &[String]) {
+        self.0.lock().retain(|id, _| live.contains(id));
+    }
+}
+
+/// Frees big discarded values (stale scene loads) on a background thread so dropping them
+/// never stalls the render thread.
+fn discard<T: Send + 'static>(value: T) {
+    type Garbage = Box<dyn std::any::Any + Send>;
+    static REAPER: std::sync::OnceLock<Option<std::sync::Mutex<mpsc::Sender<Garbage>>>> =
+        std::sync::OnceLock::new();
+    let reaper = REAPER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Garbage>();
+        std::thread::Builder::new()
+            .name("truongpaper-reaper".into())
+            .spawn(move || {
+                while let Ok(item) = rx.recv() {
+                    drop(item);
+                }
+            })
+            .ok()
+            .map(|_| std::sync::Mutex::new(tx))
+    });
+    match reaper {
+        Some(tx) => {
+            if let Ok(tx) = tx.lock() {
+                // A failed send hands the value back inside the error and drops it here.
+                let _ = tx.send(Box::new(value));
+            }
+        }
+        None => drop(value),
+    }
+}
+
+struct SceneDone {
+    monitor_id: String,
+    generation: u64,
+    desc: SceneDescriptor,
+    result: Result<SceneCpu, String>,
+}
+
+/// VFS mount, `SceneGraph::load`, script init and texture decode: everything that needs no GPU.
+/// Returns `None` when `is_current` reports the job superseded between stages.
+fn run_scene_job(job: SceneJob, is_current: &(dyn Fn() -> bool + Sync)) -> Option<SceneDone> {
+    let SceneJob {
+        monitor_id,
+        generation,
+        desc,
+        monitor_size,
+    } = job;
+    let started = std::time::Instant::now();
+    if !is_current() {
+        return None;
+    }
+    let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
+    if !is_current() {
+        return None;
+    }
+    let runtime = SceneRuntime::load(
+        &vfs,
+        &desc.scene_file,
+        Some(&desc.user_properties_json),
+        monitor_size,
+    );
+    let result = match runtime {
+        Ok(runtime) => {
+            if !is_current() {
+                discard(runtime);
+                return None;
+            }
+            let decode_started = std::time::Instant::now();
+            let textures =
+                truongpaper_renderer::predecode_textures(&vfs, runtime.graph(), is_current);
+            tracing::debug!(
+                "scene {}: worker stage {:?} (texture decode {:?}, {} textures)",
+                desc.scene_file,
+                started.elapsed(),
+                decode_started.elapsed(),
+                textures.len()
+            );
+            if !is_current() {
+                discard((runtime, textures));
+                return None;
+            }
+            Ok(SceneCpu {
+                vfs,
+                runtime,
+                textures,
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    };
+    Some(SceneDone {
+        monitor_id,
+        generation,
+        desc,
+        result,
+    })
+}
+
+/// Newest job per monitor: a burst of clicks loads only the last scene.
+fn coalesce_scene_jobs(jobs: Vec<SceneJob>) -> Vec<SceneJob> {
+    let mut out: Vec<SceneJob> = Vec::new();
+    for job in jobs {
+        match out.iter_mut().find(|j| j.monitor_id == job.monitor_id) {
+            Some(slot) => *slot = job,
+            None => out.push(job),
+        }
+    }
+    out
+}
+
+struct SceneLoadWorker {
+    jobs: mpsc::Sender<SceneJob>,
+    done: mpsc::Receiver<SceneDone>,
+    latest: LatestGenerations,
+}
+
+impl SceneLoadWorker {
+    fn spawn(host: Arc<WallpaperHost>) -> Option<Self> {
+        let (jobs, job_rx) = mpsc::channel::<SceneJob>();
+        let (done_tx, done) = mpsc::channel::<SceneDone>();
+        let latest = LatestGenerations::default();
+        let worker_latest = latest.clone();
+        std::thread::Builder::new()
+            .name("truongpaper-scene-load".into())
+            .spawn(move || {
+                let mut pending: Vec<SceneJob> = Vec::new();
+                loop {
+                    if pending.is_empty() {
+                        match job_rx.recv() {
+                            Ok(job) => pending.push(job),
+                            Err(_) => return,
+                        }
+                    }
+                    // Jobs that arrived while the last one ran: only the newest per monitor
+                    // survives, and jobs the host has already replaced are skipped.
+                    pending.extend(job_rx.try_iter());
+                    let mut pending_now = coalesce_scene_jobs(std::mem::take(&mut pending));
+                    pending_now.retain(|j| worker_latest.is_current(&j.monitor_id, j.generation));
+                    if pending_now.is_empty() {
+                        continue;
+                    }
+                    let job = pending_now.remove(0);
+                    pending = pending_now;
+                    let (monitor_id, generation, desc) =
+                        (job.monitor_id.clone(), job.generation, job.desc.clone());
+                    let is_current = || worker_latest.is_current(&monitor_id, generation);
+                    let done = catch_unwind(AssertUnwindSafe(|| run_scene_job(job, &is_current)))
+                        .unwrap_or_else(|_| {
+                            Some(SceneDone {
+                                monitor_id: monitor_id.clone(),
+                                generation,
+                                desc,
+                                result: Err("scene loader panicked".into()),
+                            })
+                        });
+                    let Some(done) = done else {
+                        tracing::debug!("scene load for {monitor_id} superseded; stopped early");
+                        continue;
+                    };
+                    if done_tx.send(done).is_err() {
+                        return;
+                    }
+                    host.wake();
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, done, latest })
+    }
+
+    /// Tells the worker which generation each monitor now wants.
+    fn note_generation(&self, monitor: &str, generation: u64) {
+        self.latest.note(monitor, generation);
+    }
+
+    /// Prunes the generation table to the monitors that still exist.
+    fn retain_monitors(&self, live: &[String]) {
+        self.latest.retain_monitors(live);
+    }
+
+    fn submit(&self, job: SceneJob) {
+        self.latest.note(&job.monitor_id, job.generation);
+        if self.jobs.send(job).is_err() {
+            tracing::warn!("scene load worker is gone");
+        }
+    }
+
+    fn drain(&self) -> Vec<SceneDone> {
+        self.done.try_iter().collect()
+    }
+}
+
 struct SceneState {
     wallpaper_id: Option<String>,
     desc: SceneDescriptor,
@@ -1329,6 +1709,20 @@ struct SceneState {
     has_frame: bool,
     paused: bool,
     diag: DiagState,
+    /// `SceneGraph::render_epoch` at the last `SceneRenderer::load`.
+    loaded_epoch: u64,
+    /// When the last property-triggered reload ran (for the debounce).
+    last_reload: Option<Instant>,
+    /// An epoch change is waiting for the debounce to elapse.
+    reload_pending: bool,
+}
+
+/// Minimum gap between property-triggered scene reloads.
+const PROPERTY_RELOAD_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// True when a property reload may run now.
+fn reload_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= PROPERTY_RELOAD_DEBOUNCE)
 }
 
 /// Diagnostics bookkeeping of one loaded scene.
@@ -1343,6 +1737,49 @@ struct DiagState {
 }
 
 impl SceneState {
+    /// Applies changed user properties: bound values and scripts update live; when a changed
+    /// property feeds an effect / bloom binding (baked into GPU plans) the renderer reloads in
+    /// place. Decoded textures stay on the GPU ([`SceneRenderer::reload`]) and reloads are
+    /// debounced, so dragging a slider does not rebuild the scene on every event.
+    fn apply_properties(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, json: &str) {
+        if let Err(err) = self.runtime.apply_user_properties(json) {
+            tracing::warn!("scene {}: property update: {err}", self.desc.scene_file);
+            return;
+        }
+        self.flush_pending_reload(device, queue);
+    }
+
+    /// Runs the property reload when the graph changed and the debounce has elapsed. Returns
+    /// `true` while a reload is still waiting (the host keeps ticking until it ran).
+    fn flush_pending_reload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        let epoch = self.runtime.graph().render_epoch();
+        if epoch == self.loaded_epoch {
+            self.reload_pending = false;
+            return false;
+        }
+        let now = Instant::now();
+        if !reload_due(self.last_reload, now) {
+            self.reload_pending = true;
+            return true;
+        }
+        self.reload_pending = false;
+        self.loaded_epoch = epoch;
+        self.last_reload = Some(now);
+        let warnings = self
+            .renderer
+            .reload(device, queue, &self.vfs, self.runtime.graph());
+        if std::env::var_os("TRUONGPAPER_PROBE_RELOAD").is_some() {
+            tracing::info!(
+                "scene {}: property reload took {:?}",
+                self.desc.scene_file,
+                now.elapsed()
+            );
+        }
+        self.runtime.add_diagnostics(self.renderer.diagnostics());
+        self.diag.load_warnings = warnings;
+        false
+    }
+
     /// Load warnings plus whatever the scene runtime reports.
     fn diagnostics(&self) -> Vec<String> {
         let mut out = self.diag.load_warnings.clone();
@@ -1434,6 +1871,7 @@ struct MonitorRenderer {
     monitor_id: String,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    scale_factor: f32,
     compositor: CompositorPipeline,
     generation: Option<u64>,
     content: Content,
@@ -1450,6 +1888,9 @@ struct MonitorRenderer {
     pending_error: Option<WallpaperErrorPayload>,
     /// A photo for this generation is being decoded on the worker; the previous frame stays.
     awaiting_photo: Option<u64>,
+    /// The CPU half of the scene for this generation is loading on the worker; the previous
+    /// content stays on screen (shares `awaiting_photo` as the "load pending" marker).
+    ready_scene: Option<SceneDone>,
     /// The last acquire failed: the loop retries soon instead of idling.
     stalled: bool,
     /// A scene was replaced by something else: tell the UI to drop its diagnostics.
@@ -1514,6 +1955,7 @@ impl MonitorRenderer {
         target.surface.configure(device, &config);
         let compositor = CompositorPipeline::new(device, format, config.width, config.height);
         Some(Self {
+            scale_factor: target.scale_factor.max(1.0),
             monitor_id: target.monitor_id,
             surface: target.surface,
             config,
@@ -1530,6 +1972,7 @@ impl MonitorRenderer {
             load_failed: false,
             pending_error: None,
             awaiting_photo: None,
+            ready_scene: None,
             stalled: false,
             diag_clear: None,
         })
@@ -1617,16 +2060,42 @@ impl MonitorRenderer {
         self.config.width.max(1) as f32 / self.config.height.max(1) as f32
     }
 
+    /// Tells the crash-loop guard which scene this monitor is about to load or draw.
+    fn mark_current(&self) {
+        with_faults(|l| match &self.content {
+            Content::Scene(scene) => l.set_current(Some(&scene_key(&scene.desc))),
+            _ => l.set_current(None),
+        });
+    }
+
+    /// Drops the scene and shows the failure state (black surface plus the error card), as for
+    /// a scene that failed to load. The scene is not restored again.
+    fn fail_scene(&mut self, device: &wgpu::Device, rt: Option<&MonitorRuntime>, message: String) {
+        let had_scene = matches!(self.content, Content::Scene(_));
+        self.content = Content::None;
+        self.load_failed = true;
+        self.dirty = true;
+        self.pending_error = Some(WallpaperErrorPayload {
+            monitor_id: self.monitor_id.clone(),
+            wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
+            message,
+        });
+        if had_scene {
+            release_gpu_and_heap(device);
+        }
+    }
+
     /// (Re)loads the monitor content when the host generation changed.
     fn sync_content(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         host: &WallpaperHost,
-        worker: &PhotoWorker,
+        workers: (&PhotoWorker, &SceneLoadWorker),
         max_display: (u32, u32),
         rt: Option<&MonitorRuntime>,
     ) {
+        let (worker, scene_worker) = workers;
         let generation = rt.map_or(0, |r| r.generation);
         if self.generation == Some(generation) {
             return;
@@ -1646,6 +2115,10 @@ impl MonitorRenderer {
         self.load_failed = false;
         let active = rt.map(|r| r.active.clone()).unwrap_or_default();
         self.awaiting_photo = None;
+        if let Some(stale) = self.ready_scene.take() {
+            discard(stale);
+        }
+        scene_worker.note_generation(&self.monitor_id, generation);
         if matches!(self.content, Content::Scene(_)) && !matches!(active, ActiveRuntime::Scene(_)) {
             if let Content::Scene(old) = &self.content {
                 self.diag_clear = Some(old.wallpaper_id.clone());
@@ -1654,11 +2127,16 @@ impl MonitorRenderer {
         match active {
             ActiveRuntime::Photo { path } => {
                 let was_photo = matches!(self.content, Content::Photo);
+                // A Web/Video still is a real picture: fade from it instead of from black.
+                let was_preview = matches!(self.content, Content::WebviewPreview);
                 self.content = Content::Photo;
                 if !was_photo {
                     self.from = None;
-                    self.to = None;
+                    if !was_preview {
+                        self.to = None;
+                    }
                     self.compositor.invalidate_caches();
+                    release_gpu_and_heap(device);
                 }
                 let pending = host.take_pending_photo(&self.monitor_id, generation);
                 let input = match (pending, path) {
@@ -1688,40 +2166,30 @@ impl MonitorRenderer {
                 if let Content::Scene(scene) = &mut self.content {
                     if same_scene(&scene.desc, &desc) {
                         if scene.desc.user_properties_json != desc.user_properties_json {
-                            if let Err(err) = scene
-                                .runtime
-                                .apply_user_properties(&desc.user_properties_json)
-                            {
-                                tracing::warn!("scene {}: property update: {err}", desc.scene_file);
-                            }
+                            scene.apply_properties(device, queue, &desc.user_properties_json);
                         }
                         scene.wallpaper_id = rt.and_then(|r| r.wallpaper_id.clone());
                         scene.desc = desc;
                         return;
                     }
                 }
-                match load_scene(device, queue, &self.config, &desc, rt) {
-                    Ok(state) => self.content = Content::Scene(Box::new(state)),
-                    Err(err) => {
-                        tracing::warn!("scene {} failed to load: {err}", desc.scene_file);
-                        // A previous scene is still intact: roll back to it. Anything else
-                        // becomes a black surface instead of a stale frame.
-                        let rolled_back = matches!(self.content, Content::Scene(_));
-                        if !rolled_back {
-                            self.content = Content::None;
-                            self.load_failed = true;
-                        }
-                        self.pending_error = Some(WallpaperErrorPayload {
-                            monitor_id: self.monitor_id.clone(),
-                            wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
-                            message: if rolled_back {
-                                format!("Scene failed to load ({err}); kept the previous scene.")
-                            } else {
-                                format!("Scene failed to load: {err}")
-                            },
-                        });
-                    }
+                if scene_blocked(&desc) {
+                    self.fail_scene(device, rt, SCENE_BLOCKED_MESSAGE.into());
+                    return;
                 }
+                // The CPU stage runs on the worker; the old scene keeps rendering until the
+                // new one is ready (`finish_scene` swaps them).
+                self.awaiting_photo = Some(generation);
+                scene_worker.submit(SceneJob {
+                    monitor_id: self.monitor_id.clone(),
+                    generation,
+                    monitor_size: scene_monitor_size(
+                        self.config.width,
+                        self.config.height,
+                        self.scale_factor,
+                    ),
+                    desc,
+                });
             }
             ActiveRuntime::Webview {
                 preview_path: Some(path),
@@ -1751,6 +2219,66 @@ impl MonitorRenderer {
                 self.to = None;
                 self.transition_started = None;
                 self.compositor.invalidate_caches();
+                release_gpu_and_heap(device);
+            }
+        }
+    }
+
+    /// Swaps in a scene whose CPU stage the worker finished. A result for a generation that has
+    /// been replaced since is dropped.
+    fn finish_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rt: Option<&MonitorRuntime>,
+    ) {
+        let Some(done) = self.ready_scene.take() else {
+            return;
+        };
+        let stage_started = std::time::Instant::now();
+        if self.generation != Some(done.generation) || self.awaiting_photo != Some(done.generation)
+        {
+            discard(done);
+            return;
+        }
+        self.awaiting_photo = None;
+        self.dirty = true;
+        if scene_blocked(&done.desc) {
+            discard(done);
+            self.fail_scene(device, rt, SCENE_BLOCKED_MESSAGE.into());
+            return;
+        }
+        // Free the old scene before the GPU stage: keeping both held well over 1 GB for large
+        // 4K scenes. The poll lets wgpu actually destroy its textures before the heap is trimmed.
+        if matches!(self.content, Content::Scene(_)) {
+            self.content = Content::None;
+            release_gpu_and_heap(device);
+        }
+        let desc = done.desc;
+        with_faults(|l| l.set_current(Some(&scene_key(&desc))));
+        let loaded = done.result.and_then(|cpu| {
+            finish_scene_gpu(device, queue, cpu, &desc, rt).map_err(|err| err.to_string())
+        });
+        match loaded {
+            Ok(state) => {
+                self.content = Content::Scene(Box::new(state));
+                release_free_memory();
+                tracing::debug!(
+                    "scene {}: render thread busy {:?} for this switch",
+                    desc.scene_file,
+                    stage_started.elapsed()
+                );
+            }
+            Err(err) => {
+                tracing::warn!("scene {} failed to load: {err}", desc.scene_file);
+                // A black surface instead of a stale frame.
+                self.content = Content::None;
+                self.load_failed = true;
+                self.pending_error = Some(WallpaperErrorPayload {
+                    monitor_id: self.monitor_id.clone(),
+                    wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
+                    message: format!("Scene failed to load: {err}"),
+                });
             }
         }
     }
@@ -1767,6 +2295,8 @@ impl MonitorRenderer {
             Ok(image) => image,
             Err(err) => {
                 tracing::warn!("{err}");
+                // Lets the outgoing Web/Video window go instead of covering the desktop.
+                self.load_failed = true;
                 return;
             }
         };
@@ -1794,6 +2324,9 @@ impl MonitorRenderer {
         }
         self.compositor.invalidate_caches();
         self.dirty = true;
+        // The decoded pixels now live on the GPU; return the CPU copy's pages.
+        drop(image);
+        release_free_memory();
     }
 
     /// Acquires the next surface texture, reconfiguring on `Lost` / `Outdated`.
@@ -1884,7 +2417,9 @@ impl MonitorRenderer {
             _ => 1.0,
         };
         let Some(to) = &self.to else {
-            if self.dirty {
+            // While the new photo decodes, leave the last frame on screen. Clearing here
+            // showed a black flash between the old wallpaper and the photo.
+            if self.dirty && self.awaiting_photo.is_none() {
                 self.present_clear(device, queue);
             }
             return false;
@@ -2110,33 +2645,44 @@ impl MonitorRenderer {
     }
 }
 
-/// Loads a scene wallpaper on the render thread: SceneRuntime (scripts), SceneRenderer (GPU
-/// resources), an offscreen target, scene sounds and embedded videos.
-fn load_scene(
+/// The screen size scenes see as `engine.screenResolution`: logical points, not backing pixels.
+/// Scripts position text/layers as a percentage of it (e.g. Persica's clock sits at
+/// `screenResolution / 100 * 100` in a 3840x2160 scene), which assumes a 1080p-class value; the
+/// 3456x2234 physical pixels of a Retina panel push those layers off the canvas.
+pub fn scene_monitor_size(width: u32, height: u32, scale_factor: f32) -> [f32; 2] {
+    let s = if scale_factor.is_finite() && scale_factor >= 1.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    [(width as f32 / s).round(), (height as f32 / s).round()]
+}
+
+/// GPU stage of a scene load on the render thread: SceneRenderer resources, an offscreen
+/// target, scene sounds and embedded videos. The CPU stage ran on the scene load worker.
+fn finish_scene_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    config: &wgpu::SurfaceConfiguration,
+    cpu: SceneCpu,
     desc: &SceneDescriptor,
     rt: Option<&MonitorRuntime>,
 ) -> anyhow::Result<SceneState> {
-    let vfs = WeVirtualFileSystem::mount(desc.install_dir.clone(), desc.core_assets_dir.clone());
-    let monitor_size = [config.width as f32, config.height as f32];
-    let mut runtime = SceneRuntime::load(
-        &vfs,
-        &desc.scene_file,
-        Some(&desc.user_properties_json),
-        monitor_size,
-    )?;
+    let stage_started = std::time::Instant::now();
+    let SceneCpu {
+        vfs,
+        mut runtime,
+        textures,
+    } = cpu;
     let scene_size = runtime.graph().scene_size;
     let (w, h) = (
-        scene_size.x.clamp(1.0, MAX_SCENE_TARGET_DIMENSION),
-        scene_size.y.clamp(1.0, MAX_SCENE_TARGET_DIMENSION),
+        scene_target_dimension(scene_size.x),
+        scene_target_dimension(scene_size.y),
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("desktop_scene_target"),
         size: wgpu::Extent3d {
-            width: w.round() as u32,
-            height: h.round() as u32,
+            width: w,
+            height: h,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -2155,7 +2701,9 @@ fn load_scene(
     });
     let mut renderer =
         SceneRenderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, scene_size);
-    let load_warnings = renderer.load(device, queue, &vfs, runtime.graph());
+    let load_started = std::time::Instant::now();
+    let load_warnings = renderer.load_with_decoded(device, queue, &vfs, runtime.graph(), textures);
+    let load_time = load_started.elapsed();
     // Skipped effect passes and shader fallbacks join the scene report.
     runtime.add_diagnostics(renderer.diagnostics());
     for warning in &load_warnings {
@@ -2164,8 +2712,20 @@ fn load_scene(
     let adjustments = rt
         .map(MonitorRuntime::effective_adjustments)
         .unwrap_or_default();
+    let videos_started = std::time::Instant::now();
     let videos = open_embedded_videos(&renderer, &vfs, desc, &adjustments);
+    tracing::debug!(
+        "scene {}: render-thread stage {:?} (renderer load {:?}, videos {:?})",
+        desc.scene_file,
+        stage_started.elapsed(),
+        load_time,
+        videos_started.elapsed()
+    );
+    let loaded_epoch = runtime.graph().render_epoch();
     let mut state = SceneState {
+        loaded_epoch,
+        last_reload: None,
+        reload_pending: false,
         wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
         desc: desc.clone(),
         runtime,
@@ -2176,7 +2736,7 @@ fn load_scene(
         sample_view,
         view_id: next_view_id(),
         content_serial: next_view_id(),
-        aspect: w / h,
+        aspect: w as f32 / h as f32,
         sounds: None,
         sound_owner: false,
         sound_unavailable: false,
@@ -2235,11 +2795,21 @@ fn create_gpu(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> Op
         },
         None,
     )) {
-        Ok((device, queue)) => Some(Gpu {
-            adapter,
-            device,
-            queue,
-        }),
+        Ok((device, queue)) => {
+            // wgpu panics on an uncaptured error by default; log it and count it against the
+            // scene instead, so one bad pipeline cannot crash-loop the renderer.
+            device.on_uncaptured_error(Box::new(|err| {
+                tracing::error!("wgpu uncaptured error: {err}");
+                if let Some(key) = with_faults(|l| l.note_error(Instant::now())) {
+                    tracing::error!("scene {key} caused repeated GPU errors; disabling it");
+                }
+            }));
+            Some(Gpu {
+                adapter,
+                device,
+                queue,
+            })
+        }
         Err(err) => {
             tracing::warn!("wgpu device request failed: {err}");
             None
@@ -2291,7 +2861,12 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
             Ok(RunEnd::Shutdown) => break,
             Ok(RunEnd::SetupFailed) => tracing::warn!("desktop renderer setup failed"),
             Ok(RunEnd::DeviceLost) => tracing::warn!("wgpu device lost; recreating the renderer"),
-            Err(_) => tracing::error!("desktop render thread panicked; restarting it"),
+            Err(_) => {
+                tracing::error!("desktop render thread panicked; restarting it");
+                if let Some(key) = with_faults(FaultLedger::note_panic) {
+                    tracing::error!("scene {key} panicked the render thread twice; disabling it");
+                }
+            }
         }
         if started.elapsed() >= MAX_BACKOFF {
             backoff = INITIAL_BACKOFF;
@@ -2363,6 +2938,11 @@ fn run_renderer(
         monitors.clear();
         return RunEnd::SetupFailed;
     };
+    let Some(scene_worker) = SceneLoadWorker::spawn(Arc::clone(host)) else {
+        tracing::error!("could not start the scene load worker");
+        monitors.clear();
+        return RunEnd::SetupFailed;
+    };
     let mut last_epoch = u64::MAX;
     let mut was_idle = false;
     let mut last_suspended = false;
@@ -2371,6 +2951,7 @@ fn run_renderer(
     let mut span_notified: HashSet<(String, u64)> = HashSet::new();
 
     let end = loop {
+        with_faults(|l| l.set_current(None));
         if host.is_shutting_down() {
             break RunEnd::Shutdown;
         }
@@ -2429,6 +3010,7 @@ fn run_renderer(
                 if !geoms.is_empty() {
                     let ids: Vec<String> = geoms.iter().map(|g| g.id.clone()).collect();
                     host.retain_monitors(&ids);
+                    scene_worker.retain_monitors(&ids);
                 }
                 // Displays that came back (or are new) lost their runtime: have the scheduler
                 // re-apply their persisted source so they are not left black.
@@ -2463,6 +3045,19 @@ fn run_renderer(
                 .find(|m| m.monitor_id == done.monitor_id)
             {
                 m.finish_photo(&gpu.device, &gpu.queue, done);
+            }
+        }
+
+        let scenes = scene_worker.drain();
+        let photo_ready = photo_ready || !scenes.is_empty();
+        for done in scenes {
+            if let Some(m) = monitors
+                .iter_mut()
+                .find(|m| m.monitor_id == done.monitor_id)
+            {
+                if let Some(old) = m.ready_scene.replace(done) {
+                    discard(old);
+                }
             }
         }
 
@@ -2536,9 +3131,24 @@ fn run_renderer(
             }
         };
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
+        let newly_blocked = with_faults(FaultLedger::take_newly_blocked);
         for m in &mut monitors {
             let rt = rt_of(&m.monitor_id);
-            m.sync_content(&gpu.device, &gpu.queue, host, &worker, max_display, rt);
+            if let Content::Scene(scene) = &m.content {
+                if newly_blocked.contains(&scene_key(&scene.desc)) {
+                    m.fail_scene(&gpu.device, rt, SCENE_BLOCKED_MESSAGE.into());
+                }
+            }
+            m.mark_current();
+            m.sync_content(
+                &gpu.device,
+                &gpu.queue,
+                host,
+                (&worker, &scene_worker),
+                max_display,
+                rt,
+            );
+            m.finish_scene(&gpu.device, &gpu.queue, rt);
             if let Content::Scene(scene) = &mut m.content {
                 for RenderEvent::SceneProperties {
                     wallpaper_id,
@@ -2546,14 +3156,11 @@ fn run_renderer(
                 } in &events
                 {
                     if scene.wallpaper_id.as_deref() == Some(wallpaper_id.as_str()) {
-                        if let Err(err) = scene.runtime.apply_user_properties(changed_json) {
-                            tracing::warn!(
-                                "scene {}: property update: {err}",
-                                scene.desc.scene_file
-                            );
-                        }
+                        scene.apply_properties(&gpu.device, &gpu.queue, changed_json);
                     }
                 }
+                // A debounced property reload still waiting: keep ticking until it ran.
+                animating |= scene.flush_pending_reload(&gpu.device, &gpu.queue);
             }
         }
         // One monitor per scene plays its sounds.
@@ -2572,13 +3179,15 @@ fn run_renderer(
             let span = span_on
                 .then(|| span_transform(&geoms, &m.monitor_id))
                 .flatten();
+            m.mark_current();
             animating |= m.frame(
                 &gpu.device,
                 &gpu.queue,
                 rt,
                 should_render,
                 sound_owner,
-                transition_secs,
+                rt.and_then(|r| r.transition_secs)
+                    .unwrap_or(transition_secs),
                 &geoms,
                 span,
                 &mut cursor,
@@ -2593,6 +3202,10 @@ fn run_renderer(
                     && host.note_presented(&m.monitor_id, rt.generation)
                 {
                     emit_loaded(app, &m.monitor_id, rt.wallpaper_id.clone());
+                } else if m.load_failed && m.generation == Some(rt.generation) {
+                    // Nothing will be presented; release the outgoing Web/Video window so the
+                    // error card is not hidden behind the old wallpaper.
+                    host.note_presented(&m.monitor_id, rt.generation);
                 }
             }
             if let Some(err) = m.pending_error.take() {
@@ -2631,6 +3244,31 @@ fn run_renderer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn property_reload_is_debounced() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(super::reload_due(None, now));
+        assert!(!super::reload_due(Some(now), now));
+        assert!(!super::reload_due(
+            Some(now),
+            now + Duration::from_millis(149)
+        ));
+        assert!(super::reload_due(
+            Some(now),
+            now + Duration::from_millis(150)
+        ));
+        // A clock that went backwards must not wedge the reload.
+        assert!(!super::reload_due(Some(now + Duration::from_secs(1)), now));
+    }
+
+    #[test]
+    fn scene_monitor_size_is_logical() {
+        assert_eq!(super::scene_monitor_size(3456, 2234, 2.0), [1728.0, 1117.0]);
+        assert_eq!(super::scene_monitor_size(1920, 1080, 1.0), [1920.0, 1080.0]);
+        assert_eq!(super::scene_monitor_size(1920, 1080, 0.0), [1920.0, 1080.0]);
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -2906,6 +3544,84 @@ mod tests {
     }
 
     #[test]
+    fn latest_generations_forget_removed_monitors() {
+        let latest = LatestGenerations::default();
+        latest.note("A", 3);
+        latest.note("B", 4);
+        latest.retain_monitors(&["A".to_string()]);
+        assert!(latest.is_current("A", 3));
+        assert!(!latest.is_current("A", 2));
+        assert_eq!(latest.0.lock().len(), 1);
+    }
+
+    #[test]
+    fn scene_target_dimension_is_nan_safe() {
+        assert_eq!(scene_target_dimension(f32::NAN), 1);
+        assert_eq!(scene_target_dimension(f32::INFINITY), 1);
+        assert_eq!(scene_target_dimension(f32::NEG_INFINITY), 1);
+        assert_eq!(scene_target_dimension(-5.0), 1);
+        assert_eq!(scene_target_dimension(1919.6), 1920);
+        assert_eq!(
+            scene_target_dimension(1.0e9),
+            MAX_SCENE_TARGET_DIMENSION as u32
+        );
+    }
+
+    #[test]
+    fn repeated_gpu_errors_block_only_the_scene_that_caused_them() {
+        let mut l = FaultLedger::default();
+        let t0 = Instant::now();
+        // No scene active: errors are only logged.
+        assert_eq!(l.note_error(t0), None);
+        l.set_current(Some("bad"));
+        for i in 0..FAULT_ERROR_LIMIT - 1 {
+            assert_eq!(l.note_error(t0 + Duration::from_millis(i as u64)), None);
+        }
+        assert!(!l.is_blocked("bad"));
+        assert_eq!(
+            l.note_error(t0 + Duration::from_secs(1)).as_deref(),
+            Some("bad")
+        );
+        assert!(l.is_blocked("bad"));
+        assert!(!l.is_blocked("good"));
+        assert_eq!(l.take_newly_blocked(), ["bad"]);
+        assert!(l.take_newly_blocked().is_empty());
+        // Further errors of a blocked scene do not report it again.
+        assert_eq!(l.note_error(t0 + Duration::from_secs(2)), None);
+    }
+
+    #[test]
+    fn spread_out_gpu_errors_do_not_block() {
+        let mut l = FaultLedger::default();
+        l.set_current(Some("s"));
+        let t0 = Instant::now();
+        for i in 0..20u64 {
+            let at = t0 + FAULT_WINDOW * (i as u32) + Duration::from_secs(1);
+            assert_eq!(l.note_error(at), None);
+        }
+        assert!(!l.is_blocked("s"));
+    }
+
+    #[test]
+    fn a_scene_that_panics_the_render_thread_twice_is_blocked() {
+        let mut l = FaultLedger::default();
+        // A panic with no scene active blames nobody.
+        assert_eq!(l.note_panic(), None);
+        l.set_current(Some("crashy"));
+        assert_eq!(l.note_panic(), None);
+        assert!(!l.is_blocked("crashy"));
+        // The restart reloads the same scene, which panics again.
+        l.set_current(Some("crashy"));
+        assert_eq!(l.note_panic().as_deref(), Some("crashy"));
+        assert!(l.is_blocked("crashy"));
+        assert_eq!(l.take_newly_blocked(), ["crashy"]);
+        // Other scenes keep their own count.
+        l.set_current(Some("other"));
+        assert_eq!(l.note_panic(), None);
+        assert!(!l.is_blocked("other"));
+    }
+
+    #[test]
     fn backoff_doubles_up_to_thirty_seconds() {
         let mut d = INITIAL_BACKOFF;
         let mut seen = vec![d.as_secs()];
@@ -2984,6 +3700,80 @@ mod tests {
             max_display: (100, 100),
             preview,
         }
+    }
+
+    fn scene_job(monitor: &str, generation: u64) -> SceneJob {
+        SceneJob {
+            monitor_id: monitor.into(),
+            generation,
+            desc: SceneDescriptor {
+                install_dir: std::env::temp_dir().join("truongpaper-no-such-scene"),
+                core_assets_dir: std::env::temp_dir().join("truongpaper-no-such-assets"),
+                scene_file: "scene.json".into(),
+                content_revision: 0,
+                user_properties_json: "{}".into(),
+            },
+            monitor_size: [1920.0, 1080.0],
+        }
+    }
+
+    #[test]
+    fn scene_jobs_keep_only_the_newest_per_monitor() {
+        let jobs = vec![
+            scene_job("a", 1),
+            scene_job("b", 2),
+            scene_job("a", 3),
+            scene_job("a", 4),
+        ];
+        let kept: Vec<_> = coalesce_scene_jobs(jobs)
+            .iter()
+            .map(|j| (j.monitor_id.clone(), j.generation))
+            .collect();
+        assert_eq!(kept, vec![("a".into(), 4), ("b".into(), 2)]);
+    }
+
+    #[test]
+    fn scene_load_off_thread_reports_failure_with_its_generation() {
+        // The loaded CPU stage must be movable to the render thread.
+        fn assert_send<T: Send>() {}
+        assert_send::<SceneDone>();
+        let done = std::thread::spawn(|| run_scene_job(scene_job("m", 9), &|| true))
+            .join()
+            .unwrap()
+            .expect("current job finishes");
+        assert_eq!((done.monitor_id.as_str(), done.generation), ("m", 9));
+        assert!(done.result.is_err());
+    }
+
+    #[test]
+    fn stale_scene_job_stops_before_any_work() {
+        assert!(run_scene_job(scene_job("m", 1), &|| false).is_none());
+    }
+
+    #[test]
+    fn latest_generations_track_each_monitor() {
+        let latest = LatestGenerations::default();
+        assert!(latest.is_current("a", 1), "unknown monitors are current");
+        latest.note("a", 2);
+        assert!(!latest.is_current("a", 1));
+        assert!(latest.is_current("a", 2));
+        assert!(latest.is_current("b", 7));
+    }
+
+    #[test]
+    fn discard_drops_values_off_the_calling_thread() {
+        struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        discard(Probe(tx));
+        let dropped_on = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("value dropped");
+        assert_ne!(dropped_on, std::thread::current().id());
     }
 
     #[test]

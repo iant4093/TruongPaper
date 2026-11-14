@@ -29,9 +29,53 @@ use truongpaper_we_formats::{
 
 use crate::json::Value;
 use crate::scene_assets::{
-    material_texture_path, EffectFboSpec, EffectFile, MaterialFile, MaterialPassSpec,
+    material_texture_path, shader_stage_paths, EffectFboSpec, EffectFile, MaterialFile,
+    MaterialPassSpec,
 };
 use crate::scene_graph::SceneLayer;
+use crate::shader_preprocessor::parse_uniform_comment_metadata;
+
+/// `g_TextureN` samplers (N in 1..8) whose shader comment names a `default` texture and no
+/// `combo`, read from the pass's vertex and fragment sources. Unreadable shaders yield none.
+pub fn shader_default_textures(vfs: &WeVirtualFileSystem, shader: &str) -> Vec<(u32, String)> {
+    let (vpath, fpath) = shader_stage_paths(shader);
+    let source: String = [vpath, fpath]
+        .iter()
+        .filter_map(|p| vfs.read_string(p).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    default_textures_in_source(&source)
+}
+
+fn default_textures_in_source(source: &str) -> Vec<(u32, String)> {
+    let mut out: Vec<(u32, String)> = Vec::new();
+    for meta in parse_uniform_comment_metadata(source) {
+        if meta.glsl_type != "sampler2D" || meta.combo.is_some() {
+            continue;
+        }
+        let Some(slot) = meta
+            .name
+            .strip_prefix("g_Texture")
+            .and_then(|n| n.parse::<u32>().ok())
+            .filter(|s| (1..8).contains(s))
+        else {
+            continue;
+        };
+        let Some(name) = meta
+            .default
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        if !out.iter().any(|(s, _)| *s == slot) {
+            out.push((slot, name.to_string()));
+        }
+    }
+    out
+}
 
 /// Name of the scene-wide full-frame color copy.
 pub const RT_FULL_FRAME_BUFFER: &str = "_rt_FullFrameBuffer";
@@ -231,6 +275,9 @@ fn to_local_value(json_text: &str) -> Value {
 }
 
 struct Resolver<'a> {
+    /// Id of the layer being planned; its own `_rt_imageLayerComposite_<id>_*` is the chain's
+    /// current source, not an earlier layer's finished image.
+    own_layer: Option<i32>,
     effect_index: usize,
     fbos: &'a [EffectFboSpec],
     /// Unknown `_rt_*` names met while resolving textures (guessing them would corrupt the chain).
@@ -255,14 +302,31 @@ impl Resolver<'_> {
         }
     }
 
+    /// The editor writes a `unique` effect FBO bound in a pass override as
+    /// `<fbo>_<layer kind>_<id>` (`_rt_FullCompoBuffer1_fullscreen_90` for motionblur's
+    /// persistent accumulation buffer); map it back to the effect's own FBO.
+    fn unique_fbo_name<'n>(&self, name: &'n str) -> Option<&'n str> {
+        let (rest, id) = name.rsplit_once('_')?;
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let (fbo, _kind) = rest.rsplit_once('_')?;
+        self.fbos.iter().any(|f| f.name == fbo).then_some(fbo)
+    }
+
     fn texture(&self, name: &str, current: &RenderTargetId) -> TextureBinding {
+        // Another layer's composite: WE ping-pongs `_a`/`_b`; both mean its finished image.
         if let Some(id) = name
             .strip_prefix("_rt_imageLayerComposite_")
-            .and_then(|name| name.strip_suffix("_a"))
+            .and_then(|name| name.strip_suffix("_a").or_else(|| name.strip_suffix("_b")))
             .and_then(|id| id.parse().ok())
         {
+            if self.own_layer == Some(id) {
+                return TextureBinding::Target(current.clone());
+            }
             return TextureBinding::Target(RenderTargetId::LayerOutput(id));
         }
+        let name = self.unique_fbo_name(name).unwrap_or(name);
         match self.target(name, current) {
             Some(t) => TextureBinding::Target(t),
             None if name.starts_with("_rt_") => {
@@ -345,6 +409,7 @@ impl EffectChainPlan {
                 });
             }
             let resolver = Resolver {
+                own_layer: layer.id,
                 effect_index,
                 fbos: &effect.fbos,
                 unknown_targets: Default::default(),
@@ -447,6 +512,14 @@ impl EffectChainPlan {
                 }
                 for bind in &pass.bind {
                     textures.insert(bind.index as u32, resolver.texture(&bind.name, &current));
+                }
+                // Slots the material leaves empty take the texture the shader names as its
+                // `default` (e.g. `// {"default":"pattern/voronoi"}`), as Wallpaper Engine does.
+                // Combo-gated slots (masks) stay unbound so their combo stays off.
+                for (slot, name) in shader_default_textures(vfs, &mpass.shader) {
+                    textures
+                        .entry(slot)
+                        .or_insert_with(|| resolver.texture(&name, &current));
                 }
                 if textures
                     .values()
@@ -709,5 +782,28 @@ impl BloomPlan {
             threshold,
             passes,
         }
+    }
+}
+
+#[cfg(test)]
+mod default_texture_tests {
+    use super::default_textures_in_source;
+
+    #[test]
+    fn shader_defaults_bind_unless_combo_gated() {
+        let src = r#"
+uniform sampler2D g_Texture0; // {"material":"framebuffer","hidden":true}
+uniform sampler2D g_Texture1; // {"label":"mask","mode":"opacitymask","combo":"MASK","default":"util/white"}
+uniform sampler2D g_Texture2; // {"label":"pattern","default":"pattern/voronoi_local"}
+uniform sampler2D g_Texture3; // {"label":"noise","default":"util/uniform_256"}
+uniform float u_speed; // {"material":"speed","default":1}
+"#;
+        assert_eq!(
+            default_textures_in_source(src),
+            vec![
+                (2, "pattern/voronoi_local".to_string()),
+                (3, "util/uniform_256".to_string())
+            ]
+        );
     }
 }

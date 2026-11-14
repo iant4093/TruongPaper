@@ -152,6 +152,9 @@ pub struct MacVideoDecoder {
     end_observer: Option<Retained<AnyObject>>,
     rate: f32,
     paused: bool,
+    /// `true` once a frame was handed out: while paused afterwards the output has nothing new,
+    /// so decoding is skipped entirely.
+    delivered_frame: bool,
 }
 
 // SAFETY: AVPlayer, AVPlayerItem and AVPlayerItemVideoOutput are reference counted Objective-C
@@ -246,12 +249,41 @@ impl MacVideoDecoder {
                 end_observer,
                 rate: 1.0,
                 paused: true,
+                delivered_frame: false,
             })
         }
     }
 
-    /// Copies the newest decoded frame if the output has one for the current host time.
+    /// Copies the newest decoded frame into a fresh `Vec` (see
+    /// [`Self::copy_latest_bgra_frame_into`] for the allocation-free variant).
     pub fn copy_latest_bgra_frame(&mut self) -> Option<BgraFrame> {
+        let mut bytes = Vec::new();
+        let (width, height, stride) = self.copy_latest_bgra_frame_into(&mut bytes)?;
+        Some((width, height, stride, bytes))
+    }
+
+    /// Copies the newest decoded frame, if the output has one for the current host time, into
+    /// `buf` (cleared first; its capacity is reused, so a recycled buffer costs no allocation).
+    /// Returns `(width, height, stride)`. Returns `None` without touching AVFoundation while
+    /// paused once a first frame was delivered.
+    pub fn copy_latest_bgra_frame_into(&mut self, buf: &mut Vec<u8>) -> Option<(u32, u32, usize)> {
+        self.with_latest_bgra_frame(|width, height, stride, pixels| {
+            fill_pooled(buf, pixels);
+            (width, height, stride)
+        })
+    }
+
+    /// Runs `f(width, height, stride, pixels)` on the newest decoded frame without copying it:
+    /// `pixels` borrows the locked (IOSurface-backed) `CVPixelBuffer`, so `f` can upload straight
+    /// from it and must not keep the slice. Same `None` rules as
+    /// [`Self::copy_latest_bgra_frame_into`].
+    pub fn with_latest_bgra_frame<R>(
+        &mut self,
+        f: impl FnOnce(u32, u32, usize, &[u8]) -> R,
+    ) -> Option<R> {
+        if self.paused && self.delivered_frame {
+            return None;
+        }
         // SAFETY: `output` is a live AVPlayerItemVideoOutput; the returned pixel buffer is +1
         // (copy rule) and released below after its base address is unlocked.
         unsafe {
@@ -274,8 +306,11 @@ impl MacVideoDecoder {
             if buffer.is_null() {
                 return None;
             }
-            let frame = read_bgra_pixel_buffer(buffer);
+            let frame = read_bgra_pixel_buffer(buffer, f);
             CVBufferRelease(buffer);
+            if frame.is_some() {
+                self.delivered_frame = true;
+            }
             frame
         }
     }
@@ -371,11 +406,31 @@ impl Drop for MacVideoDecoder {
     }
 }
 
-/// Copies a non-planar BGRA `CVPixelBuffer` into `(width, height, stride, bytes)`.
+/// Replaces the contents of `buf` with `src`, reusing its allocation when it is large enough.
+fn fill_pooled(buf: &mut Vec<u8>, src: &[u8]) {
+    buf.clear();
+    buf.extend_from_slice(src);
+}
+
+/// Smallest byte length that covers every pixel of a BGRA buffer (the last row's padding is not
+/// needed), or `None` when the geometry is inconsistent with `data_size`.
+fn bgra_visible_len(width: usize, height: usize, stride: usize, data_size: usize) -> Option<usize> {
+    if width == 0 || height == 0 || stride < width.checked_mul(4)? {
+        return None;
+    }
+    let needed = stride.checked_mul(height - 1)?.checked_add(width * 4)?;
+    (data_size >= needed).then_some(needed)
+}
+
+/// Locks a non-planar BGRA `CVPixelBuffer` and hands its pixels to `f` as a borrowed slice (no
+/// copy); returns `f`'s result.
 ///
 /// # Safety
 /// `buffer` must be a valid `CVPixelBufferRef`.
-unsafe fn read_bgra_pixel_buffer(buffer: *mut CVBuffer) -> Option<BgraFrame> {
+unsafe fn read_bgra_pixel_buffer<R>(
+    buffer: *mut CVBuffer,
+    f: impl FnOnce(u32, u32, usize, &[u8]) -> R,
+) -> Option<R> {
     if CVPixelBufferIsPlanar(buffer) != 0
         || CVPixelBufferGetPixelFormatType(buffer) != K_CV_PIXEL_FORMAT_TYPE_32BGRA
     {
@@ -389,24 +444,17 @@ unsafe fn read_bgra_pixel_buffer(buffer: *mut CVBuffer) -> Option<BgraFrame> {
     let height = CVPixelBufferGetHeight(buffer);
     let stride = CVPixelBufferGetBytesPerRow(buffer);
     let base = CVPixelBufferGetBaseAddress(buffer) as *const u8;
-    let len = stride
-        .checked_mul(height)
-        .map(|n| n.min(CVPixelBufferGetDataSize(buffer)));
-    let frame = match len {
-        Some(len)
-            if !base.is_null()
-                && width > 0
-                && height > 0
-                && stride >= width * 4
-                && len >= stride * (height - 1) + width * 4 =>
-        {
-            let bytes = std::slice::from_raw_parts(base, len).to_vec();
-            Some((width as u32, height as u32, stride, bytes))
-        }
+    let result = match bgra_visible_len(width, height, stride, CVPixelBufferGetDataSize(buffer)) {
+        Some(len) if !base.is_null() => Some(f(
+            width as u32,
+            height as u32,
+            stride,
+            std::slice::from_raw_parts(base, len),
+        )),
         _ => None,
     };
     CVPixelBufferUnlockBaseAddress(buffer, K_CV_PIXEL_BUFFER_LOCK_READ_ONLY);
-    frame
+    result
 }
 
 #[cfg(test)]
@@ -423,6 +471,28 @@ mod tests {
         assert_eq!(clamp_video_volume(0.3), 0.3);
         assert_eq!(clamp_video_volume(2.0), 1.0);
         assert_eq!(clamp_video_volume(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn visible_len_skips_last_row_padding_and_rejects_bad_geometry() {
+        // 4 px wide, 2 rows, stride 32: the last row only needs 16 bytes.
+        assert_eq!(bgra_visible_len(4, 2, 32, 64), Some(48));
+        assert_eq!(bgra_visible_len(4, 2, 32, 47), None);
+        assert_eq!(bgra_visible_len(4, 2, 12, 64), None);
+        assert_eq!(bgra_visible_len(0, 2, 32, 64), None);
+        assert_eq!(bgra_visible_len(4, 0, 32, 64), None);
+    }
+
+    #[test]
+    fn pooled_buffer_is_reused_between_frames() {
+        let mut buf = Vec::new();
+        fill_pooled(&mut buf, &[1; 4096]);
+        let ptr = buf.as_ptr();
+        fill_pooled(&mut buf, &[2; 4096]);
+        assert_eq!(buf.as_ptr(), ptr, "same-size frames must not reallocate");
+        assert!(buf.iter().all(|&b| b == 2));
+        fill_pooled(&mut buf, &[3; 16]);
+        assert_eq!((buf.len(), buf.capacity() >= 4096), (16, true));
     }
 
     #[test]
@@ -460,6 +530,10 @@ mod tests {
             assert!(decoder.copy_latest_bgra_frame().is_none());
             decoder.pause();
             assert!(decoder.is_paused());
+            // Paused after a delivered frame: no decode work at all.
+            decoder.delivered_frame = true;
+            let mut buf = Vec::with_capacity(8);
+            assert!(decoder.copy_latest_bgra_frame_into(&mut buf).is_none());
         }
         let _ = std::fs::remove_file(&path);
     }

@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "clouds",
+	"name": "Clouds",
+	"description": "TruongPaper built-in clouds effect",
+	"group": "colorize",
+	"passes": [
+		{
+			"material": "materials/effects/clouds.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/clouds.json",
+		"shaders/effects/clouds.frag",
+		"shaders/effects/clouds.vert"
+	]
+}

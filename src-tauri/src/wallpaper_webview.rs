@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use truongpaper_platform::MonitorPlaybackPolicy;
 use truongpaper_renderer::{
     audio_dispatch_js, cursor_event_js, pack_web_audio_frame, video_set_paused_js,
 };
@@ -75,6 +76,23 @@ pub fn pause_script(kind: WebviewKind, paused: bool) -> String {
     match kind {
         WebviewKind::Video => video_set_paused_js(paused),
         WebviewKind::Web => format!("window.__truongpaper_set_paused?.({paused});"),
+    }
+}
+
+/// `true` for the only pages a wallpaper window may navigate to: our own `wpe://localhost`
+/// (`WKWebView`) and `http(s)://wpe.localhost` (`WebView2`) origins, plus `about:blank`.
+///
+/// `subframes_possible` widens this for engines whose navigation callback also fires for
+/// iframes (`WKWebView`; `WebView2` only reports top-level navigations): ordinary web, `data:`
+/// and `blob:` documents stay allowed there so embedded players keep working, while every other
+/// scheme (`file:`, `tel:`, app-launching schemes) is refused.
+fn wallpaper_navigation_allowed(url: &tauri::Url, subframes_possible: bool) -> bool {
+    match url.scheme() {
+        "wpe" => url.host_str() == Some("localhost"),
+        "http" | "https" => subframes_possible || url.host_str() == Some("wpe.localhost"),
+        "about" => url.as_str() == "about:blank",
+        "data" | "blob" => subframes_possible,
+        _ => false,
     }
 }
 
@@ -246,6 +264,139 @@ pub fn plan_geometry_updates(
         .collect()
 }
 
+/// `true` when the page should be suspended by the OS webview (WebView2 `TrySuspend`): the window
+/// is covered by a fullscreen / maximized app or the display is asleep (`suspended`). A user
+/// pause and Battery Saver keep the page alive: only the JS pause applies, so the frame stays
+/// visible and resumes instantly.
+pub fn os_suspend_wanted(policy: MonitorPlaybackPolicy, suspended: bool) -> bool {
+    suspended
+        || matches!(
+            policy,
+            MonitorPlaybackPolicy::PausedFullscreen
+                | MonitorPlaybackPolicy::PausedMaximized
+                | MonitorPlaybackPolicy::PausedDisplaySleep
+        )
+}
+
+/// `(label, suspend)` for every loaded window whose OS-suspend state differs from the last one
+/// applied. Input is `(label, loaded, wanted, applied)`.
+pub fn plan_os_suspend(windows: &[(String, bool, bool, bool)]) -> Vec<(String, bool)> {
+    windows
+        .iter()
+        .filter(|(_, loaded, wanted, applied)| *loaded && wanted != applied)
+        .map(|(label, _, wanted, _)| (label.clone(), *wanted))
+        .collect()
+}
+
+/// How often windows that should be awake get `Resume` + `SetIsVisible(true)` again (the safety
+/// net for a suspend that raced with an uncover or failed half way).
+const REASSERT_INTERVAL: Duration = Duration::from_secs(15);
+/// A suspend that was not confirmed is not requested again for this long.
+const SUSPEND_RETRY: Duration = Duration::from_secs(15);
+
+/// Labels of loaded windows that must not be suspended or hidden. Input is
+/// `(label, loaded, wanted)` where `wanted` is [`os_suspend_wanted`].
+pub fn plan_reassert(windows: &[(String, bool, bool)]) -> Vec<String> {
+    windows
+        .iter()
+        .filter(|(_, loaded, wanted)| *loaded && !*wanted)
+        .map(|(label, _, _)| label.clone())
+        .collect()
+}
+
+/// `true` when a suspend may be requested: none is pending or the retry delay has passed.
+pub fn suspend_gate_open(not_before: Option<Instant>, now: Instant) -> bool {
+    not_before.is_none_or(|t| now >= t)
+}
+
+/// Per window: sequence number of the last suspend / resume request (a late completion of an
+/// older request is ignored) and the earliest time the next suspend may be requested.
+type SuspendGate = (u64, Option<Instant>);
+static SUSPEND_GATE: LazyLock<Mutex<HashMap<String, SuspendGate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether a suspend request for `label` may go out now.
+fn suspend_allowed(label: &str) -> bool {
+    let gate = SUSPEND_GATE.lock();
+    suspend_gate_open(gate.get(label).and_then(|g| g.1), Instant::now())
+}
+
+/// Registers a new request for `label` and returns its sequence number. A suspend closes the gate
+/// until its completion (or [`SUSPEND_RETRY`]); a resume opens it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn next_suspend_seq(label: &str, suspend: bool) -> u64 {
+    let mut gate = SUSPEND_GATE.lock();
+    let entry = gate.entry(label.to_string()).or_insert((0, None));
+    entry.0 += 1;
+    entry.1 = suspend.then(|| Instant::now() + SUSPEND_RETRY);
+    entry.0
+}
+
+/// Whether `seq` is still the newest request for `label`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_latest_suspend(label: &str, seq: u64) -> bool {
+    SUSPEND_GATE.lock().get(label).is_some_and(|g| g.0 == seq)
+}
+
+/// Suspends (`true`) or resumes (`false`) the WebView2 of `label`. WebView2 only suspends a hidden
+/// webview, so it is hidden first and shown again after the resume. Requests for one window go
+/// through `with_webview` in order (main thread), each tagged with a sequence number so a late
+/// `TrySuspend` completion cannot overwrite the state of a newer resume. The completion callback
+/// records `os_suspended`. Other platforms: no-op (the JS pause is all that is applied there).
+#[cfg(target_os = "windows")]
+fn set_os_suspended(app: &AppHandle, label: &str, suspend: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+    use webview2_com::TrySuspendCompletedHandler;
+    use windows::core::Interface;
+
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    let seq = next_suspend_seq(label, suspend);
+    let name = label.to_string();
+    let result = window.with_webview(move |webview| unsafe {
+        let controller = webview.controller();
+        let Ok(core) = controller.CoreWebView2() else {
+            tracing::debug!("webview {name}: CoreWebView2 unavailable (suspend={suspend})");
+            return;
+        };
+        let Ok(core3) = core.cast::<ICoreWebView2_3>() else {
+            tracing::debug!("webview {name}: ICoreWebView2_3 unavailable (suspend={suspend})");
+            return;
+        };
+        if suspend {
+            let hidden = controller.SetIsVisible(false);
+            let done_name = name.clone();
+            let handler = TrySuspendCompletedHandler::create(Box::new(move |result, suspended| {
+                let ok = result.is_ok() && suspended;
+                tracing::debug!(
+                    "webview {done_name}: TrySuspend completed (ok={ok}, result={result:?})"
+                );
+                if is_latest_suspend(&done_name, seq) {
+                    if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == done_name) {
+                        w.os_suspended = ok;
+                    }
+                }
+                Ok(())
+            }));
+            let started = core3.TrySuspend(&handler);
+            tracing::debug!(
+                "webview {name}: SetIsVisible(false)={hidden:?} TrySuspend={started:?}"
+            );
+        } else {
+            let resumed = core3.Resume();
+            let shown = controller.SetIsVisible(true);
+            tracing::debug!("webview {name}: Resume={resumed:?} SetIsVisible(true)={shown:?}");
+        }
+    });
+    if let Err(err) = result {
+        tracing::debug!("webview suspend on {label} failed: {err}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_os_suspended(_app: &AppHandle, _label: &str, _suspend: bool) {}
+
 // ---------------------------------------------------------------------------------------------
 // Window registry
 // ---------------------------------------------------------------------------------------------
@@ -259,6 +410,8 @@ struct WebWindow {
     loaded: bool,
     preview_ready_at: Instant,
     paused_sent: Option<bool>,
+    /// The OS webview is suspended (covered / hidden only, see [`os_suspend_wanted`]).
+    os_suspended: bool,
     /// Last volume / mute script sent to the page (`None` = never sent since load).
     audio_sent: Option<String>,
     /// Logical rect of the window (its monitor's rect when it was last placed).
@@ -395,6 +548,8 @@ pub async fn show(
     #[cfg(target_os = "macos")]
     let kind = spec.kind;
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::CustomProtocol(url))
+        // Wallpaper pages are untrusted: no popups or extra windows.
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("TruongPaper Wallpaper")
         .decorations(false)
         .skip_taskbar(true)
@@ -413,6 +568,7 @@ pub async fn show(
                 w.loaded = true;
                 // The bridge re-sends the pause state for the fresh page.
                 w.paused_sent = None;
+                w.os_suspended = false;
             }
             wake_bridge();
             for js in &load_scripts {
@@ -443,8 +599,13 @@ pub async fn show(
                     }
                     return false;
                 }
-                true
+                wallpaper_navigation_allowed(url, true)
             });
+    }
+    // WebView2 reports top-level navigations only, so the strict form applies.
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.on_navigation(|url| wallpaper_navigation_allowed(url, false));
     }
     if spec.kind == WebviewKind::Web {
         builder = builder
@@ -505,6 +666,7 @@ pub async fn show(
             loaded: loaded.load(Ordering::Acquire),
             preview_ready_at,
             paused_sent: None,
+            os_suspended: false,
             audio_sent: None,
             logical: (lx, ly, lw, lh),
             css_size: (lw, lh),
@@ -788,6 +950,7 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
     let mut display_check_at: Option<Instant> = None;
     let mut last_epoch = u64::MAX;
     let mut last_suspended = false;
+    let mut reassert_at = Instant::now();
 
     while !host.is_shutting_down() {
         let epoch = host.epoch();
@@ -801,12 +964,25 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
         if changed {
             // 1. Close windows whose monitor switched to another source.
             let stale = {
+                // Host locks are taken before `WINDOWS` everywhere else, so query the host
+                // first and only then lock `WINDOWS`.
+                let ids: Vec<String> = WINDOWS.lock().keys().cloned().collect();
+                let runtimes: HashMap<String, Option<MonitorRuntime>> = ids
+                    .into_iter()
+                    .map(|id| {
+                        let rt = host.monitor(&id);
+                        (id, rt)
+                    })
+                    .collect();
+                let attached = host.live_renderer_attached();
                 let mut stale = Vec::new();
                 WINDOWS.lock().retain(|id, window| {
-                    let rt = host.monitor(id);
-                    if window_matches_host(window, rt.as_ref())
-                        || keep_outgoing_window(rt.as_ref(), host.live_renderer_attached())
-                    {
+                    // A window added since the snapshot is judged on the next pass.
+                    let Some(rt) = runtimes.get(id) else {
+                        return true;
+                    };
+                    let rt = rt.as_ref();
+                    if window_matches_host(window, rt) || keep_outgoing_window(rt, attached) {
                         true
                     } else {
                         stale.push(window.label.clone());
@@ -839,10 +1015,49 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
                 })
                 .collect();
             let playing = |id: &str| !suspended && host.monitor_should_render(id);
+            // 3a. Wake pages that are no longer covered / hidden before the JS pause state goes
+            // out, then suspend the covered ones after it.
+            let suspend_plan: Vec<(String, bool)> = {
+                let windows: Vec<(String, bool, bool, bool)> = WINDOWS
+                    .lock()
+                    .iter()
+                    .map(|(id, w)| {
+                        let policy = host
+                            .monitor(id)
+                            .map_or(MonitorPlaybackPolicy::Playing, |rt| rt.policy);
+                        let wanted = os_suspend_wanted(policy, suspended);
+                        (w.label.clone(), w.loaded, wanted, w.os_suspended)
+                    })
+                    .collect();
+                plan_os_suspend(&windows)
+            };
+            for (label, suspend) in suspend_plan.iter().filter(|(_, s)| !*s) {
+                set_os_suspended(&app, label, *suspend);
+            }
             for (label, js, paused) in plan_pause_updates(&states, playing) {
                 eval(&app, &label, &js);
                 if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
                     w.paused_sent = Some(paused);
+                }
+            }
+
+            for (label, suspend) in suspend_plan.iter().filter(|(_, s)| *s) {
+                // A suspend that was not confirmed yet (or failed) is retried after a delay,
+                // not on every pass.
+                if cfg!(target_os = "windows") && !suspend_allowed(label) {
+                    continue;
+                }
+                set_os_suspended(&app, label, *suspend);
+                if !cfg!(target_os = "windows") {
+                    if let Some(w) = WINDOWS.lock().values_mut().find(|w| &w.label == label) {
+                        w.os_suspended = true;
+                    }
+                }
+            }
+            // A resume is recorded at once; a suspend is recorded by its completion callback.
+            for (label, _) in suspend_plan.iter().filter(|(_, s)| !*s) {
+                if let Some(w) = WINDOWS.lock().values_mut().find(|w| &w.label == label) {
+                    w.os_suspended = false;
                 }
             }
 
@@ -875,6 +1090,32 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
         if display_check_at.is_none_or(|t| t.elapsed() >= GEOMETRY_REFRESH) {
             follow_display_changes(&app);
             display_check_at = Some(Instant::now());
+        }
+
+        // 3c. Windows safety net: a suspend that raced with an uncover (or a failed
+        // `TrySuspend` after the page was hidden) must not leave the wallpaper black.
+        if cfg!(target_os = "windows") && reassert_at.elapsed() >= REASSERT_INTERVAL {
+            reassert_at = Instant::now();
+            let windows: Vec<(String, bool, bool)> = WINDOWS
+                .lock()
+                .iter()
+                .map(|(id, w)| {
+                    let policy = host
+                        .monitor(id)
+                        .map_or(MonitorPlaybackPolicy::Playing, |rt| rt.policy);
+                    (
+                        w.label.clone(),
+                        w.loaded,
+                        os_suspend_wanted(policy, suspended),
+                    )
+                })
+                .collect();
+            for label in plan_reassert(&windows) {
+                set_os_suspended(&app, &label, false);
+                if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
+                    w.os_suspended = false;
+                }
+            }
         }
 
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
@@ -930,6 +1171,49 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
 mod tests {
     use super::*;
     use crate::models::UniversalAdjustments;
+
+    #[test]
+    fn navigation_is_limited_to_our_own_origin() {
+        let url = |s: &str| tauri::Url::parse(s).unwrap();
+        // Top-level (WebView2): only the app origin.
+        for ok in [
+            "wpe://localhost/index.html",
+            "http://wpe.localhost/index.html?x=1",
+            "https://wpe.localhost/a/b.html",
+            "about:blank",
+        ] {
+            assert!(wallpaper_navigation_allowed(&url(ok), false), "{ok}");
+        }
+        for bad in [
+            "https://example.com/",
+            "http://wpe.localhost.evil.example/",
+            "wpe://evil/index.html",
+            "file:///etc/passwd",
+            "data:text/html,hi",
+            "blob:https://wpe.localhost/1",
+            "about:srcdoc",
+            "tel:123",
+        ] {
+            assert!(!wallpaper_navigation_allowed(&url(bad), false), "{bad}");
+        }
+        // WKWebView also reports iframe navigations: embeds work, local files and app schemes
+        // stay blocked.
+        for ok in [
+            "https://player.example/embed",
+            "data:text/html,hi",
+            "wpe://localhost/x",
+        ] {
+            assert!(wallpaper_navigation_allowed(&url(ok), true), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "tel:123",
+            "wpe://evil/x",
+            "javascript:alert(1)",
+        ] {
+            assert!(!wallpaper_navigation_allowed(&url(bad), true), "{bad}");
+        }
+    }
 
     #[test]
     fn bridge_ticks_fast_only_for_live_web_pages() {
@@ -1089,6 +1373,7 @@ mod tests {
             loaded: true,
             preview_ready_at: Instant::now(),
             paused_sent: None,
+            os_suspended: false,
             audio_sent: None,
             logical: (0.0, 0.0, 100.0, 100.0),
             css_size: (100.0, 100.0),
@@ -1183,5 +1468,57 @@ mod tests {
         assert!(video[0]
             .1
             .starts_with("window.__truongpaper_apply_video_adjustments("));
+    }
+
+    #[test]
+    fn os_suspend_only_for_covered_or_hidden_not_user_pause_or_battery() {
+        use MonitorPlaybackPolicy::*;
+        assert!(os_suspend_wanted(PausedFullscreen, false));
+        assert!(os_suspend_wanted(PausedMaximized, false));
+        assert!(os_suspend_wanted(PausedDisplaySleep, false));
+        assert!(os_suspend_wanted(Playing, true));
+        assert!(!os_suspend_wanted(Playing, false));
+        assert!(!os_suspend_wanted(PausedBattery, false));
+    }
+
+    #[test]
+    fn reassert_targets_loaded_windows_that_should_be_awake() {
+        let windows = [
+            ("a".to_string(), true, false),
+            ("b".to_string(), true, true),
+            ("c".to_string(), false, false),
+        ];
+        assert_eq!(plan_reassert(&windows), ["a"]);
+    }
+
+    #[test]
+    fn suspend_requests_are_sequenced_and_retried_after_a_delay() {
+        let label = "seq-test-window";
+        let first = next_suspend_seq(label, true);
+        assert!(is_latest_suspend(label, first));
+        assert!(!suspend_allowed(label), "a pending suspend closes the gate");
+        let resume = next_suspend_seq(label, false);
+        assert!(
+            !is_latest_suspend(label, first),
+            "a late completion is ignored"
+        );
+        assert!(is_latest_suspend(label, resume));
+        assert!(suspend_allowed(label), "a resume opens the gate");
+        let now = Instant::now();
+        assert!(suspend_gate_open(None, now));
+        assert!(!suspend_gate_open(Some(now + SUSPEND_RETRY), now));
+        assert!(suspend_gate_open(Some(now), now + SUSPEND_RETRY));
+    }
+
+    #[test]
+    fn os_suspend_plan_lists_only_loaded_changes() {
+        let w = |l: &str, loaded, wanted, applied| (l.to_string(), loaded, wanted, applied);
+        let plan = plan_os_suspend(&[
+            w("A", true, true, false),
+            w("B", true, false, true),
+            w("C", true, true, true),
+            w("D", false, true, false),
+        ]);
+        assert_eq!(plan, vec![("A".into(), true), ("B".into(), false)]);
     }
 }

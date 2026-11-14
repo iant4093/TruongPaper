@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "waterflow",
+	"name": "Water Flow",
+	"description": "TruongPaper built-in water flow effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/waterflow.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/waterflow.json",
+		"shaders/effects/waterflow.frag",
+		"shaders/effects/waterflow.vert"
+	]
+}

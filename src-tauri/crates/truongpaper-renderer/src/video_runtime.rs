@@ -337,6 +337,8 @@ pub trait VideoFrameSource {
     fn latest_frame(&mut self) -> Option<VideoFrame>;
     fn apply_settings(&mut self, settings: VideoPlaybackSettings);
     fn set_paused(&mut self, paused: bool);
+    /// Hands an uploaded frame back so the source can reuse its pixel buffer.
+    fn recycle_frame(&mut self, _frame: VideoFrame) {}
 }
 
 /// GPU texture fed by a [`VideoFrameSource`]. Recreated whenever the frame size or format
@@ -444,7 +446,11 @@ impl VideoTexture {
         source: &mut dyn VideoFrameSource,
     ) -> bool {
         match source.latest_frame() {
-            Some(frame) => self.upload(device, queue, &frame),
+            Some(frame) => {
+                let uploaded = self.upload(device, queue, &frame);
+                source.recycle_frame(frame);
+                uploaded
+            }
             None => false,
         }
     }

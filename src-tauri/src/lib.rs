@@ -15,6 +15,7 @@ pub mod secrets;
 pub mod smart_pause;
 pub mod state;
 pub mod tray;
+mod wallpaper_preview;
 pub mod wallpaper_webview;
 
 pub use state::AppState;
@@ -37,6 +38,29 @@ impl StartupClock {
     }
 }
 
+/// Points the scene VFS at our own bundled stock-effect and shader-include implementations
+/// (`resources/core-assets`, shipped through `bundle.resources`). Dev builds fall back to the
+/// repository copy because resources are not copied next to the debug binary.
+fn register_bundled_core_assets(app: &tauri::App) {
+    let packaged = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("core-assets").join("assets"))
+        .filter(|dir| dir.is_dir());
+    let dir = packaged.or_else(|| {
+        let dev =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/core-assets/assets");
+        (cfg!(debug_assertions) && dev.is_dir()).then_some(dev)
+    });
+    match dir {
+        Some(dir) => truongpaper_we_formats::set_bundled_assets_dir(dir),
+        None => {
+            tracing::warn!("bundled core assets not found; stock effects need Wallpaper Engine")
+        }
+    }
+}
+
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let clock = StartupClock(std::time::Instant::now());
     // Closing Studio hides it. The tray keeps running and uses it for Pause and Next.
@@ -49,6 +73,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    register_bundled_core_assets(app);
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
     let conn = truongpaper_core::open_and_initialize_db(&app_data_dir.join(DB_FILE_NAME))?;
@@ -167,6 +192,24 @@ pub fn run() {
                 });
             },
         )
+        .register_asynchronous_uri_scheme_protocol(
+            wallpaper_preview::SCHEME,
+            |ctx, request, responder| {
+                let preview = if matches!(ctx.webview_label(), "main" | "tray-popover") {
+                    ctx.app_handle()
+                        .try_state::<state::AppState>()
+                        .map(|state| wallpaper_preview::PreviewContext {
+                            db: state.db.clone(),
+                            cache_dir: state.app_data_dir.join("cache").join("wallpaper-previews"),
+                        })
+                } else {
+                    None
+                };
+                tauri::async_runtime::spawn(async move {
+                    responder.respond(wallpaper_preview::serve(preview, request).await);
+                });
+            },
+        )
         .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
             // --- Photo API & Cache ---
@@ -176,6 +219,7 @@ pub fn run() {
             commands::photo::photo_trigger_refill,
             commands::photo::photo_retry_now,
             commands::photo::photo_add_album,
+            commands::photo::photo_list_albums,
             commands::photo::photo_toggle_album,
             commands::photo::photo_remove_album,
             commands::photo::photo_set_filter,
@@ -195,6 +239,7 @@ pub fn run() {
             commands::steam::steam_submit_2fa_code,
             commands::steam::steam_logout,
             commands::steam::steam_cancel_login,
+            commands::steam::steam_cancel_download,
             commands::steam::steam_account,
             commands::steam::steam_sync_local_folders,
             commands::library::library_list_wallpapers,
@@ -209,7 +254,9 @@ pub fn run() {
             commands::monitor::monitor_update_adjustments,
             commands::library::wallpaper_save_preset,
             commands::library::wallpaper_apply_preset,
+            commands::backup::wallpaper_list_presets,
             commands::monitor::playback_set_paused,
+            controls::playback_next,
             commands::monitor::monitor_set_volume,
             // --- Playlists, Auto-Updater & Global Settings ---
             commands::playlist::playlist_list,
@@ -222,6 +269,7 @@ pub fn run() {
             commands::runtime::runtime_get_memory_usage,
             commands::backup::backup_export,
             commands::backup::backup_import,
+            commands::backup::playlist_export,
         ])
         .build(context)
         .expect("error while building TruongPaper Tauri application");
@@ -282,7 +330,7 @@ mod tests {
     #[test]
     fn registered_commands_match_docs_04_section_5_1() {
         let documented = documented_commands();
-        assert_eq!(documented.len(), 49, "doc list changed: {documented:?}");
+        assert_eq!(documented.len(), 54, "doc list changed: {documented:?}");
         assert_eq!(registered_commands(), documented);
     }
 
@@ -401,6 +449,7 @@ mod tests {
             "monitors_list",
             "monitor_apply_wallpaper",
             "playback_set_paused",
+            "playback_next",
             "playlist_list",
             "settings_get",
             "settings_update",

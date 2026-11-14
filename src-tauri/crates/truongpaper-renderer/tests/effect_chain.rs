@@ -433,3 +433,64 @@ fn unknown_blend_modes_are_reported() {
         .iter()
         .any(|d| d == "Effect wobble/effect.json: unknown blend mode 'wobble' treated as normal"));
 }
+
+/// Regression (1444077782, 2269193950): pass overrides naming a unique effect FBO as
+/// `<fbo>_<kind>_<id>` and another layer's `_b` composite resolve instead of skipping the effect.
+#[test]
+fn unique_fbo_override_names_and_layer_composite_b_resolve() {
+    let t = TempDir::new("fx-unique");
+    setup(&t);
+    t.write(
+        "effects/acc/effect.json",
+        r#"{ "fbos": [ { "name": "_rt_Acc", "scale": 1, "unique": true } ],
+             "passes": [ { "material": "materials/fx/combo.json" } ] }"#,
+    );
+    let p = plan(
+        &t,
+        r#"[ { "file": "effects/acc/effect.json", "passes": [
+              { "textures": [ null, "_rt_Acc_fullscreen_90", "_rt_imageLayerComposite_13_b" ] } ] } ]"#,
+        None,
+    );
+    assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    let pass = p.passes().next().unwrap();
+    assert_eq!(
+        pass.textures[&1],
+        TextureBinding::Target(RenderTargetId::Named {
+            effect: 0,
+            name: "_rt_Acc".into()
+        })
+    );
+    assert_eq!(
+        pass.textures[&2],
+        TextureBinding::Target(RenderTargetId::LayerOutput(13))
+    );
+}
+
+#[test]
+fn own_layer_composite_binds_the_current_source() {
+    // 3152793212: a CRT effect binds `_rt_imageLayerComposite_<own id>_b` as its input; that is
+    // the layer's own chain, not a finished layer output (which is still empty at that point).
+    let t = TempDir::new("fx-own-composite");
+    setup(&t);
+    t.write(
+        "scene.json",
+        r#"{ "general": { "orthogonalprojection": { "width": 1920, "height": 1080 } },
+              "objects": [ { "id": 246, "name": "L", "image": "models/sq.json", "effects": [
+                { "file": "effects/combo/effect.json",
+                  "passes": [ { "textures": [ "_rt_imageLayerComposite_246_b" ] } ] },
+                { "file": "effects/combo/effect.json",
+                  "passes": [ { "textures": [ "_rt_imageLayerComposite_13_a" ] } ] } ] } ] }"#,
+    );
+    let vfs = WeVirtualFileSystem::mount(t.path().to_path_buf(), t.path().join("core"));
+    let g = SceneGraph::load(&vfs, "scene.json", None, Vec2::new(1920.0, 1080.0)).unwrap();
+    let p = EffectChainPlan::build(&vfs, &g.layers[0], &g.user_props);
+    let passes: Vec<_> = p.passes().collect();
+    assert_eq!(
+        passes[0].textures[&0],
+        TextureBinding::Target(RenderTargetId::FboA)
+    );
+    assert_eq!(
+        passes[1].textures[&0],
+        TextureBinding::Target(RenderTargetId::LayerOutput(13))
+    );
+}

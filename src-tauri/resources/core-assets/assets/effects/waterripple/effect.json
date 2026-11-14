@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "waterripple",
+	"name": "Water Ripple",
+	"description": "TruongPaper built-in water ripple effect",
+	"group": "distort",
+	"passes": [
+		{
+			"material": "materials/effects/waterripple.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/waterripple.json",
+		"shaders/effects/waterripple.frag",
+		"shaders/effects/waterripple.vert"
+	]
+}

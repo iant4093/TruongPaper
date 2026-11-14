@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "vhs",
+	"name": "VHS",
+	"description": "TruongPaper built-in vhs effect",
+	"group": "enhance",
+	"passes": [
+		{
+			"material": "materials/effects/vhs.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/vhs.json",
+		"shaders/effects/vhs.frag",
+		"shaders/effects/vhs.vert"
+	]
+}

@@ -12,6 +12,9 @@ import { WallpaperCard } from '../src/components/WallpaperCard';
 import { useAppStore } from '../src/store/useAppStore';
 import { confirmAction, toast, useFeedback } from '../src/store/feedback';
 
+/** Wallpaper tiles (focusable, not clickable: the highlight marks the current wallpaper). */
+const tileEls = () => Array.from(document.querySelectorAll<HTMLElement>('[data-grid-select]'));
+
 const initial = useAppStore.getState();
 
 beforeAll(() => {
@@ -34,7 +37,7 @@ const LOFI = 'workshop:1966389027';
 const nav = (label: string) => within(screen.getByRole('navigation', { name: 'Studio views' })).getByRole('button', { name: label });
 const openApp = async () => {
   await act(async () => { render(<App />); });
-  await screen.findByRole('button', { name: 'Select Neon Rain City' });
+  await screen.findByRole('button', { name: 'Details for Neon Rain City' });
 };
 const goto = async (label: string, heading: RegExp | string) => {
   await act(async () => { fireEvent.click(nav(label)); });
@@ -121,8 +124,8 @@ describe('Library cards', () => {
     expect(screen.getByRole('button', { name: 'Remove Neon Rain City from favorites' }).getAttribute('aria-pressed')).toBe('true');
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Favorites/ })); });
-    const names = screen.getAllByRole('button', { name: /^Select / }).map((b) => b.getAttribute('aria-label'));
-    expect(names).toEqual(['Select Neon Rain City']);
+    const names = tileEls().map((b) => b.getAttribute('aria-label'));
+    expect(names).toEqual(['Neon Rain City']);
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Remove Neon Rain City from favorites' })); });
     expect(screen.getByText(/No favorites yet/)).toBeTruthy();
@@ -167,9 +170,9 @@ describe('Library cards', () => {
 describe('keyboard navigation in the grid', () => {
   it('moves with the arrow keys, applies with Enter and jumps to search with /', async () => {
     await openApp();
-    const tiles = () => screen.getAllByRole('button', { name: /^Select / });
+    const tiles = () => tileEls();
     const first = tiles()[0];
-    expect(first.getAttribute('aria-label')).toBe('Select Ian Truong Photography');
+    expect(first.getAttribute('aria-label')).toMatch(/^Ian Truong Photography/);
     first.focus();
     fireEvent.keyDown(first, { key: 'ArrowRight' });
     expect(document.activeElement).toBe(tiles()[1]);
@@ -184,7 +187,8 @@ describe('keyboard navigation in the grid', () => {
     const target = tiles()[1];
     target.focus();
     await act(async () => { fireEvent.keyDown(target, { key: 'Enter' }); });
-    await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource.kind).toBe('workshop'));
+    // The tile after Photography is a playlist, set straight from the Library.
+    await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource.kind).toBe('playlist'));
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', before); });
 
     (document.activeElement as HTMLElement).blur();
@@ -221,7 +225,7 @@ describe('VirtualGrid windowing', () => {
       <VirtualGrid items={items} getKey={(i) => i.id} label="Test grid"
         renderItem={(item, cell) => (
           <WallpaperCard id={item.id} title={item.title} preview={null} kind="Scene" canApply tabIndex={cell.tabIndex}
-            onSelect={() => {}} onApply={() => {}} />
+            onApply={() => {}} />
         )} />
     </div>
   );
@@ -230,17 +234,17 @@ describe('VirtualGrid windowing', () => {
     defineSize();
     try {
       render(<Harness />);
-      await waitFor(() => expect(screen.getAllByRole('button', { name: /^Select / }).length).toBeLessThan(40));
-      const rendered = () => screen.getAllByRole('button', { name: /^Select / });
+      await waitFor(() => expect(tileEls().length).toBeLessThan(40));
+      const rendered = () => tileEls();
       expect(rendered().length).toBeGreaterThanOrEqual(8);
-      expect(rendered()[0].getAttribute('aria-label')).toBe('Select Item 0');
+      expect(rendered()[0].getAttribute('aria-label')).toBe('Item 0');
       const grid = screen.getByRole('group', { name: 'Test grid' });
       expect(parseFloat(grid.style.paddingBottom)).toBeGreaterThan(1000);
 
       const scroller = screen.getByTestId('scroller');
       scroller.scrollTop = 6000;
       fireEvent.scroll(scroller);
-      await waitFor(() => expect(rendered()[0].getAttribute('aria-label')).not.toBe('Select Item 0'));
+      await waitFor(() => expect(rendered()[0].getAttribute('aria-label')).not.toBe('Item 0'));
       expect(rendered().length).toBeLessThan(40);
     } finally { restoreSize(); }
   });
@@ -249,19 +253,19 @@ describe('VirtualGrid windowing', () => {
     defineSize();
     try {
       render(<Harness />);
-      await waitFor(() => expect(screen.getAllByRole('button', { name: /^Select / }).length).toBeLessThan(40));
-      const first = screen.getByRole('button', { name: 'Select Item 0' });
+      await waitFor(() => expect(tileEls().length).toBeLessThan(40));
+      const first = tileEls().find((t) => t.getAttribute('aria-label') === 'Item 0')!;
       first.focus();
       fireEvent.keyDown(first, { key: 'End' });
       fireEvent.scroll(screen.getByTestId('scroller'));
-      await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Select Item 199'));
+      await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Item 199'));
     } finally { restoreSize(); }
   });
 
   it('renders small lists completely', () => {
     render(<VirtualGrid items={items.slice(0, 20)} getKey={(i) => i.id} label="Small"
-      renderItem={(item) => <WallpaperCard id={item.id} title={item.title} preview={null} kind="Scene" canApply onSelect={() => {}} onApply={() => {}} />} />);
-    expect(screen.getAllByRole('button', { name: /^Select / })).toHaveLength(20);
+      renderItem={(item) => <WallpaperCard id={item.id} title={item.title} preview={null} kind="Scene" canApply onApply={() => {}} />} />);
+    expect(tileEls()).toHaveLength(20);
   });
 });
 
@@ -346,8 +350,10 @@ describe('Playlists', () => {
     for (const word of [/Rotation Source/, /GPU Transition/, /Unified Mixed/, /Per Monitor/]) {
       expect(document.body.textContent).not.toMatch(word);
     }
-    expect(screen.getByText('Transition effect')).toBeTruthy();
-    expect(screen.getByText('Change photo every')).toBeTruthy();
+    // The global photo transition moved to Photography; playlists pick their own in the form.
+    expect(screen.queryByText('Transition effect')).toBeNull();
+    // The photo timer now lives with Photography, not Playlists.
+    expect(screen.queryByText('Change photo every')).toBeNull();
   });
 });
 
@@ -505,7 +511,8 @@ describe('Workshop page', () => {
     await act(async () => { useAppStore.setState({ downloadsById: { '77': { workshopId: '77', title: 'Broken', progressPercent: 10, state: 'error', error: 'Disk full' } } }); });
     expect(screen.getByText('Disk full')).toBeTruthy();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Dismiss' })); });
-    expect(useAppStore.getState().downloadsById).toEqual({});
+    // Mock downloads started by earlier tests can still report progress, so check only this one.
+    expect(useAppStore.getState().downloadsById['77']).toBeUndefined();
   });
 });
 
@@ -525,7 +532,7 @@ describe('shell', () => {
     useAppStore.setState((s) => ({ photoStatus: { ...s.photoStatus!, currentPhotoByMonitor: { ...s.photoStatus!.currentPhotoByMonitor, 'DISPLAY-1': null } } }));
     const next = await screen.findByRole('button', { name: 'Next photo' });
     expect((next as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Next photo works while this display shows photos.')).toBeTruthy();
+    expect(screen.getByText('Next works for photos and playlists.')).toBeTruthy();
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', { kind: 'photo_api' }); });
   });
 
@@ -547,5 +554,58 @@ describe('Tray popover', () => {
     await act(async () => { useAppStore.setState({ retryPhotoNow: retry, photoStatus: { ...useAppStore.getState().photoStatus!, offline: true } }); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry now' })); });
     expect(retry).toHaveBeenCalled();
+  });
+});
+
+describe('status banner and photo timer', () => {
+  it('shows only the newest message in the sidebar, not as floating toasts', async () => {
+    await openApp();
+    const { toast } = await import('../src/store/feedback');
+    await act(async () => { toast.success('First'); toast.success('Saved'); });
+    const banner = document.querySelector('.app-sidebar .status-banner');
+    expect(banner?.textContent).toContain('Saved');
+    expect(banner?.textContent).not.toContain('First');
+    expect(document.querySelector('.toast-stack')).toBeNull();
+  });
+
+  it('sets how often photos change from Photography', async () => {
+    await openApp();
+    await goto('Photography', /^Ian Truong Photography$/);
+    const picker = screen.getByRole('combobox', { name: 'Change photo every' });
+    fireEvent.click(picker);
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: '5 min' })); });
+    expect(useAppStore.getState().settings!.rotationIntervalSeconds).toBe(300);
+  });
+});
+
+describe('playlist form', () => {
+  it('picks wallpapers from picture tiles and saves an own transition', async () => {
+    await openApp();
+    await goto('Playlists', /^Playlists$/);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /New playlist|Create your first playlist/ })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wallpapers' })); });
+    const picks = within(screen.getByRole('group', { name: 'Wallpapers in this playlist' }));
+    const first = picks.getAllByRole('button')[0];
+    await act(async () => { fireEvent.click(first); });
+    expect(first.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('combobox', { name: 'Playlist transition' }));
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Crossfade' })); });
+    expect(screen.getByRole('combobox', { name: 'Playlist effect length' })).toBeTruthy();
+    const before = useAppStore.getState().playlists.length;
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save playlist' })); });
+    const saved = useAppStore.getState().playlists;
+    expect(saved.length).toBe(before + 1);
+    const created = saved.find((p) => p.name === 'New playlist')!;
+    expect(created.transition?.type).toBe('crossfade');
+    expect(created.items.some((i) => i.kind === 'workshop')).toBe(true);
+    await act(async () => { await useAppStore.getState().deletePlaylist(created.playlistId); });
+  });
+
+  it('sets the photo transition from Photography', async () => {
+    await openApp();
+    await goto('Photography', /^Ian Truong Photography$/);
+    fireEvent.click(screen.getByRole('combobox', { name: 'Photo transition' }));
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Blur dissolve' })); });
+    expect(useAppStore.getState().settings!.transitionType).toBe('blur_dissolve');
   });
 });

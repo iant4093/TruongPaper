@@ -11,6 +11,9 @@ import { useAppStore } from '../src/store/useAppStore';
 import { OFFLINE_NOTICE } from '../src/lib/format';
 import { WriteQueue } from '../src/lib/writeQueue';
 
+/** Wallpaper tiles (focusable, not clickable: the highlight marks the current wallpaper). */
+const tileEls = () => Array.from(document.querySelectorAll<HTMLElement>('[data-grid-select]'));
+
 const initial = useAppStore.getState();
 
 beforeAll(() => {
@@ -27,7 +30,9 @@ afterEach(() => {
 });
 
 const NEON = 'workshop:2841928371';
-const tileNames = () => screen.getAllByRole('button', { name: /^Select / }).map((b) => b.getAttribute('aria-label')!.replace('Select ', ''));
+// Playlists sit first in the grid and are not part of the wallpaper sort.
+const tileNames = () => tileEls().map((b) => b.getAttribute('aria-label')!.replace(/, current wallpaper$/, ''))
+  .filter((name) => !useAppStore.getState().playlists.some((p) => p.name === name));
 
 describe('wallpaper load errors', () => {
   const fail = (message = 'Missing scene.pkg') =>
@@ -35,7 +40,7 @@ describe('wallpaper load errors', () => {
 
   it('shows a dismissible card in Studio and clears it on the next change for that display', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     await fail();
     const card = screen.getByText(/Neon Rain City couldn.t be set as wallpaper/);
     expect(card.closest('.load-error-card')).toBeTruthy();
@@ -55,7 +60,7 @@ describe('wallpaper load errors', () => {
 
   it('wallpaper://loaded clears the card too', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     await fail();
     expect(screen.getByText(/couldn.t be set as wallpaper/)).toBeTruthy();
     await act(async () => { await emit('wallpaper://loaded', { monitorId: 'DISPLAY-2', wallpaperId: NEON }); });
@@ -64,7 +69,7 @@ describe('wallpaper load errors', () => {
 
   it('keeps the error when a different display changes, and Try again re-applies the wallpaper', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     await fail();
     await act(async () => {
       await emit('wallpaper://changed', { monitorId: 'DISPLAY-1', source: { kind: 'photo_api' }, currentItem: null, transitionUsed: 'crossfade' });
@@ -127,7 +132,7 @@ describe('details drawer', () => {
 describe('library search and sort', () => {
   it('searches by title, type and workshop id', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     const search = screen.getByRole('textbox', { name: 'Search library' });
     await act(async () => { fireEvent.change(search, { target: { value: '1966389027' } }); });
     expect(tileNames()).toEqual(['Lo-fi Train Window']);
@@ -138,7 +143,7 @@ describe('library search and sort', () => {
 
   it('sorts by name and size and remembers the choice', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     const pick = async (label: string) => {
       fireEvent.click(screen.getByRole('combobox', { name: 'Sort library' }));
       await act(async () => { fireEvent.click(screen.getByRole('option', { name: label })); });
@@ -161,7 +166,7 @@ describe('library search and sort', () => {
 describe('offline notice', () => {
   it('appears in Photography and the tray only while offline', async () => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     fireEvent.click(screen.getByRole('button', { name: 'Photography' }));
     await screen.findByRole('heading', { level: 2, name: 'Ian Truong Photography' });
     expect(screen.queryByText(OFFLINE_NOTICE)).toBeNull();
@@ -246,7 +251,7 @@ describe('playbackSpeed above 2', () => {
 describe('settings and displays additions', () => {
   const open = async (label: string) => {
     await act(async () => { render(<App />); });
-    await screen.findByRole('button', { name: 'Select Neon Rain City' });
+    await screen.findByRole('button', { name: 'Details for Neon Rain City' });
     await act(async () => { fireEvent.click(within(screen.getByRole('navigation', { name: 'Studio views' })).getByRole('button', { name: label })); });
   };
 

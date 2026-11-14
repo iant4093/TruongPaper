@@ -1,0 +1,22 @@
+{
+	"version": 1,
+	"replacementkey": "blur",
+	"name": "Blur",
+	"description": "TruongPaper built-in blur effect",
+	"group": "blur",
+	"passes": [
+		{
+			"material": "materials/effects/blur_gaussian_x.json",
+			"compose": true
+		},
+		{
+			"material": "materials/effects/blur_gaussian_y.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/blur_gaussian_x.json",
+		"materials/effects/blur_gaussian_y.json",
+		"shaders/effects/blur_gaussian.frag",
+		"shaders/effects/blur_gaussian.vert"
+	]
+}

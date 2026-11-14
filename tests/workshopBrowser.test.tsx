@@ -134,3 +134,24 @@ it('shows a GGNetwork badge on available results', async () => {
   await screen.findByRole('button', {name:'Preview Test mountain'});
   expect(await screen.findByText('GGNetwork')).toBeTruthy();
 });
+
+it('uses column counts that fill a 30-result page evenly', async () => {
+  const { columnsFor } = await import('../src/components/WorkshopBrowser');
+  for (const width of [300, 500, 800, 1100, 1300, 1800]) expect(30 % columnsFor(width)).toBe(0);
+  expect(columnsFor(1200)).toBe(5);
+  expect(columnsFor(700)).toBe(3);
+});
+
+it('jumps back to the top of the results on Next', async () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  document.body.appendChild(scroller);
+  Object.defineProperty(scroller, 'scrollHeight', { value: 3000 });
+  Object.defineProperty(scroller, 'clientHeight', { value: 600 });
+  render(<WorkshopBrowser />, { container: scroller.appendChild(document.createElement('div')) });
+  await screen.findByRole('button', { name: 'Preview Test mountain' });
+  scroller.scrollTop = 2200;
+  await act(async () => { fireEvent.click(screen.getByLabelText('Next Workshop page')); });
+  expect(scroller.scrollTop).toBe(0);
+  scroller.remove();
+});

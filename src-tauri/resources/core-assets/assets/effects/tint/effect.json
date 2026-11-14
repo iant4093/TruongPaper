@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"replacementkey": "tint",
+	"name": "Tint",
+	"description": "TruongPaper built-in tint effect",
+	"group": "colorize",
+	"passes": [
+		{
+			"material": "materials/effects/tint.json"
+		}
+	],
+	"dependencies": [
+		"materials/effects/tint.json",
+		"shaders/effects/tint.frag",
+		"shaders/effects/tint.vert"
+	]
+}

@@ -168,12 +168,8 @@ pub fn next_wallpaper(app: &AppHandle) {
 }
 
 pub async fn next_wallpaper_now(app: &AppHandle) -> Result<(), String> {
-    let state = app.try_state::<AppState>().ok_or("App is starting")?;
-    let photo = app
-        .try_state::<PhotoServiceState>()
-        .ok_or("App is starting")?;
     let monitors = live_monitors(app);
-    let primary = pick_target_monitor(
+    let target = pick_target_monitor(
         selected_monitor().as_deref(),
         &monitors,
         |m| m.id.as_str(),
@@ -181,23 +177,41 @@ pub async fn next_wallpaper_now(app: &AppHandle) -> Result<(), String> {
     )
     .cloned()
     .ok_or("No display is connected")?;
+    next_on_monitor(app, &target.id).await
+}
+
+/// Next photo, or next playlist item, on one display.
+pub async fn next_on_monitor(app: &AppHandle, monitor_id: &str) -> Result<(), String> {
+    let state = app.try_state::<AppState>().ok_or("App is starting")?;
+    let photo = app
+        .try_state::<PhotoServiceState>()
+        .ok_or("App is starting")?;
+    if !live_monitors(app).iter().any(|m| m.id == monitor_id) {
+        return Err(format!("Monitor '{monitor_id}' is not connected"));
+    }
     let source = crate::db::monitor_sources(&state.db.lock())?
-        .remove(&primary.id)
+        .remove(monitor_id)
         .unwrap_or_default();
     match source {
         WallpaperSource::PhotoApi => {
-            rotate_photo_next(app, &photo, Some(primary.id.clone())).await?;
-            crate::scheduler::note_manual_rotation(Some(&primary.id), false);
+            rotate_photo_next(app, &photo, Some(monitor_id.to_string())).await?;
+            crate::scheduler::note_manual_rotation(Some(monitor_id), false);
             Ok(())
         }
         WallpaperSource::Playlist { .. } => {
-            crate::scheduler::request_next(&primary.id);
+            crate::scheduler::request_next(monitor_id);
             Ok(())
         }
         WallpaperSource::Workshop { .. } => {
             Err("This display shows a single wallpaper: nothing to advance".into())
         }
     }
+}
+
+/// Studio and menu bar "Next": the next photo or playlist item on `monitor_id`.
+#[tauri::command]
+pub async fn playback_next(app: AppHandle, monitor_id: String) -> Result<(), String> {
+    next_on_monitor(&app, &monitor_id).await
 }
 
 /// Pause every display, or resume them all when every display is already paused. This is

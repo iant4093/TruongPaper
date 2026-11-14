@@ -262,7 +262,10 @@ fn extracts_embedded_mp4_once() {
 #[test]
 fn non_mp4_textures_are_not_extracted() {
     let tmp = TempDir::new("video-tex-none");
-    let not_mp4 = tex_with(FIF_UNKNOWN, fake_mp4(256));
+    // Without the video flag an `ftyp`-looking payload is still pixels. (With the flag, a
+    // FIF_UNKNOWN TEXB0003 texture *is* an embedded MP4, as in 3122339805.)
+    let mut not_mp4 = tex_with(FIF_UNKNOWN, fake_mp4(256));
+    not_mp4.header.flags = 2;
     assert_eq!(
         extract_embedded_tex_mp4(&not_mp4, tmp.path(), "a.tex").unwrap(),
         None

@@ -7,7 +7,8 @@ import { SceneReport } from './SceneReport';
 import { Thumb } from './ui';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import { confirmAction, toast } from '../store/feedback';
-import { WALLPAPER_TYPE_LABEL, formatBytes, photoPreviewSrc } from '../lib/format';
+import { WALLPAPER_TYPE_LABEL, formatBytes, photoPreviewSrc, plural, wallpaperPreviewSrc } from '../lib/format';
+import { PhotoSourceSettings, PlaylistDetails } from './SourceDetails';
 import type { WallpaperSource } from '../types/ipc';
 import type { StudioTab } from '../App';
 
@@ -19,9 +20,14 @@ export const DetailsDrawer: React.FC<{
 }> = ({ closeRef, onClose, onNavigate }) => {
   const photoSource = useAppStore((s) => s.selectedPhotoSource);
   const selected = useAppStore((s) => s.wallpapers.find((w) => w.wallpaperId === s.selectedWallpaperId));
+  const playlist = useAppStore((s) => s.playlists.find((p) => p.playlistId === s.selectedPlaylistId));
   const monitor = useAppStore(useShallow((s) => {
     const m = s.monitors.find((x) => x.monitorId === s.selectedMonitorId) ?? s.monitors[0];
-    return { id: m?.monitorId, sourceKind: m?.activeSource.kind, sourceWallpaperId: m?.activeSource.kind === 'workshop' ? m.activeSource.wallpaperId : undefined };
+    return {
+      id: m?.monitorId, sourceKind: m?.activeSource.kind,
+      sourceWallpaperId: m?.activeSource.kind === 'workshop' ? m.activeSource.wallpaperId : undefined,
+      sourcePlaylistId: m?.activeSource.kind === 'playlist' ? m.activeSource.playlistId : undefined,
+    };
   }));
   const photoPreview = useAppStore((s) => {
     const m = s.monitors.find((x) => x.monitorId === s.selectedMonitorId) ?? s.monitors[0];
@@ -37,11 +43,13 @@ export const DetailsDrawer: React.FC<{
   const setLocalWallpaperAdjustments = useAppStore((s) => s.setLocalWallpaperAdjustments);
   const [applying, setApplying] = useState(false);
 
-  if (!photoSource && !selected) return null;
-  const title = photoSource ? 'Ian Truong Photography' : selected!.title;
-  const source: WallpaperSource = photoSource ? { kind: 'photo_api' } : { kind: 'workshop', wallpaperId: selected!.wallpaperId };
+  if (!photoSource && !selected && !playlist) return null;
+  const title = photoSource ? 'Ian Truong Photography' : playlist ? playlist.name : selected!.title;
+  const source: WallpaperSource = photoSource ? { kind: 'photo_api' }
+    : playlist ? { kind: 'playlist', playlistId: playlist.playlistId } : { kind: 'workshop', wallpaperId: selected!.wallpaperId };
   const current = photoSource ? monitor.sourceKind === 'photo_api'
-    : monitor.sourceKind === 'workshop' && monitor.sourceWallpaperId === selected!.wallpaperId;
+    : playlist ? monitor.sourcePlaylistId === playlist.playlistId
+      : monitor.sourceKind === 'workshop' && monitor.sourceWallpaperId === selected!.wallpaperId;
 
   const apply = async () => {
     if (!monitor.id || current || applying) return;
@@ -71,6 +79,7 @@ export const DetailsDrawer: React.FC<{
       </div>
       <div className="inspector-selection">
         <h3>{title}</h3>
+        {playlist && <div className="inspector-facts">Playlist · {plural(playlist.items.length, 'item')}</div>}
         {selected && (
           <div className="inspector-facts">
             {WALLPAPER_TYPE_LABEL[selected.type]} · {formatBytes(selected.bytes)}{selected.windowsOnly ? ' · Windows only' : ''}
@@ -95,12 +104,13 @@ export const DetailsDrawer: React.FC<{
       {photoSource ? (
         <div className="photo-source-inspector">
           {photoPreview && <Thumb src={photoPreview} alt="Current photo" height={144} contain />}
-          <p className="photo-source-hint">Photo pool, fit, orientation and storage are all in Photography.</p>
-          <button type="button" className="button" onClick={() => onNavigate('photos')}>Open Photography settings</button>
+          <PhotoSourceSettings onMore={() => onNavigate('photos')} />
         </div>
+      ) : playlist ? (
+        <PlaylistDetails playlist={playlist} onClose={onClose} onMore={() => onNavigate('playlists')} />
       ) : selected && (
         <>
-          <div className="inspector-preview"><Thumb src={selected.previewPath} alt={selected.title} height={150} /></div>
+          <div className="inspector-preview"><Thumb src={wallpaperPreviewSrc(selected)} alt={selected.title} height={150} /></div>
           <SceneReport messages={diagnostics} />
           <PresetBar key={`presets:${selected.wallpaperId}`} wallpaperId={selected.wallpaperId} />
           <PropertyInspector key={`properties:${selected.wallpaperId}`} wallpaperId={selected.wallpaperId}

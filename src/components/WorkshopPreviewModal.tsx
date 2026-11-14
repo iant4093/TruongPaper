@@ -1,12 +1,14 @@
 // src/components/WorkshopPreviewModal.tsx
 // §2.1 Floating Liquid Glass "Workshop Preview & Download" modal driven by
 // `steam_inspect_url` + `steam-download://progress` events.
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { MonitorSmartphone, X } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
+import { errorMessage, isCancelMessage, useAppStore } from '../store/useAppStore';
 import { formatBytes, workshopTypeFromTags } from '../lib/format';
 import { Badge, Thumb } from './ui';
+import { useModalFocus } from '../lib/useModalFocus';
+import { toast } from '../store/feedback';
 import type { WorkshopDownloadSource } from '../types/ipc';
 
 export const WorkshopPreviewModal: React.FC = () => {
@@ -23,25 +25,40 @@ export const WorkshopPreviewModal: React.FC = () => {
   const loadGuestAvailability = useAppStore((s) => s.loadGuestAvailability);
 
   const download = useAppStore((s) => s.downloadWorkshopItem);
+  const cancelDownload = useAppStore((s) => s.cancelWorkshopDownload);
+  const [cancelling, setCancelling] = useState(false);
   const openAuth = useAppStore((s) => s.openSteamAuthModal);
   const [starting, setStarting] = useState<WorkshopDownloadSource | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  React.useEffect(() => { setDownloadError(null); setStarting(null); }, [preview?.workshopId]);
+  React.useEffect(() => { setDownloadError(null); setStarting(null); setCancelling(false); }, [preview?.workshopId]);
   React.useEffect(() => {
     if (preview) void loadGuestAvailability([preview.workshopId]);
   }, [preview?.workshopId, loadGuestAvailability]);
+  const progressState = preview ? downloadsById[preview.workshopId]?.state : undefined;
+  // A finished, failed or cancelled download ends the "Cancelling…" state, so a new download starts clean.
+  React.useEffect(() => { if (progressState !== 'downloading') setCancelling(false); }, [progressState]);
+  const requestCancel = () => {
+    if (!preview || cancelling) return;
+    setCancelling(true);
+    cancelDownload(preview.workshopId)
+      .then((found) => { if (!found) { setCancelling(false); toast.info('That download is not running yet. Try again in a moment.'); } })
+      .catch((e) => { setCancelling(false); toast.error(e, 'Could not cancel the download'); });
+  };
   const startDownload = async (source: WorkshopDownloadSource) => {
     if (!preview) return;
     setStarting(source); setDownloadError(null);
     try { await download(preview.workshopId, source === 'ggnetwork' ? source : undefined); }
     catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      if (isCancelMessage(err)) return; // the user stopped it
+      const message = errorMessage(err);
       setDownloadError(message);
       if (source === 'steam' && /^(sign in to steam|steam login required)/i.test(message)) openAuth();
-    } finally { setStarting(null); }
+    } finally { setStarting(null); setCancelling(false); }
   };
 
   const open = !!preview && !authModalOpen;
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useModalFocus(open, dialogRef, closeWorkshopPreview);
   const progress = preview ? downloadsById[preview.workshopId] : undefined;
   const error = downloadError ?? (!starting && progress?.state === 'error' ? progress.error : null);
   const installed = preview ? wallpapers.find((w) => w.workshopId === preview.workshopId) : undefined;
@@ -55,7 +72,9 @@ export const WorkshopPreviewModal: React.FC = () => {
         <motion.div
           key="workshop-preview"
           role="dialog"
+          aria-modal="true"
           aria-label="Workshop Preview"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) closeWorkshopPreview(); }}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -71,6 +90,7 @@ export const WorkshopPreviewModal: React.FC = () => {
         >
           <motion.div
             className="panel"
+            ref={dialogRef}
             initial={{ scale: 0.96, y: 12 }}
             animate={{ scale: 1, y: 0 }}
             exit={{ scale: 0.96, y: 12 }}
@@ -108,6 +128,11 @@ export const WorkshopPreviewModal: React.FC = () => {
                   <button className="button" disabled={!!starting} onClick={() => void startDownload('steam')}>
                     {starting === 'steam' ? 'Starting download…' : progress?.state === 'error' ? 'Retry with Steam' : 'Download with Steam'}
                   </button>
+                  {starting && (
+                    <button type="button" className="button" aria-disabled={cancelling} onClick={requestCancel}>
+                      {cancelling ? 'Cancelling…' : 'Cancel'}
+                    </button>
+                  )}
                 </div>
               )}
               {!installed && progress?.state !== 'downloading' && progress?.state !== 'completed' && workshopTypeFromTags(preview.tags) !== 'Application' && (
@@ -121,6 +146,9 @@ export const WorkshopPreviewModal: React.FC = () => {
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
                     Downloading chunks... {Math.round(progress.progressPercent)}% ({formatBytes(downloadedBytes)} /{' '}
                     {formatBytes(preview.fileSizeBytes)})
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                    <button type="button" className="button" aria-disabled={cancelling} onClick={requestCancel}>{cancelling ? 'Cancelling…' : 'Cancel download'}</button>
                   </div>
                   <div style={{ height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.12)' }}>
                     <div
@@ -145,7 +173,8 @@ export const WorkshopPreviewModal: React.FC = () => {
                       onClick={() => {
                         selectWallpaper(installed.wallpaperId);
                         void applyMonitorSource(monitorId, { kind: 'workshop', wallpaperId: installed.wallpaperId }).then(
-                          closeWorkshopPreview
+                          closeWorkshopPreview,
+                          (err) => toast.error(err, 'Could not set the wallpaper'),
                         );
                       }}
                     >

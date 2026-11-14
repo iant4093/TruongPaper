@@ -7,14 +7,21 @@ pub mod compositor;
 pub mod diagnostics;
 pub mod effect_chain;
 pub mod json;
+pub mod model3d;
+pub mod particle_tree;
 pub mod particles;
 pub mod puppet;
 pub mod scene_assets;
+pub mod scene_attachment;
+pub mod scene_camera;
 pub mod scene_graph;
 pub mod scene_math;
 pub mod scene_renderer;
+pub mod shader_compat;
 pub mod shader_preprocessor;
+pub mod sprite;
 pub mod text;
+pub mod timeline;
 pub mod video_runtime;
 pub mod web_runtime;
 
@@ -32,13 +39,14 @@ pub use effect_chain::{
     RT_8_FRAME_BUFFER, RT_BLOOM, RT_FULL_FRAME_BUFFER, RT_SCENE,
 };
 pub use particles::{
-    parse_vec3_str, ParticleControlPointSpec, ParticleEmitterSpec, ParticleFile,
+    parse_vec3_str, ParticleControlPointSpec, ParticleEmitterSpec, ParticleFile, ParticleOverrides,
     ParticleRendererSpec, ParticleSpecError, ParticleSystemInstance, RopeParticleVertex,
     SingleParticle, SpriteParticleVertex,
 };
 pub use puppet::{
-    parse_mdl_skeleton, puppet_combos, PuppetAnimation, PuppetAnimationMode, PuppetAnimator,
-    PuppetBone, PuppetDeformer, PuppetError, PuppetFrame, PuppetSkeleton,
+    parse_mdl_skeleton, parse_mdl_skeleton_or_rest, puppet_combos, PuppetAnimation,
+    PuppetAnimationMode, PuppetAnimator, PuppetBone, PuppetDeformer, PuppetError, PuppetFrame,
+    PuppetSkeleton,
 };
 pub use scene_assets::{
     EffectBindSlot, EffectFboSpec, EffectFile, EffectPassSpec, MaterialFile, MaterialPassSpec,
@@ -49,12 +57,14 @@ pub use scene_graph::{
     SceneLayerKind, SceneLoadError, SceneProjection, ScriptProperty,
 };
 pub use scene_math::{
-    alignment_offset, build_pass_matrices, layer_model_matrix, parallax_eye_offset,
-    scene_orthographic_projection, scene_view_matrix, LayerTransform, PassMatrices,
+    alignment_offset, build_pass_matrices, layer_model_matrix, layer_pivot_matrix,
+    parallax_eye_offset, scene_orthographic_projection, scene_view_matrix, LayerTransform,
+    PassMatrices,
 };
 pub use scene_renderer::{
-    layer_quad_vertices, pack_uniform_block, texture_bind_group_layout_entries, FrameUniformInputs,
-    LayerVertex, SceneRenderer, UniformValues,
+    composition_capture_matrix, layer_local_projection, layer_quad_vertices, pack_uniform_block,
+    predecode_textures, texture_bind_group_layout_entries, FrameUniformInputs, LayerVertex,
+    PredecodedTextures, SceneRenderer, UniformValues,
 };
 pub use shader_preprocessor::{
     apply_fragment_texcoord_compatibility, apply_linked_varying_compatibility, builtin_uniform,

@@ -1,14 +1,14 @@
 // src/components/views/SteamWorkshopView.tsx
 // §2.3 View 2: "Steam Workshop" Library View
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Search } from 'lucide-react';
 import { WorkshopBrowser } from '../WorkshopBrowser';
 import { WorkshopImport } from '../WorkshopImport';
 import { WallpaperCard } from '../WallpaperCard';
 import { VirtualGrid } from '../VirtualGrid';
-import { useAppStore } from '../../store/useAppStore';
+import { isCancelMessage, useAppStore } from '../../store/useAppStore';
 import { toast } from '../../store/feedback';
-import { WALLPAPER_TYPE_LABEL } from '../../lib/format';
+import { WALLPAPER_TYPE_LABEL, wallpaperPreviewSrc } from '../../lib/format';
 import { useSlashToFocus } from '../../lib/hooks';
 import type { WallpaperItem } from '../../types/ipc';
 import { SectionTitle, SegmentedControl, ViewHeader } from '../ui';
@@ -95,6 +95,15 @@ const DownloadsList: React.FC = () => {
   const downloadsById = useAppStore((s) => s.downloadsById);
   const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
   const dismissDownload = useAppStore((s) => s.dismissDownload);
+  const cancelWorkshopDownload = useAppStore((s) => s.cancelWorkshopDownload);
+  const [cancelling, setCancelling] = useState<Set<string>>(new Set());
+  // A finished or cancelled card forgets its "Cancelling…" mark, so a new download starts clean.
+  useEffect(() => {
+    setCancelling((set) => {
+      const kept = [...set].filter((id) => downloadsById[id]?.state === 'downloading');
+      return kept.length === set.size ? set : new Set(kept);
+    });
+  }, [downloadsById]);
   const active = Object.values(downloadsById).filter((d) => d.state !== 'completed');
   if (active.length === 0) return null;
   return (
@@ -112,13 +121,21 @@ const DownloadsList: React.FC = () => {
               <div className="download-actions">
                 <button type="button" className="button" onClick={() => {
                   dismissDownload(d.workshopId);
-                  downloadWorkshopItem(d.workshopId).catch((e) => toast.error(e, 'Download failed'));
+                  downloadWorkshopItem(d.workshopId).catch((e) => { if (!isCancelMessage(e)) toast.error(e, 'Download failed'); });
                 }}>Retry</button>
                 <button type="button" className="button" onClick={() => dismissDownload(d.workshopId)}>Dismiss</button>
               </div>
             </>
           ) : (
-            <div className="progress"><div style={{ width: `${Math.min(100, d.progressPercent)}%` }} /></div>
+            <>
+              <div className="progress"><div style={{ width: `${Math.min(100, d.progressPercent)}%` }} /></div>
+              <div className="download-actions">
+                <button type="button" className="button" disabled={cancelling.has(d.workshopId)} onClick={() => {
+                  setCancelling((set) => new Set(set).add(d.workshopId));
+                  cancelWorkshopDownload(d.workshopId).catch((e) => toast.error(e, 'Could not cancel the download'));
+                }}>{cancelling.has(d.workshopId) ? 'Cancelling…' : 'Cancel'}</button>
+              </div>
+            </>
           )}
         </div>
       ))}
@@ -128,7 +145,6 @@ const DownloadsList: React.FC = () => {
 
 const InstalledWorkshopView: React.FC<{ onBrowse: () => void; onOpenDetails: () => void }> = ({ onBrowse, onOpenDetails }) => {
   const wallpapers = useAppStore((s) => s.wallpapers);
-  const selectedWallpaperId = useAppStore((s) => s.selectedWallpaperId);
   const selectedMonitorId = useAppStore((s) => s.selectedMonitorId);
   const monitors = useAppStore((s) => s.monitors);
   const selectWallpaper = useAppStore((s) => s.selectWallpaper);
@@ -190,12 +206,12 @@ const InstalledWorkshopView: React.FC<{ onBrowse: () => void; onOpenDetails: () 
 
       <VirtualGrid items={items} getKey={(w) => w.wallpaperId} label="Installed Workshop wallpapers"
         renderItem={(w, cell) => (
-          <WallpaperCard id={w.wallpaperId} title={w.title} preview={w.previewPath}
+          <WallpaperCard id={w.wallpaperId} title={w.title} preview={wallpaperPreviewSrc(w)}
             kind={WALLPAPER_TYPE_LABEL[w.type]} badge={isLocalSteamItem(w) ? 'Steam app' : w.windowsOnly ? 'Windows only' : undefined}
-            selected={w.wallpaperId === selectedWallpaperId} audioReactive={w.audioReactive}
+            audioReactive={w.audioReactive}
             active={activeSource?.kind === 'workshop' && activeSource.wallpaperId === w.wallpaperId}
             favorite={!!w.isFavorite} canApply={!!activeMonitorId} tabIndex={cell.tabIndex}
-            onSelect={selectWallpaper} onApply={apply} onDetails={details} onFavorite={favorite} />
+            onApply={apply} onDetails={details} onFavorite={favorite} />
         )} />
       {items.length === 0 && (
         <div className="empty-state" role="status">

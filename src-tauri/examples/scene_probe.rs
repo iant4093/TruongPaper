@@ -7,9 +7,21 @@ use truongpaper_lib::scene_runtime::SceneRuntime;
 use truongpaper_renderer::{scene_renderer::FrameUniformInputs, SceneRenderer};
 use truongpaper_we_formats::WeVirtualFileSystem;
 
+/// Synthetic spectrum for `PROBE_AUDIO=sine`: bass-heavy bands with a per-frame wobble.
+fn probe_spectrum(frame: u32) -> [f32; 64] {
+    let t = frame as f32 / 30.0;
+    std::array::from_fn(|b| {
+        let x = b as f32 / 63.0;
+        let wobble = 0.5 + 0.5 * (t * 6.0 + b as f32 * 0.7).sin();
+        ((1.0 - 0.7 * x) * (0.3 + 0.7 * wobble)).clamp(0.0, 1.0)
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("warn")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
         .with_writer(std::io::stderr)
         .init();
     pollster::block_on(render())
@@ -31,14 +43,40 @@ async fn render() -> anyhow::Result<()> {
             None,
         )
         .await?;
+    // Our bundled stock effects/includes sit behind the wallpaper and real WE core assets.
+    // PROBE_NO_BUNDLED=1 renders without them.
+    if std::env::var("PROBE_NO_BUNDLED").is_err() {
+        truongpaper_we_formats::set_bundled_assets_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/core-assets/assets"),
+        );
+    }
     let dir = PathBuf::from(&args[1]);
     let vfs = WeVirtualFileSystem::mount(dir.clone(), PathBuf::from(&args[2]));
     let project: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("project.json"))?)?;
-    let defaults = project
-        .get("general")
-        .and_then(|p| p.get("properties"))
-        .map(|v| v.to_string());
+    // Same shape the app passes: project.json defaults overlaid with saved values.
+    let mut merged = truongpaper_lib::commands::monitor::effective_user_properties(
+        &project,
+        &Default::default(),
+    );
+    // PROBE_PROPS='{"rays":false}' changes properties; PROBE_LOAD=1 passes them at load,
+    // otherwise they are applied live after a warm-up frame (the drawer's code path).
+    let probe_props: serde_json::Map<String, serde_json::Value> = match std::env::var("PROBE_PROPS")
+    {
+        Ok(v) => serde_json::from_str(&v)?,
+        Err(_) => Default::default(),
+    };
+    let at_load = std::env::var("PROBE_LOAD").is_ok();
+    if at_load {
+        merged.extend(probe_props.clone());
+    }
+    let defaults = Some(serde_json::Value::Object(merged).to_string());
+    if let Ok(file) = std::env::var("PROBE_FILE") {
+        // Dumps one packaged file (e.g. scene.json) to stdout.
+        use std::io::Write;
+        std::io::stdout().write_all(&vfs.read_bytes(&file)?)?;
+        return Ok(());
+    }
     if let Ok(texture_path) = std::env::var("PROBE_TEXTURE") {
         let bytes = vfs.read_bytes(&texture_path)?;
         let tex = truongpaper_we_formats::parse_tex(&bytes)?;
@@ -64,17 +102,182 @@ async fn render() -> anyhow::Result<()> {
         )?;
         return Ok(());
     }
-    let mut runtime = SceneRuntime::load(&vfs, "scene.json", defaults.as_deref(), [1280.0, 720.0])?;
+    // PROBE_MONITOR=3456x2234 sets the monitor size handed to the scene (engine.screenResolution),
+    // PROBE_OUT=1920x1080 sets the rendered image size.
+    let dims = |key: &str, default: (u32, u32)| -> (u32, u32) {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse().ok()?, h.parse().ok()?))
+            })
+            .unwrap_or(default)
+    };
+    let (mon_w, mon_h) = dims("PROBE_MONITOR", (1280, 720));
+    let mut runtime = SceneRuntime::load(
+        &vfs,
+        "scene.json",
+        defaults.as_deref(),
+        [mon_w as f32, mon_h as f32],
+    )?;
+    // PROBE_LIST=1 prints layers; PROBE_SHOW="i,j,.." renders only those layer indices.
+    if std::env::var("PROBE_LIST").is_ok() {
+        for (i, l) in runtime.graph().layers.iter().enumerate() {
+            let k = format!("{:?}", l.kind);
+            eprintln!(
+                "L{i} {} vis={} a={} {}",
+                l.key(),
+                l.visible,
+                l.alpha,
+                k.chars().take(24).collect::<String>()
+            );
+            eprintln!("    {:?}", l.transform);
+        }
+    }
+    if let Ok(show) = std::env::var("PROBE_SHOW") {
+        let keep: Vec<usize> = show.split(',').filter_map(|v| v.parse().ok()).collect();
+        for (i, l) in runtime.graph_mut().layers.iter_mut().enumerate() {
+            l.visible &= keep.contains(&i);
+        }
+    }
+    if let Some(z) = std::env::var("PROBE_ZOOM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        runtime.graph_mut().camera.zoom = z;
+    }
+    // PROBE_FXKEEP="0,2" keeps only those effect indices on every layer.
+    if let Ok(keep) = std::env::var("PROBE_FXKEEP") {
+        let keep: Vec<usize> = keep
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        for l in runtime.graph_mut().layers.iter_mut() {
+            let mut i = 0;
+            l.effects.retain(|_| {
+                i += 1;
+                keep.contains(&(i - 1))
+            });
+        }
+    }
+    if std::env::var("PROBE_NOBLOOM").is_ok() {
+        runtime.graph_mut().scene.general.bloom = None;
+    }
+    if std::env::var("PROBE_NOFX").is_ok() {
+        for l in runtime.graph_mut().layers.iter_mut() {
+            l.effects.clear();
+        }
+    }
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = SceneRenderer::new(&device, &queue, fmt, runtime.graph().scene_size);
+    if std::env::var("PROBE_LOADTIME").is_ok() {
+        // Render-thread stall of a scene switch: `load` decodes on the calling thread, the new
+        // path decodes on a worker (`predecode_textures`) and only uploads here.
+        // The first load also pays one-time driver and shader-cache warm-up; the second is the
+        // like-for-like baseline for the predecoded load below.
+        renderer.load(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let t = std::time::Instant::now();
+        renderer.load(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let before = t.elapsed();
+        let t = std::time::Instant::now();
+        let pre = truongpaper_renderer::predecode_textures(&vfs, runtime.graph(), &|| true);
+        let worker = t.elapsed();
+        let n = pre.len();
+        let t = std::time::Instant::now();
+        renderer.load_with_decoded(&device, &queue, &vfs, runtime.graph(), pre);
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let after = t.elapsed();
+        eprintln!(
+            "LOADTIME render-thread before={:.1}ms after={:.1}ms worker-decode={:.1}ms textures={n}",
+            before.as_secs_f64() * 1e3,
+            after.as_secs_f64() * 1e3,
+            worker.as_secs_f64() * 1e3
+        );
+    }
     let warnings = renderer.load(&device, &queue, &vfs, runtime.graph());
+    if std::env::var("PROBE_RELOADTIME").is_ok() {
+        // Property-change reload: `load` (old behaviour, drops and re-decodes every texture)
+        // against `reload` (keeps decoded textures).
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let t = std::time::Instant::now();
+        renderer.load(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let before = t.elapsed();
+        let t = std::time::Instant::now();
+        renderer.reload(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let after = t.elapsed();
+        eprintln!(
+            "RELOADTIME load={:.1}ms reload={:.1}ms",
+            before.as_secs_f64() * 1e3,
+            after.as_secs_f64() * 1e3
+        );
+    }
+    // Embedded MP4 textures stay white until the host pushes frames; the probe pushes the first
+    // frame decoded with `ffmpeg` (when installed) so renders look like the running wallpaper.
+    for path in renderer.embedded_video_paths() {
+        let Ok(bytes) = vfs.read_bytes(&path) else {
+            continue;
+        };
+        let Ok(tex) = truongpaper_we_formats::parse_tex(&bytes) else {
+            continue;
+        };
+        let Some(mip) = tex.images.first().and_then(|m| m.first()) else {
+            continue;
+        };
+        let tmp = std::env::temp_dir().join(format!("probe-{}.mp4", std::process::id()));
+        if std::fs::write(&tmp, &mip.raw_bytes).is_err() {
+            continue;
+        }
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-i"])
+            .arg(&tmp)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .output();
+        let probe = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+            .args(["stream=width,height", "-of", "csv=p=0"])
+            .arg(&tmp)
+            .output();
+        let _ = std::fs::remove_file(&tmp);
+        let (Ok(out), Ok(probe)) = (out, probe) else {
+            continue;
+        };
+        let dims = String::from_utf8_lossy(&probe.stdout);
+        let mut it = dims
+            .trim()
+            .split(',')
+            .filter_map(|v| v.trim().parse::<u32>().ok());
+        let (Some(w), Some(h)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if out.stdout.len() == (w * h * 4) as usize {
+            let frame = truongpaper_renderer::video_runtime::VideoFrame {
+                width: w,
+                height: h,
+                stride: (w * 4) as usize,
+                format: truongpaper_renderer::video_runtime::VideoPixelFormat::Rgba8,
+                data: out.stdout,
+            };
+            renderer.upload_video_frame(&queue, &path, &frame);
+        }
+    }
     eprintln!(
         "{} layers, {} renderer warnings",
         runtime.graph().layers.len(),
         warnings.len()
     );
-    let width = 1280;
-    let height = 720;
+    let (out_w, out_h) = dims("PROBE_OUT", (1280, 720));
+    // The desktop host shows a scene with `FitMode::Fill` (cover), so a non-16:9 orthographic
+    // scene (e.g. 5760x1080) is cropped, not squeezed. The probe renders a cover-sized target and
+    // crops its centre; PROBE_STRETCH=1 keeps the old squeezed output.
+    let (width, height) = if std::env::var("PROBE_STRETCH").is_ok() {
+        (out_w, out_h)
+    } else {
+        cover_render_size(runtime.graph().scene_size.to_array(), out_w, out_h)
+    };
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
@@ -96,10 +299,39 @@ async fn render() -> anyhow::Result<()> {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let mut loaded_epoch = runtime.graph().render_epoch();
+    let mut pending_props = (!at_load && !probe_props.is_empty())
+        .then(|| serde_json::Value::Object(probe_props.clone()).to_string());
     let frame_count: u32 = args.get(4).map(|v| v.parse().unwrap()).unwrap_or(2);
+    // PROBE_AUDIO=sine: synthetic 64-band spectrum that moves per frame, to check that
+    // audio-reactive layers and scripts respond (silence otherwise).
+    let synth_audio = std::env::var("PROBE_AUDIO").is_ok_and(|v| v == "sine");
+    // PROBE_BENCH=1: print the average CPU ms per frame spent in render() and in
+    // render() + finish + submit (the GPU wait is excluded). Warm-up: first 10% of frames.
+    let bench = std::env::var("PROBE_BENCH").is_ok();
+    let (mut bench_render, mut bench_submit, mut bench_n) = (0.0f64, 0.0f64, 0u32);
+    let mut bench_step = 0.0f64;
     for i in 0..frame_count {
         let mut encoder = device.create_command_encoder(&Default::default());
-        runtime.step(1.0 / 30.0, [0.5, 0.5], false, &[0.0; 64], &[0.0; 64]);
+        let audio = if synth_audio {
+            probe_spectrum(i)
+        } else {
+            [0.0; 64]
+        };
+        let t_step = std::time::Instant::now();
+        runtime.step(1.0 / 30.0, [0.5, 0.5], false, &audio, &audio);
+        let step_ms = t_step.elapsed().as_secs_f64() * 1000.0;
+        if i == 1 {
+            if let Some(json) = pending_props.take() {
+                runtime.apply_user_properties(&json)?;
+                if runtime.graph().render_epoch() != loaded_epoch {
+                    loaded_epoch = runtime.graph().render_epoch();
+                    renderer.load(&device, &queue, &vfs, runtime.graph());
+                    eprintln!("renderer reloaded");
+                }
+            }
+        }
+        let t_render = std::time::Instant::now();
         renderer.render(
             &device,
             &queue,
@@ -113,6 +345,7 @@ async fn render() -> anyhow::Result<()> {
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or_default()
                     + i as f32 / 30.0,
+                audio_64: [audio, audio],
                 ..Default::default()
             },
         );
@@ -130,19 +363,159 @@ async fn render() -> anyhow::Result<()> {
                 target.size(),
             );
         }
+        let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
         queue.submit(Some(encoder.finish()));
+        let submit_ms = t_render.elapsed().as_secs_f64() * 1000.0;
         device.poll(wgpu::Maintain::Wait);
+        if bench && i >= frame_count / 10 {
+            bench_render += render_ms;
+            bench_submit += submit_ms;
+            bench_step += step_ms;
+            bench_n += 1;
+        }
+    }
+    if bench && bench_n > 0 {
+        eprintln!(
+            "BENCH frames={bench_n} render_ms={:.4} render_submit_ms={:.4} step_ms={:.4}",
+            bench_render / bench_n as f64,
+            bench_submit / bench_n as f64,
+            bench_step / bench_n as f64
+        );
+    }
+    // PROBE_TRACE=a,b: prints local/world state of layers whose name contains a filter.
+    if let Ok(filter) = std::env::var("PROBE_TRACE") {
+        let g = runtime.graph();
+        for (i, l) in g.layers.iter().enumerate() {
+            if filter
+                .split(',')
+                .any(|f| !f.is_empty() && l.name.contains(f))
+            {
+                eprintln!(
+                    "T L{i} {} vis={} eff={} a={:.3} o={:?} s={:?} wpos={:?} wscale=({:.3},{:.3},{:.3})",
+                    l.key(),
+                    l.visible,
+                    g.effective_visible(i),
+                    l.alpha,
+                    l.transform.origin,
+                    l.transform.scale,
+                    l.world_matrix.w_axis.truncate(),
+                    l.world_matrix.x_axis.truncate().length(),
+                    l.world_matrix.y_axis.truncate().length(),
+                    l.world_matrix.z_axis.truncate().length()
+                );
+            }
+        }
+        for l in g.layers.iter() {
+            if let truongpaper_renderer::scene_graph::SceneLayerKind::Model { mdl_path } = &l.kind {
+                if filter
+                    .split(',')
+                    .any(|f| !f.is_empty() && l.name.contains(f))
+                {
+                    if let Ok(m) = vfs
+                        .read_bytes(mdl_path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| {
+                            truongpaper_we_formats::parse_static_mdl(&b).map_err(|e| e.to_string())
+                        })
+                    {
+                        let mut vol = 0.0f64;
+                        for t in m.indices.chunks_exact(3) {
+                            let p = |i: u32| m.vertices[i as usize].position.map(f64::from);
+                            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                            vol += a[0] * (b[1] * c[2] - b[2] * c[1])
+                                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                                + a[2] * (b[0] * c[1] - b[1] * c[0]);
+                        }
+                        // Triangles by winding (+ = CCW outward) and mean radius.
+                        let (mut np, mut nn, mut rp, mut rn) = (0, 0, 0.0f64, 0.0f64);
+                        for t in m.indices.chunks_exact(3) {
+                            let p = |i: u32| m.vertices[i as usize].position.map(f64::from);
+                            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                            let n = [
+                                e1[1] * e2[2] - e1[2] * e2[1],
+                                e1[2] * e2[0] - e1[0] * e2[2],
+                                e1[0] * e2[1] - e1[1] * e2[0],
+                            ];
+                            let cen = [
+                                (a[0] + b[0] + c[0]) / 3.0,
+                                (a[1] + b[1] + c[1]) / 3.0,
+                                (a[2] + b[2] + c[2]) / 3.0,
+                            ];
+                            let r = (cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2]).sqrt();
+                            if n[0] * cen[0] + n[1] * cen[1] + n[2] * cen[2] >= 0.0 {
+                                np += 1;
+                                rp += r;
+                            } else {
+                                nn += 1;
+                                rn += r;
+                            }
+                        }
+                        eprintln!(
+                            "T tris outward={np} (mean r {:.3}) inward={nn} (mean r {:.3})",
+                            rp / np.max(1) as f64,
+                            rn / nn.max(1) as f64
+                        );
+                        eprintln!(
+                            "T mdl {} bbox {:?}..{:?} signed_volume {:.3}",
+                            l.name,
+                            m.bbox_min,
+                            m.bbox_max,
+                            vol / 6.0
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!("T camera {:?}", runtime.camera());
     }
     output
         .slice(..)
         .map_async(wgpu::MapMode::Read, |result| result.unwrap());
     device.poll(wgpu::Maintain::Wait);
-    image::save_buffer(
-        &args[3],
-        &output.slice(..).get_mapped_range(),
-        width,
-        height,
-        image::ColorType::Rgba8,
-    )?;
+    let pixels = output.slice(..).get_mapped_range().to_vec();
+    let pixels = crop_center(&pixels, width, height, out_w, out_h);
+    let (width, height) = (out_w, out_h);
+    image::save_buffer(&args[3], &pixels, width, height, image::ColorType::Rgba8)?;
+    if let Ok(reference) = std::env::var("PROBE_DIFF") {
+        let other = image::open(&reference)?.to_rgba8();
+        let total: u64 = pixels
+            .iter()
+            .zip(other.as_raw())
+            .map(|(a, b)| a.abs_diff(*b) as u64)
+            .sum();
+        println!(
+            "mean abs diff vs {reference}: {:.3}",
+            total as f64 / pixels.len() as f64
+        );
+    }
     Ok(())
+}
+
+/// Render-target size that covers `out_w`x`out_h` with the scene's aspect ratio. The width is a
+/// multiple of 64 so `bytes_per_row` stays 256-byte aligned for the readback copy.
+fn cover_render_size(scene: [f32; 2], out_w: u32, out_h: u32) -> (u32, u32) {
+    let aspect = (scene[0] / scene[1].max(1.0)).max(0.001);
+    let out_aspect = out_w as f32 / out_h as f32;
+    let (w, h) = if aspect > out_aspect {
+        ((out_h as f32 * aspect).round() as u32, out_h)
+    } else {
+        (out_w, (out_w as f32 / aspect).round() as u32)
+    };
+    (w.max(out_w).div_ceil(64) * 64, h.max(out_h).min(8192))
+}
+
+/// Centre `out_w`x`out_h` crop of a tightly packed RGBA8 `width`x`height` image.
+fn crop_center(pixels: &[u8], width: u32, height: u32, out_w: u32, out_h: u32) -> Vec<u8> {
+    if (width, height) == (out_w, out_h) {
+        return pixels.to_vec();
+    }
+    let (x0, y0) = ((width - out_w) / 2, (height - out_h) / 2);
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for y in y0..y0 + out_h {
+        let start = ((y * width + x0) * 4) as usize;
+        out.extend_from_slice(&pixels[start..start + (out_w * 4) as usize]);
+    }
+    out
 }

@@ -1,0 +1,16 @@
+{
+	"passes": [
+		{
+			"shader": "effects/waterripple",
+			"blending": "normal",
+			"depthtest": "disabled",
+			"depthwrite": "disabled",
+			"cullmode": "nocull",
+			"textures": [
+				null,
+				"effects/waterripplenormal",
+				"util/white"
+			]
+		}
+	]
+}

@@ -43,7 +43,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost photo-preview: http://photo-preview.localhost https://*.iantruongphotography.com https://*.cloudfront.net https://*.steamusercontent.com https://*.steamstatic.com https://*.akamaihd.net data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://photos-api.iantruongphotography.com https://iantruongphotography.com https://api.steampowered.com",
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost photo-preview: http://photo-preview.localhost wallpaper-preview: http://wallpaper-preview.localhost https://*.iantruongphotography.com https://*.cloudfront.net https://*.steamusercontent.com https://*.steamstatic.com https://*.akamaihd.net data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://photos-api.iantruongphotography.com https://iantruongphotography.com https://api.steampowered.com",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -63,7 +63,8 @@
       "bin/DepotDownloader"
     ],
     "resources": {
-      "bin/licenses/": "sidecar-licenses/"
+      "bin/licenses/": "sidecar-licenses/",
+      "resources/core-assets/": "core-assets/"
     },
     "icon": [
       "icons/32x32.png",
@@ -79,6 +80,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "https://\\w+.*"
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4NTMyRDQ1NTdDOTYxMTcKUldRWFljbFhSUzFUNkZ5Wm43anhwUmdYWUgvYTdsR3ZWUWU4Y3c4aDNpUmx0TFBjUkZuTHFJZ1QK",
       "endpoints": [

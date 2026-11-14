@@ -47,25 +47,22 @@ pub fn find_default_steam_roots() -> Vec<PathBuf> {
         {
             if let Ok(path) = key.get_value::<String, _>("SteamPath") {
                 let candidate = PathBuf::from(path.replace('/', "\\"));
-                if candidate.is_dir() && !roots.contains(&candidate) {
+                if candidate.is_dir() {
                     roots.push(candidate);
                 }
             }
         }
         for env_key in ["PROGRAMFILES(X86)", "PROGRAMFILES"] {
             if let Ok(base) = std::env::var(env_key) {
-                let candidate = PathBuf::from(base).join("Steam");
-                if candidate.is_dir() {
-                    roots.push(candidate);
-                }
+                roots.push(PathBuf::from(base).join("Steam"));
             }
         }
         for drive in ['C', 'D', 'E', 'F'] {
-            let candidate = PathBuf::from(format!("{drive}:\\Steam"));
-            if candidate.is_dir() && !roots.contains(&candidate) {
-                roots.push(candidate);
-            }
+            roots.push(PathBuf::from(format!("{drive}:\\Steam")));
         }
+        // One entry per folder, whatever its spelling.
+        let mut seen = HashSet::new();
+        roots.retain(|r| r.is_dir() && seen.insert(library_key(r)));
     }
 
     roots
@@ -108,18 +105,30 @@ pub fn parse_library_folders_vdf(vdf_text: &str) -> Vec<PathBuf> {
 }
 
 /// Discovers all Steam library folders on the machine (default roots + `libraryfolders.vdf`).
+/// Key that treats two spellings of one folder as equal: Windows paths ignore case and
+/// separators (the registry reports `c:/program files (x86)/steam`, the vdf
+/// `C:\Program Files (x86)\Steam`).
+pub fn library_key(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    } else {
+        s.trim_end_matches('/').to_string()
+    }
+}
+
 pub fn discover_all_steam_libraries() -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut libraries = Vec::new();
 
     for root in find_default_steam_roots() {
-        if seen.insert(root.clone()) {
+        if seen.insert(library_key(&root)) {
             libraries.push(root.clone());
         }
         let vdf_path = root.join("steamapps").join("libraryfolders.vdf");
         if let Ok(vdf_text) = std::fs::read_to_string(&vdf_path) {
             for lib_path in parse_library_folders_vdf(&vdf_text) {
-                if lib_path.is_dir() && seen.insert(lib_path.clone()) {
+                if lib_path.is_dir() && seen.insert(library_key(&lib_path)) {
                     libraries.push(lib_path);
                 }
             }
@@ -527,5 +536,23 @@ mod tests {
         let found = scan_workshop_roots(std::slice::from_ref(&root));
         assert!(Path::new(&found[0].preview_path).ends_with("2841928371/preview.jpg"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod library_key_tests {
+    use super::library_key;
+    use std::path::Path;
+
+    #[test]
+    fn one_folder_spelled_two_ways_has_one_key() {
+        let a = library_key(Path::new(r"C:\Program Files (x86)\Steam"));
+        let b = library_key(Path::new("c:/program files (x86)/steam/"));
+        if cfg!(windows) {
+            assert_eq!(a, b);
+        } else {
+            assert_ne!(a, b);
+        }
+        assert_ne!(a, library_key(Path::new(r"I:\SteamLibrary")));
     }
 }

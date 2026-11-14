@@ -59,14 +59,16 @@ export async function checkForUpdate(): Promise<AvailableUpdate | null> {
 
 export async function installUpdate(onProgress: (downloaded: number, total: number | null) => void) {
   if (!pending) throw new Error('No update available');
-  // Cleanly detach desktop wallpaper hosts / JobObjects before replacing executable
-  await invoke('runtime_shutdown_for_update').catch(() => {});
   let downloaded = 0;
   let total: number | null = null;
-  await pending.downloadAndInstall((event) => {
+  // Download (and verify) first: a failed download must not leave the desktop without wallpapers.
+  await pending.download((event) => {
     if (event.event === 'Started') total = event.data.contentLength ?? null;
     else if (event.event === 'Progress') downloaded += event.data.chunkLength;
     onProgress(downloaded, total);
   });
+  // Detach the desktop wallpaper hosts before the installer replaces the executable.
+  await invoke('runtime_shutdown_for_update').catch(() => {});
+  await pending.install();
   await relaunch();
 }

@@ -388,11 +388,14 @@ const CJK_FALLBACK_FONTS: &[&str] = &[
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/System/Library/Fonts/PingFang.ttc",
-    r"C:\Windows\Fonts\msyh.ttc",
+    // Japanese first (as Hiragino on macOS), then Chinese, then Korean: none of the
+    // Chinese/Japanese fonts has Hangul, so Malgun Gothic is the only Korean source.
     r"C:\Windows\Fonts\YuGothR.ttc",
-    r"C:\Windows\Fonts\yugothic.ttf",
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\malgun.ttf",
     r"C:\Windows\Fonts\msgothic.ttc",
     r"C:\Windows\Fonts\simsun.ttc",
+    r"C:\Windows\Fonts\seguisym.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
 ];

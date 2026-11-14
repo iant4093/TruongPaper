@@ -799,12 +799,22 @@ impl CursorPoller {
         })
     }
 
-    /// Windows: positions only while the desktop is under the cursor. Button state needs
-    /// `GetAsyncKeyState` (`Win32_UI_Input_KeyboardAndMouse`, not enabled), so no clicks.
+    /// Windows: position and left button while the desktop is under the cursor.
     #[cfg(target_os = "windows")]
     pub fn poll(&mut self, geoms: &[MonitorGeometry], monitor_id: &str) -> Option<CursorSample> {
         use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
         let g = geoms.iter().find(|g| g.id == monitor_id)?;
+        // Explorer restarted: the cached handles are gone, look them up again.
+        // SAFETY: IsWindow accepts any handle value.
+        if self
+            .desktop
+            .is_some_and(|d| unsafe { !IsWindow(Some(d.progman)).as_bool() })
+        {
+            self.desktop = None;
+            self.setup_attempts = 0;
+        }
         if self.desktop.is_none() && self.setup_attempts < 5 {
             self.setup_attempts += 1;
             // SAFETY: plain Win32 window lookups.
@@ -821,9 +831,11 @@ impl CursorPoller {
         // SAFETY: handles come from setup_desktop_layer above.
         let (nx, ny, desktop_visible) =
             unsafe { truongpaper_platform::cursor::poll_desktop_cursor_win32(rect, desktop)? };
+        // SAFETY: reads the async key state; the high bit means "down now".
+        let left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         desktop_visible.then_some(CursorSample {
             pos: [nx, ny],
-            left_down: false,
+            left_down,
         })
     }
 
@@ -1116,13 +1128,30 @@ mod platform {
                         ),
                         raw_window_handle: wgpu::rwh::RawWindowHandle::Win32(handle),
                     };
+                    // Scenes lay out in logical points (like Retina on macOS), so report the
+                    // monitor's effective DPI scale instead of 1.0.
+                    let scale_factor = {
+                        use windows::Win32::Graphics::Gdi::{
+                            MonitorFromRect, MONITOR_DEFAULTTONEAREST,
+                        };
+                        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+                        let hmon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+                        let (mut dx, mut dy) = (96u32, 96u32);
+                        if GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok()
+                            && dx > 0
+                        {
+                            dx as f32 / 96.0
+                        } else {
+                            1.0
+                        }
+                    };
                     match instance.create_surface_unsafe(target) {
                         Ok(surface) => out.push(SurfaceTarget {
                             monitor_id: m.monitor_id.clone(),
                             surface,
                             width: width as u32,
                             height: height as u32,
-                            scale_factor: 1.0,
+                            scale_factor,
                         }),
                         Err(err) => {
                             tracing::warn!("desktop surface for {}: {err}", m.device_name)
@@ -3096,6 +3125,12 @@ fn run_renderer(
                 }
                 host.set_live_renderer_attached(!monitors.is_empty());
                 crate::wallpaper_webview::reattach_all();
+                // Explorer can still be starting after `TaskbarCreated`, so no desktop layer was
+                // found. Let the supervisor retry with backoff instead of staying blank.
+                if monitors.is_empty() && !geoms.is_empty() {
+                    tracing::warn!("no desktop surfaces after a display change; retrying");
+                    break RunEnd::SetupFailed;
+                }
             } else {
                 tracing::debug!("ignored display notification with unchanged geometry");
             }

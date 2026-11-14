@@ -44,12 +44,14 @@ pub const WEB_WALLPAPER_PRELOAD_JS: &str = include_str!("web-wallpaper-preload.j
 /// WebView2 `AdditionalBrowserArguments` that keep Web/Video wallpapers playing behind the
 /// desktop icons without a user gesture (spec section 6.3). Site isolation stays on: the pages
 /// are untrusted Workshop content.
+/// `--disable-features` repeats wry's own defaults (custom arguments replace them, and Chromium
+/// honors only the last `--disable-features`).
 pub const WEBVIEW2_WALLPAPER_BROWSER_ARGS: &str = "--autoplay-policy=no-user-gesture-required \
 --disable-background-timer-throttling \
 --disable-backgrounding-occluded-windows \
 --disable-background-media-suspend \
 --disable-renderer-backgrounding \
---disable-features=WebContentsOcclusion";
+--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebContentsOcclusion";
 
 /// `WKAudiovisualMediaTypeNone`: value for `WKWebViewConfiguration.mediaTypesRequiringUserActionForPlayback`
 /// (spec section 6.3). Also set `preferences.javaScriptCanOpenWindowsAutomatically = false`.
@@ -138,7 +140,16 @@ mod tests {
             .split("--disable-features=")
             .nth(1)
             .unwrap();
-        assert_eq!(disabled, "WebContentsOcclusion");
+        assert_eq!(
+            disabled,
+            "msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebContentsOcclusion"
+        );
+        assert_eq!(
+            WEBVIEW2_WALLPAPER_BROWSER_ARGS
+                .matches("--disable-features=")
+                .count(),
+            1
+        );
     }
 
     #[test]

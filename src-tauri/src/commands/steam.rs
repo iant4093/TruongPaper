@@ -447,7 +447,8 @@ fn recover_install_leftovers(workshop_root: &Path, active: &[String]) {
     }
     for entry in entries(sibling_dir(workshop_root, "workshop-staging")) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !active.contains(&name) {
+        // `.guest-*` temp folders belong to GGNetwork downloads that may still be running.
+        if !name.starts_with('.') && !active.contains(&name) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -628,17 +629,28 @@ pub async fn steam_download_workshop_item(
         let wallpaper_id = format!("workshop:{workshop_id}");
         let (staged, target, backup) = (staging_dir.clone(), out_dir.clone(), backup_dir.clone());
         let folder = workshop_id.clone();
-        tokio::task::spawn_blocking(move || {
+        // Re-downloading the wallpaper on screen: let go of its files first (Windows cannot
+        // rename a folder with open files) and show it again afterwards.
+        let showing = if existed {
+            crate::commands::library::release_wallpaper_files(&app, &state, &wallpaper_id).await
+        } else {
+            Vec::new()
+        };
+        let installed = tokio::task::spawn_blocking(move || {
             if truongpaper_steam::local_sync::read_item_dir(&staged, &folder).is_none() {
                 return Err(
                     "Download finished but the item has no readable project.json".to_string(),
                 );
             }
-            install_staged(&staged, &target, &backup).map_err(|e| e.to_string())
+            crate::commands::library::with_io_retry(|| install_staged(&staged, &target, &backup))
+                .map_err(|e| e.to_string())
         })
         .await
-        .map_err(|e| e.to_string())??;
-        let items = sync_library(&state).await?;
+        .map_err(|e| e.to_string())?;
+        let items = sync_library(&state).await;
+        crate::commands::library::reapply_wallpaper(&app, &state, &wallpaper_id, &showing).await;
+        installed?;
+        let items = items?;
         if !items.iter().any(|w| w.wallpaper_id == wallpaper_id) {
             if !existed {
                 let _ = std::fs::remove_dir_all(&out_dir);

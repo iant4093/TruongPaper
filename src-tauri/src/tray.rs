@@ -6,6 +6,10 @@ use tauri::{
     AppHandle, Listener, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
 };
 
+/// When the popover last hid because it lost focus (see `toggle_tray_popover`).
+static LAST_BLUR_HIDE: parking_lot::Mutex<Option<std::time::Instant>> =
+    parking_lot::Mutex::new(None);
+
 const PAUSE_LABEL: &str = "Pause All Displays";
 const RESUME_LABEL: &str = "Resume All Displays";
 
@@ -70,6 +74,9 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
         let pop_clone = popover.clone();
         popover.on_window_event(move |event| {
             if let WindowEvent::Focused(false) = event {
+                if pop_clone.is_visible().unwrap_or(false) {
+                    *LAST_BLUR_HIDE.lock() = Some(std::time::Instant::now());
+                }
                 let _ = pop_clone.hide();
             }
         });
@@ -130,6 +137,14 @@ fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
 
     if popover.is_visible().unwrap_or(false) {
         let _ = popover.hide();
+        return;
+    }
+    // On Windows a click on the tray icon first blurs the popover (which hides it), then
+    // arrives here: without this the click meant to close it would open it again.
+    if LAST_BLUR_HIDE
+        .lock()
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(300))
+    {
         return;
     }
 

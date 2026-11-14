@@ -224,6 +224,9 @@ pub fn guess_mime_type(path: &Path) -> &'static str {
         Some("json") => "application/json; charset=utf-8",
         Some("mp4" | "m4v") => "video/mp4",
         Some("webm") => "video/webm",
+        // WebView2 (Chromium) rejects `video/quicktime`; most .mov files are H.264/AAC and
+        // play when served as MP4. WKWebView plays QuickTime natively.
+        Some("mov") if cfg!(windows) => "video/mp4",
         Some("mov") => "video/quicktime",
         Some("mkv") => "video/x-matroska",
         Some("avi") => "video/x-msvideo",
@@ -535,7 +538,14 @@ mod tests {
             ("s.css", "text/css; charset=utf-8"),
             ("p.json", "application/json; charset=utf-8"),
             ("v.M4V", "video/mp4"),
-            ("v.mov", "video/quicktime"),
+            (
+                "v.mov",
+                if cfg!(windows) {
+                    "video/mp4"
+                } else {
+                    "video/quicktime"
+                },
+            ),
             ("v.ogv", "video/ogg"),
             ("a.ogg", "audio/ogg"),
             ("a.flac", "audio/flac"),

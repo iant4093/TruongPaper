@@ -7,6 +7,7 @@
 
 pub mod application;
 pub mod cursor;
+pub mod display_identity;
 pub mod geometry;
 pub mod policy;
 pub mod wpe_protocol;

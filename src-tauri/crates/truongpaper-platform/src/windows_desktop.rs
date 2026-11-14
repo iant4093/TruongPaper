@@ -35,7 +35,10 @@ pub struct DesktopHandles {
 
 #[derive(Debug, Clone)]
 pub struct Win32MonitorDesc {
+    /// GDI device name (`\\.\DISPLAY1`). Windows renumbers it as monitors reconnect.
     pub device_name: String,
+    /// Stable TruongPaper monitor id (see [`crate::display_identity`]).
+    pub monitor_id: String,
     pub monitor_rect: RECT,
     pub work_rect: RECT,
     pub is_primary: bool,
@@ -74,6 +77,7 @@ pub unsafe fn enumerate_monitors_win32() -> Vec<Win32MonitorDesc> {
             let device_name = String::from_utf16_lossy(&mi.szDevice[..len]);
             let is_primary = (mi.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
             out.push(Win32MonitorDesc {
+                monitor_id: device_name.clone(),
                 device_name,
                 monitor_rect: mi.monitorInfo.rcMonitor,
                 work_rect: mi.monitorInfo.rcWork,
@@ -89,6 +93,14 @@ pub unsafe fn enumerate_monitors_win32() -> Vec<Win32MonitorDesc> {
         Some(monitor_enum_proc),
         LPARAM(&mut list as *mut Vec<Win32MonitorDesc> as isize),
     );
+    let identities = crate::display_identity::display_identities();
+    for m in &mut list {
+        m.monitor_id = identities
+            .iter()
+            .find(|d| d.gdi_name.eq_ignore_ascii_case(&m.device_name))
+            .map(|d| d.stable_id.clone())
+            .unwrap_or_else(|| m.device_name.clone());
+    }
     list
 }
 
@@ -297,6 +309,7 @@ unsafe extern "system" fn lifecycle_wndproc(
     } else if msg == WM_DISPLAYCHANGE
         || (msg == WM_SETTINGCHANGE && wparam.0 == SPI_SETWORKAREA.0 as usize)
     {
+        crate::display_identity::invalidate_display_identities();
         if let Some(tx) = LIFECYCLE_TX.get() {
             let _ = tx.send(DesktopLifecycleEvent::DisplayTopologyChanged(
                 enumerate_monitors_win32(),

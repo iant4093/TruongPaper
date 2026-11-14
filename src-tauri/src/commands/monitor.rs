@@ -60,8 +60,9 @@ impl LiveMonitor {
     }
 }
 
-/// Monitor ids: the OS display name (`\\.\DISPLAY1` on Windows), `DISPLAY-<n>` when unnamed,
-/// and a `#<k>` suffix for duplicate names (two identical external panels on macOS).
+/// Monitor ids from id bases (the OS display name on macOS, the connected monitor's device path
+/// on Windows): `DISPLAY-<n>` when unnamed, and a `#<k>` suffix for duplicates (two identical
+/// external panels on macOS).
 pub fn assign_monitor_ids(names: &[Option<String>]) -> Vec<String> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     names
@@ -85,20 +86,56 @@ pub fn assign_monitor_ids(names: &[Option<String>]) -> Vec<String> {
         .collect()
 }
 
+/// `(id bases, user-facing names)` for the OS display names Tauri reports.
+///
+/// Windows reports GDI names (`\\.\DISPLAY5`) that grow as monitors reconnect, so ids come from
+/// the connected monitor ([`truongpaper_platform::display_identity`]) and names from its EDID
+/// ("DELL U2720Q", else "Display <n>"). Elsewhere the OS name is stable and readable.
+fn monitor_ids_and_names(os_names: &[Option<String>]) -> (Vec<Option<String>>, Vec<String>) {
+    use truongpaper_platform::display_identity::{display_identities, display_names};
+    let identities = display_identities();
+    if cfg!(target_os = "windows") {
+        let found: Vec<_> = os_names
+            .iter()
+            .map(|name| {
+                name.as_deref().and_then(|n| {
+                    identities
+                        .iter()
+                        .find(|d| d.gdi_name.eq_ignore_ascii_case(n))
+                })
+            })
+            .collect();
+        let ids = os_names
+            .iter()
+            .zip(&found)
+            .map(|(name, d)| d.map(|d| d.stable_id.clone()).or_else(|| name.clone()))
+            .collect();
+        let friendly: Vec<Option<String>> = found
+            .iter()
+            .map(|d| d.and_then(|d| d.friendly_name.clone()))
+            .collect();
+        (ids, display_names(&friendly))
+    } else {
+        let names = os_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| n.clone().unwrap_or_else(|| format!("Display {}", i + 1)))
+            .collect();
+        (os_names.to_vec(), names)
+    }
+}
+
 pub fn live_monitors(app: &AppHandle) -> Vec<LiveMonitor> {
     let monitors = app.available_monitors().unwrap_or_default();
     let primary = app.primary_monitor().ok().flatten();
-    let names: Vec<Option<String>> = monitors.iter().map(|m| m.name().cloned()).collect();
-    let ids = assign_monitor_ids(&names);
+    let os_names: Vec<Option<String>> = monitors.iter().map(|m| m.name().cloned()).collect();
+    let (id_bases, names) = monitor_ids_and_names(&os_names);
+    let ids = assign_monitor_ids(&id_bases);
     let mut out: Vec<LiveMonitor> = monitors
         .iter()
-        .zip(ids)
-        .enumerate()
-        .map(|(i, (m, id))| LiveMonitor {
-            name: m
-                .name()
-                .cloned()
-                .unwrap_or_else(|| format!("Display {}", i + 1)),
+        .zip(ids.into_iter().zip(names))
+        .map(|(m, (id, name))| LiveMonitor {
+            name,
             id,
             width: m.size().width,
             height: m.size().height,

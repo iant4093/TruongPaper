@@ -149,7 +149,7 @@ impl OcclusionProbe {
                     },
                     None => MonitorPlaybackPolicy::Playing,
                 };
-                (m.device_name.clone(), decision)
+                (m.monitor_id.clone(), decision)
             })
             .collect()
     }

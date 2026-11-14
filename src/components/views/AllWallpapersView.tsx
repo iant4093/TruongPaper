@@ -1,6 +1,6 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Images, Search, X } from 'lucide-react';
-import { useAppStore } from '../../store/useAppStore';
+import { isCancelMessage, useAppStore, type SteamDownloadProgress } from '../../store/useAppStore';
 import { toast } from '../../store/feedback';
 import { WALLPAPER_TYPE_LABEL, OFFLINE_NOTICE, offlinePhotosForDisplay, photoPreviewSrc, plural, wallpaperPreviewSrc } from '../../lib/format';
 import { useSlashToFocus } from '../../lib/hooks';
@@ -9,7 +9,7 @@ import { Dropdown } from '../Dropdown';
 import { LocalImport } from '../LocalImport';
 import { ViewHeader, SegmentedControl } from '../ui';
 import { VirtualGrid } from '../VirtualGrid';
-import { WallpaperCard } from '../WallpaperCard';
+import { DownloadCard, WallpaperCard } from '../WallpaperCard';
 
 type LibraryFilter = 'all' | 'favorites' | 'playlists' | WallpaperType;
 
@@ -68,7 +68,11 @@ export function sortLibrary(items: WallpaperItem[], sort: LibrarySort): Wallpape
   }
 }
 
-type Entry = { id: string; kind: 'photos' } | { id: string; kind: 'wallpaper'; item: WallpaperItem } | { id: string; kind: 'playlist'; playlist: Playlist };
+/** Library tile ids for Workshop downloads in progress. */
+const DOWNLOAD_PREFIX = 'download:';
+
+type Entry = { id: string; kind: 'photos' } | { id: string; kind: 'wallpaper'; item: WallpaperItem } | { id: string; kind: 'playlist'; playlist: Playlist }
+  | { id: string; kind: 'download'; download: SteamDownloadProgress };
 
 export const AllWallpapersView: React.FC<{
   onOpenDetails: () => void;
@@ -86,6 +90,11 @@ export const AllWallpapersView: React.FC<{
   const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
   const setWallpaperFavorite = useAppStore((s) => s.setWallpaperFavorite);
   const retryPhotoNow = useAppStore((s) => s.retryPhotoNow);
+  const downloadsById = useAppStore((s) => s.downloadsById);
+  const downloadWorkshopItem = useAppStore((s) => s.downloadWorkshopItem);
+  const cancelWorkshopDownload = useAppStore((s) => s.cancelWorkshopDownload);
+  const dismissDownload = useAppStore((s) => s.dismissDownload);
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set());
   const [prefs] = useState(loadPrefs);
   const [selectedFilter, setFilter] = useState<LibraryFilter>(prefs.filter);
   const [query, setQuery] = useState('');
@@ -123,6 +132,13 @@ export const AllWallpapersView: React.FC<{
     const matching = filter === 'playlists' ? [] : wallpapers.filter((w) =>
       (filter === 'all' || (filter === 'favorites' ? w.isFavorite : w.type === filter)) && matchesLibrarySearch(w, search));
     const list: Entry[] = sortLibrary(matching, sort).map((item) => ({ id: item.wallpaperId, kind: 'wallpaper', item }));
+    // Downloads still running (or failed) come first among the wallpapers, grayed out.
+    if (filter === 'all') {
+      const downloads = Object.values(downloadsById)
+        .filter((d) => d.state !== 'completed' && (!search || d.title.toLowerCase().includes(search) || d.workshopId.includes(search)))
+        .map((download): Entry => ({ id: DOWNLOAD_PREFIX + download.workshopId, kind: 'download', download }));
+      list.unshift(...downloads);
+    }
     // Playlists sit right after Photography, so they are easy to set like any wallpaper.
     if (filter === 'all' || filter === 'playlists') {
       const lists = playlists
@@ -132,7 +148,31 @@ export const AllWallpapersView: React.FC<{
     }
     if (filter === 'all' && 'ian truong photography photos'.includes(search)) list.unshift({ id: PHOTOS_ID, kind: 'photos' });
     return list;
-  }, [wallpapers, playlists, filter, search, sort]);
+  }, [wallpapers, playlists, downloadsById, filter, search, sort]);
+
+  // A finished or cancelled download forgets its "Cancelling…" mark.
+  useEffect(() => {
+    setCancelling((set) => {
+      const kept = [...set].filter((id) => downloadsById[id]?.state === 'downloading');
+      return kept.length === set.size ? set : new Set(kept);
+    });
+  }, [downloadsById]);
+  const cancelDownload = useCallback((workshopId: string) => {
+    setCancelling((set) => new Set(set).add(workshopId));
+    cancelWorkshopDownload(workshopId)
+      .then((found) => {
+        if (found) return;
+        setCancelling((set) => { const next = new Set(set); next.delete(workshopId); return next; });
+        toast.info('That download is not running yet. Try again in a moment.');
+      })
+      .catch((e) => {
+        setCancelling((set) => { const next = new Set(set); next.delete(workshopId); return next; });
+        toast.error(e, 'Could not cancel the download');
+      });
+  }, [cancelWorkshopDownload]);
+  const retryDownload = useCallback((workshopId: string) => {
+    downloadWorkshopItem(workshopId).catch((e) => { if (!isCancelMessage(e)) toast.error(e, 'Download failed'); });
+  }, [downloadWorkshopItem]);
 
   const applySeq = useRef(0);
   const apply = useCallback(async (id: string) => {
@@ -169,7 +209,8 @@ export const AllWallpapersView: React.FC<{
   const canApply = !!activeMonitorId;
   const loaded = useAppStore((s) => s.loaded);
   const loadFailed = useAppStore((s) => s.loadFailed);
-  const emptyLibrary = loaded && wallpapers.length === 0;
+  const emptyLibrary = loaded && wallpapers.length === 0
+    && !Object.values(downloadsById).some((d) => d.state !== 'completed');
 
   return (
     <div>
@@ -210,7 +251,13 @@ export const AllWallpapersView: React.FC<{
         ? <div className="view-loading" role="status">Could not load your library. Use Retry above.</div>
         : <div className="view-loading" role="status">Loading…</div>)}
       <VirtualGrid items={entries} getKey={(e) => e.id} label="Wallpapers"
-        renderItem={(entry, cell) => entry.kind === 'playlist' ? (
+        renderItem={(entry, cell) => entry.kind === 'download' ? (
+          <DownloadCard workshopId={entry.download.workshopId} title={entry.download.title || `Workshop item ${entry.download.workshopId}`}
+            preview={entry.download.previewUrl} percent={entry.download.progressPercent}
+            failed={entry.download.state === 'error'} error={entry.download.error}
+            cancelling={cancelling.has(entry.download.workshopId)} tabIndex={cell.tabIndex}
+            onCancel={cancelDownload} onRetry={retryDownload} onDismiss={dismissDownload} />
+        ) : entry.kind === 'playlist' ? (
           <WallpaperCard id={entry.id} title={entry.playlist.name} preview={playlistPreview(entry.playlist)}
             kind={`Playlist · ${plural(entry.playlist.items.length, 'item')}`}
             active={activeSource?.kind === 'playlist' && activeSource.playlistId === entry.playlist.playlistId}

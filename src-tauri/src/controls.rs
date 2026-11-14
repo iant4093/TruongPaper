@@ -93,6 +93,52 @@ pub fn validate_volume(volume: f32) -> Result<f32, String> {
     }
 }
 
+/// Moves per-display data stored under an old monitor id to its new id, for each
+/// `(old, new)` pair: the display's wallpaper, playlist position, pause and volume. Data already
+/// stored under the new id wins. Used once at startup on Windows, where ids moved from GDI
+/// names (`\\.\DISPLAY5`) to stable monitor ids.
+pub fn migrate_monitor_ids(conn: &Connection, renames: &[(String, String)]) -> CoreResult<usize> {
+    let mut moved = 0;
+    let mut pause = load_pause(conn);
+    let mut volumes = load_monitor_volumes(conn);
+    let (mut pause_changed, mut volumes_changed) = (false, false);
+    for (old, new) in renames.iter().filter(|(old, new)| old != new) {
+        for table in ["monitor_assignments", "playlist_positions"] {
+            moved += conn.execute(
+                &format!(
+                    "UPDATE {table} SET monitor_id = ?2 WHERE monitor_id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM {table} WHERE monitor_id = ?2)"
+                ),
+                rusqlite::params![old, new],
+            )?;
+        }
+        if let Some(p) = pause.monitors.remove(old) {
+            pause.monitors.entry(new.clone()).or_insert(p);
+            pause_changed = true;
+        }
+        if let Some(v) = volumes.remove(old) {
+            volumes.entry(new.clone()).or_insert(v);
+            volumes_changed = true;
+        }
+    }
+    if pause_changed {
+        set_setting(conn, SETTING_USER_PAUSE, &pause)?;
+    }
+    if volumes_changed {
+        set_setting(conn, SETTING_MONITOR_VOLUMES, &volumes)?;
+    }
+    Ok(moved + usize::from(pause_changed) + usize::from(volumes_changed))
+}
+
+/// `(GDI name, stable id)` for every connected Windows display whose id changed.
+pub fn legacy_monitor_id_renames() -> Vec<(String, String)> {
+    truongpaper_platform::display_identity::display_identities()
+        .into_iter()
+        .filter(|d| d.gdi_name != d.stable_id)
+        .map(|d| (d.gdi_name, d.stable_id))
+        .collect()
+}
+
 /// Applies the persisted pause and display volumes to the host. Called once during setup,
 /// before the render thread and the webview bridge start, so the first frame already honors them.
 pub fn restore_persisted(conn: &Connection, host: &WallpaperHost) {
@@ -378,6 +424,66 @@ mod tests {
         assert_eq!(selected_monitor().as_deref(), Some("DISPLAY-2"));
         set_selected_monitor(Some("  ".into()));
         assert_eq!(selected_monitor(), None);
+    }
+
+    #[test]
+    fn legacy_monitor_ids_move_to_stable_ids() {
+        let conn = test_db();
+        let old = r"\\.\DISPLAY5".to_string();
+        let new = "DISPLAY#DEL41B8#5&1d5ab3f3&0&UID4352".to_string();
+        let kept = "DISPLAY#GSM5B7F#4&2b0d4c&0&UID256".to_string();
+        for (id, src) in [
+            (&old, "a"),
+            (&r"\\.\DISPLAY6".to_string(), "b"),
+            (&kept, "c"),
+        ] {
+            conn.execute(
+                "INSERT INTO monitor_assignments (monitor_id, source_json, updated_at)
+                 VALUES (?1, ?2, 0)",
+                rusqlite::params![id, src],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO playlist_positions (monitor_id, playlist_id, item_index, updated_at)
+             VALUES (?1, 'p', 3, 0)",
+            rusqlite::params![old],
+        )
+        .unwrap();
+        persist_pause(&conn, Some(&old), true).unwrap();
+        persist_monitor_volume(&conn, &old, 0.25).unwrap();
+
+        let renames = vec![
+            (old.clone(), new.clone()),
+            // Data already under the stable id wins over the legacy row.
+            (r"\\.\DISPLAY6".to_string(), kept.clone()),
+        ];
+        assert!(migrate_monitor_ids(&conn, &renames).unwrap() > 0);
+
+        let source = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT source_json FROM monitor_assignments WHERE monitor_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        assert_eq!(source(&new).as_deref(), Some("a"));
+        assert_eq!(source(&old), None);
+        assert_eq!(source(&kept).as_deref(), Some("c"));
+        let index: i64 = conn
+            .query_row(
+                "SELECT item_index FROM playlist_positions WHERE monitor_id = ?1",
+                [&new],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 3);
+        assert_eq!(load_pause(&conn).monitors.get(&new), Some(&true));
+        assert!(!load_pause(&conn).monitors.contains_key(&old));
+        assert_eq!(load_monitor_volumes(&conn).get(&new), Some(&0.25));
+        // Running again changes nothing.
+        assert_eq!(migrate_monitor_ids(&conn, &renames[..1]).unwrap(), 0);
     }
 
     #[test]

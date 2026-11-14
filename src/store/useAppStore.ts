@@ -34,7 +34,12 @@ export interface SteamDownloadProgress {
   progressPercent: number;
   state: 'downloading' | 'completed' | 'error';
   error?: string;
+  /** Workshop preview image, kept from the preview dialog that started the download (UI only). */
+  previewUrl?: string | null;
 }
+
+/** Workshop id -> preview image for downloads started from the preview dialog. */
+const downloadPreviews = new Map<string, string>();
 
 export interface Steam2FaPrompt {
   kind: 'totp' | 'email';
@@ -523,8 +528,10 @@ export const useAppStore = create<AppState>((set, get) => {
           const previous = get().downloadsById[prog.workshopId];
           // Whole-percent steps are enough for the bar; skipping the rest avoids re-rendering on every chunk.
           if (previous && previous.state === prog.state && Math.floor(previous.progressPercent) === Math.floor(prog.progressPercent)) return;
+          const previewUrl = prog.previewUrl ?? previous?.previewUrl ?? downloadPreviews.get(prog.workshopId) ?? null;
+          if (prog.state !== 'downloading') downloadPreviews.delete(prog.workshopId);
           set((state) => ({
-            downloadsById: { ...state.downloadsById, [prog.workshopId]: prog },
+            downloadsById: { ...state.downloadsById, [prog.workshopId]: { ...prog, previewUrl } },
           }));
           if (prog.state === 'completed') {
             // Add new items and refresh this one (a re-download); other edits in flight stay.
@@ -682,6 +689,12 @@ export const useAppStore = create<AppState>((set, get) => {
         const live = pruneDownloads(state.downloadsById);
         return Object.keys(live).length === Object.keys(state.downloadsById).length ? state : { downloadsById: live };
       });
+      const retried = get().downloadsById[urlOrId]?.previewUrl;
+      if (retried) downloadPreviews.set(urlOrId, retried);
+      const inspected = get().inspectedWorkshop;
+      if (inspected?.previewUrl && (urlOrId === inspected.workshopId || urlOrId.includes(`id=${inspected.workshopId}`))) {
+        downloadPreviews.set(inspected.workshopId, inspected.previewUrl);
+      }
       await invoke<string>('steam_download_workshop_item', source ? { urlOrId, source } : { urlOrId });
     },
 

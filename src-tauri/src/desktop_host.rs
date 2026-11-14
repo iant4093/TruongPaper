@@ -1118,7 +1118,7 @@ mod platform {
                     };
                     match instance.create_surface_unsafe(target) {
                         Ok(surface) => out.push(SurfaceTarget {
-                            monitor_id: m.device_name.clone(),
+                            monitor_id: m.monitor_id.clone(),
                             surface,
                             width: width as u32,
                             height: height as u32,

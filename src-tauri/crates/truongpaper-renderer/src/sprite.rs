@@ -107,7 +107,7 @@ impl SpriteSheet {
 /// Largest packed sheet side. wgpu's default `max_texture_dimension_2d` is 8192.
 pub const MAX_PACKED_DIMENSION: u32 = 8192;
 /// Largest packed RGBA sheet in bytes; bigger sheets are downscaled by powers of two.
-pub const MAX_PACKED_BYTES: usize = 160 * 1024 * 1024;
+pub const MAX_PACKED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Number of atlas images a frame table refers to (`max(image_id) + 1`).
 pub fn sprite_atlas_count(frames: &[TexFrameInfo]) -> usize {
@@ -126,6 +126,123 @@ pub struct PackedAtlas {
     pub height: u32,
 }
 
+/// Most atlas images a sprite sheet may be packed from.
+pub const MAX_ATLAS_IMAGES: usize = 16;
+
+/// Packs the atlas images of a multi-image sprite sheet into one texture, one part at a time
+/// (see [`pack_sprite_atlases`]): the peak is the output plus the part being added.
+pub struct AtlasPacker {
+    rgba: Vec<u8>,
+    cols: u32,
+    sw: u32,
+    sh: u32,
+    out_w: u32,
+    shift: u32,
+    n: u32,
+    w: u32,
+    h: u32,
+}
+
+impl AtlasPacker {
+    /// `w` x `h` is the first atlas's size, `n` the atlas count. `None` when the layout is
+    /// impossible or `n` is 0 or above [`MAX_ATLAS_IMAGES`].
+    pub fn new(w: u32, h: u32, n: usize) -> Option<AtlasPacker> {
+        if w == 0 || h == 0 || n == 0 || n > MAX_ATLAS_IMAGES {
+            return None;
+        }
+        let n = n as u32;
+        let mut shift = 0u32;
+        let (cols, rows, sw, sh) = loop {
+            if shift >= 32 {
+                return None;
+            }
+            let (sw, sh) = (w >> shift, h >> shift);
+            if sw == 0 || sh == 0 {
+                return None;
+            }
+            let best = (1..=n)
+                .map(|cols| (cols, n.div_ceil(cols)))
+                .filter(|(c, r)| c * sw <= MAX_PACKED_DIMENSION && r * sh <= MAX_PACKED_DIMENSION)
+                .min_by_key(|(c, r)| (c * sw).max(r * sh));
+            if let Some((c, r)) = best {
+                let bytes = (c * sw) as usize * (r * sh) as usize * 4;
+                if bytes <= MAX_PACKED_BYTES {
+                    break (c, r, sw, sh);
+                }
+            }
+            shift += 1;
+        };
+        let (out_w, out_h) = (cols * sw, rows * sh);
+        Some(AtlasPacker {
+            rgba: vec![0u8; out_w as usize * out_h as usize * 4],
+            cols,
+            sw,
+            sh,
+            out_w,
+            shift,
+            n,
+            w,
+            h,
+        })
+    }
+
+    /// Box-filters part `i` (`pw` x `ph`, RGBA8) into its slot. `false` when the part does
+    /// not fit the slot grid or its buffer is too short.
+    pub fn add(&mut self, i: usize, src: &[u8], pw: u32, ph: u32) -> bool {
+        if i as u32 >= self.n
+            || pw > self.w
+            || ph > self.h
+            || src.len() < (pw as usize) * (ph as usize) * 4
+        {
+            return false;
+        }
+        let step = 1usize << self.shift;
+        let (col, row) = (i as u32 % self.cols, i as u32 / self.cols);
+        let (dw, dh) = (pw as usize / step, ph as usize / step);
+        let area = (step * step) as u32;
+        for y in 0..dh {
+            for x in 0..dw {
+                let mut acc = [0u32; 4];
+                for sy in 0..step {
+                    let base = ((y * step + sy) * pw as usize + x * step) * 4;
+                    for sx in 0..step {
+                        for (c, a) in acc.iter_mut().enumerate() {
+                            *a += src[base + sx * 4 + c] as u32;
+                        }
+                    }
+                }
+                let dst = (((row * self.sh) as usize + y) * self.out_w as usize
+                    + (col * self.sw) as usize
+                    + x)
+                    * 4;
+                for (c, a) in acc.iter().enumerate() {
+                    self.rgba[dst + c] = (a / area) as u8;
+                }
+            }
+        }
+        true
+    }
+
+    /// Moves the frame rectangles into their slots and returns the packed texture.
+    pub fn finish(self, frames: &mut [TexFrameInfo]) -> PackedAtlas {
+        let scale = 1.0 / (1usize << self.shift) as f32;
+        for f in frames.iter_mut() {
+            let id = f.image_id.clamp(0, self.n as i32 - 1) as u32;
+            f.x = f.x * scale + (id % self.cols * self.sw) as f32;
+            f.y = f.y * scale + (id / self.cols * self.sh) as f32;
+            f.width *= scale;
+            f.width_y *= scale;
+            f.height_x *= scale;
+            f.height *= scale;
+        }
+        PackedAtlas {
+            width: self.out_w,
+            height: self.rgba.len() as u32 / 4 / self.out_w.max(1),
+            rgba: self.rgba,
+        }
+    }
+}
+
 /// Packs the atlas images of a multi-image sprite sheet (frames carry an `image_id`) into one
 /// texture: a grid of `w x h` slots (the first atlas's size; a smaller atlas is padded with
 /// transparency), downscaled by a power of two when the result would exceed
@@ -136,74 +253,13 @@ pub fn pack_sprite_atlases(
     frames: &mut [TexFrameInfo],
 ) -> Option<PackedAtlas> {
     let &(_, w, h) = parts.first()?;
-    if w == 0
-        || h == 0
-        || parts.iter().any(|(rgba, pw, ph)| {
-            *pw > w || *ph > h || rgba.len() < (*pw as usize) * (*ph as usize) * 4
-        })
-    {
-        return None;
-    }
-    let n = parts.len() as u32;
-    let mut shift = 0u32;
-    let (cols, rows, sw, sh) = loop {
-        let (sw, sh) = (w >> shift, h >> shift);
-        if sw == 0 || sh == 0 {
+    let mut packer = AtlasPacker::new(w, h, parts.len())?;
+    for (i, (src, pw, ph)) in parts.iter().enumerate() {
+        if !packer.add(i, src, *pw, *ph) {
             return None;
         }
-        let best = (1..=n)
-            .map(|cols| (cols, n.div_ceil(cols)))
-            .filter(|(c, r)| c * sw <= MAX_PACKED_DIMENSION && r * sh <= MAX_PACKED_DIMENSION)
-            .min_by_key(|(c, r)| (c * sw).max(r * sh));
-        if let Some((c, r)) = best {
-            let bytes = (c * sw) as usize * (r * sh) as usize * 4;
-            if bytes <= MAX_PACKED_BYTES {
-                break (c, r, sw, sh);
-            }
-        }
-        shift += 1;
-    };
-    let (out_w, out_h) = (cols * sw, rows * sh);
-    let mut rgba = vec![0u8; out_w as usize * out_h as usize * 4];
-    let step = 1usize << shift;
-    for (i, (src, pw, ph)) in parts.iter().enumerate() {
-        let (col, row) = (i as u32 % cols, i as u32 / cols);
-        let (dw, dh) = (*pw as usize / step, *ph as usize / step);
-        for y in 0..dh {
-            for x in 0..dw {
-                let mut acc = [0u32; 4];
-                for sy in 0..step {
-                    let base = ((y * step + sy) * *pw as usize + x * step) * 4;
-                    for sx in 0..step {
-                        for c in 0..4 {
-                            acc[c] += src[base + sx * 4 + c] as u32;
-                        }
-                    }
-                }
-                let dst =
-                    (((row * sh) as usize + y) * out_w as usize + (col * sw) as usize + x) * 4;
-                let area = (step * step) as u32;
-                for c in 0..4 {
-                    rgba[dst + c] = (acc[c] / area) as u8;
-                }
-            }
-        }
     }
-    let scale = 1.0 / step as f32;
-    for f in frames.iter_mut() {
-        let id = f.image_id.clamp(0, n as i32 - 1) as u32;
-        f.x = f.x * scale + (id % cols * sw) as f32;
-        f.y = f.y * scale + (id / cols * sh) as f32;
-        f.width *= scale;
-        f.width_y *= scale;
-        f.height_x *= scale;
-        f.height *= scale;
-    }
-    Some(PackedAtlas {
-        rgba,
-        width: out_w,
-        height: out_h,
-    })
+    Some(packer.finish(frames))
 }
 
 #[cfg(test)]
@@ -342,5 +398,37 @@ mod tests {
         let mut frames = [atlas_frame(1, 1.0, 1.0)];
         assert!(pack_sprite_atlases(&parts, &mut frames).is_none());
         assert_eq!(frames[0].x, 1.0);
+    }
+
+    #[test]
+    fn packer_rejects_too_many_atlases() {
+        assert!(AtlasPacker::new(4, 4, MAX_ATLAS_IMAGES + 1).is_none());
+        assert!(AtlasPacker::new(4, 4, 0).is_none());
+        assert!(AtlasPacker::new(0, 4, 2).is_none());
+    }
+
+    #[test]
+    fn packed_sheet_never_exceeds_the_byte_budget() {
+        // Four 8192x8192 atlases would be 1 GiB; the layout must shrink to the budget.
+        let p = AtlasPacker::new(8192, 8192, 4);
+        let p = p.unwrap();
+        assert!(p.rgba.len() <= MAX_PACKED_BYTES);
+    }
+
+    #[test]
+    fn incremental_packing_matches_the_batch_helper() {
+        let parts = vec![
+            (vec![200u8; 4 * 4 * 4], 4, 4),
+            (vec![10u8; 4 * 4 * 4], 4, 4),
+        ];
+        let mut f1 = [atlas_frame(1, 1.0, 1.0)];
+        let mut f2 = [atlas_frame(1, 1.0, 1.0)];
+        let batch = pack_sprite_atlases(&parts, &mut f1).unwrap();
+        let mut packer = AtlasPacker::new(4, 4, 2).unwrap();
+        for (i, (src, w, h)) in parts.iter().enumerate() {
+            assert!(packer.add(i, src, *w, *h));
+        }
+        assert_eq!(packer.finish(&mut f2), batch);
+        assert_eq!(f1[0].x, f2[0].x);
     }
 }

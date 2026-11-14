@@ -79,7 +79,10 @@ pub fn attachment_point(
     let a = attachments.iter().find(|a| a.name == name)?;
     let mut world = vec![Mat4::IDENTITY; bones.len()];
     for (i, b) in bones.iter().enumerate() {
-        let parent = b.parent.map(|p| world[p]).unwrap_or(Mat4::IDENTITY);
+        let parent = b
+            .parent
+            .and_then(|p| world.get(p).copied())
+            .unwrap_or(Mat4::IDENTITY);
         world[i] = parent * b.transform;
     }
     let bone = world.get(a.bone)?;
@@ -114,6 +117,14 @@ mod tests {
             parent,
             transform: Mat4::from_translation(Vec3::new(x, y, 0.0)),
         }
+    }
+
+    #[test]
+    fn out_of_range_bone_parent_does_not_panic() {
+        let bones = vec![bone(Some(99), 1.0, 2.0)];
+        let a = parse_attachments(&mdat(&[(0, "head", [0.0, 0.0])]));
+        let p = attachment_point(&bones, &a, "head").unwrap();
+        assert_eq!(p, Vec3::new(1.0, 2.0, 0.0));
     }
 
     #[test]

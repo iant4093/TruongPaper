@@ -61,6 +61,9 @@ pub struct WeVirtualFileSystem {
     /// Our own bundled stand-ins for stock effects and includes; consulted after `core_assets_dir`.
     pub bundled_assets_dir: Option<PathBuf>,
     pub builtin_virtual_files: HashMap<&'static str, &'static [u8]>,
+    /// `(root, canonical root)` pairs computed at mount, so opens do not canonicalize the root.
+    /// An entry is only used while its `root` still equals the current (public) field.
+    canonical_roots: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Alias used by the spec text.
@@ -105,16 +108,71 @@ fn open_file_asset(path: &Path) -> IoResult<VfsAsset<'static>> {
     Ok(VfsAsset::File(file, size))
 }
 
-/// Opens `root/rel` when it is a regular file whose canonical path stays inside the canonical
-/// `root`. `Ok(None)` means no such file; a symlink or junction that points outside `root` is
-/// `PermissionDenied`, so untrusted wallpaper folders cannot read arbitrary local files.
-fn open_contained(root: &Path, rel: &str) -> IoResult<Option<VfsAsset<'static>>> {
+/// `true` when `meta` describes a symlink, or on Windows any reparse point (junction, mount point).
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `true` when `root/rel` (or any directory on the way) is a link, so it needs the canonical check.
+/// `Err` means a component does not exist or cannot be inspected.
+fn path_has_link(root: &Path, rel: &str) -> IoResult<bool> {
+    let mut cur = root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        cur.push(comp);
+        if is_link(&std::fs::symlink_metadata(&cur)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Opens `root/rel` when it is a regular file that stays inside `root`. `Ok(None)` means no such
+/// file in this layer (including a path that cannot be canonicalized); a symlink or junction that
+/// points outside `root` is `PermissionDenied`, so untrusted wallpaper folders cannot read
+/// arbitrary local files.
+///
+/// Plain files (no link on the way, checked with `symlink_metadata`) are opened directly. Only
+/// linked paths are canonicalized, against `canonical_root` cached at mount.
+fn open_contained(
+    root: &Path,
+    canonical_root: Option<&Path>,
+    rel: &str,
+) -> IoResult<Option<VfsAsset<'static>>> {
     let candidate = root.join(rel);
+    match path_has_link(root, rel) {
+        Ok(false) => {
+            return match open_file_asset(&candidate) {
+                Ok(asset) if candidate.is_file() => Ok(Some(asset)),
+                _ => Ok(None),
+            };
+        }
+        Ok(true) => {}
+        Err(_) => return Ok(None),
+    }
     if !candidate.is_file() {
         return Ok(None);
     }
-    let real = candidate.canonicalize()?;
-    let real_root = root.canonicalize()?;
+    let Ok(real) = candidate.canonicalize() else {
+        return Ok(None);
+    };
+    let real_root = match canonical_root {
+        Some(r) => r.to_path_buf(),
+        None => match root.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        },
+    };
     if !real.starts_with(&real_root) {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
@@ -155,19 +213,43 @@ impl WeVirtualFileSystem {
             include_bytes!("shader_fallbacks/perspective.glsl"),
         );
 
-        Self {
+        let mut vfs = Self {
             wallpaper_dir,
             scene_pkg,
             gifscene_pkg,
             core_assets_dir,
             bundled_assets_dir: bundled_assets_dir().map(Path::to_path_buf),
             builtin_virtual_files,
-        }
+            canonical_roots: Vec::new(),
+        };
+        vfs.refresh_canonical_roots();
+        vfs
+    }
+
+    fn refresh_canonical_roots(&mut self) {
+        let roots = [
+            Some(self.wallpaper_dir.clone()),
+            Some(self.core_assets_dir.clone()),
+            self.bundled_assets_dir.clone(),
+        ];
+        self.canonical_roots = roots
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.canonicalize().ok().map(|c| (r, c)))
+            .collect();
+    }
+
+    fn canonical_root(&self, root: &Path) -> Option<&Path> {
+        self.canonical_roots
+            .iter()
+            .find(|(r, _)| r == root)
+            .map(|(_, c)| c.as_path())
     }
 
     /// Overrides the bundled-assets layer (tests and tools that do not use the global).
     pub fn with_bundled_assets_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.bundled_assets_dir = dir;
+        self.refresh_canonical_roots();
         self
     }
 
@@ -203,7 +285,11 @@ impl WeVirtualFileSystem {
         let rel = Self::sanitize_virtual_path(virtual_path)?;
 
         // Layer 1: loose file in the wallpaper directory.
-        if let Some(asset) = open_contained(&self.wallpaper_dir, &rel)? {
+        if let Some(asset) = open_contained(
+            &self.wallpaper_dir,
+            self.canonical_root(&self.wallpaper_dir),
+            &rel,
+        )? {
             return Ok(asset);
         }
 
@@ -222,13 +308,17 @@ impl WeVirtualFileSystem {
         }
 
         // Layer 4a: core Wallpaper Engine assets directory.
-        if let Some(asset) = open_contained(&self.core_assets_dir, &rel)? {
+        if let Some(asset) = open_contained(
+            &self.core_assets_dir,
+            self.canonical_root(&self.core_assets_dir),
+            &rel,
+        )? {
             return Ok(asset);
         }
 
         // Layer 4b: bundled clean-room core assets.
         if let Some(bundled) = &self.bundled_assets_dir {
-            if let Some(asset) = open_contained(bundled, &rel)? {
+            if let Some(asset) = open_contained(bundled, self.canonical_root(bundled), &rel)? {
                 return Ok(asset);
             }
         }
@@ -429,5 +519,47 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         let pkg = MappedPkg::open(&path).unwrap();
         assert!(pkg.read_entry("x.bin").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_contained_and_plain_files_skip_canonicalize() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new("links");
+        let wall = tmp.0.join("wall");
+        let outside = tmp.0.join("outside");
+        fs::create_dir_all(wall.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(wall.join("sub/a.txt"), b"plain").unwrap();
+        fs::write(wall.join("real.txt"), b"real").unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        symlink(outside.join("secret.txt"), wall.join("evil.txt")).unwrap();
+        symlink(&outside, wall.join("evildir")).unwrap();
+        symlink(wall.join("real.txt"), wall.join("inner.txt")).unwrap();
+
+        let vfs = WeVirtualFileSystem::mount(wall, tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("sub/a.txt").unwrap(), b"plain");
+        assert_eq!(vfs.read_bytes("inner.txt").unwrap(), b"real");
+        for p in ["evil.txt", "evildir/secret.txt"] {
+            let err = vfs.read_bytes(p).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::PermissionDenied, "{p}");
+        }
+        assert_eq!(
+            vfs.read_bytes("missing.txt").unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_link_falls_through_to_scene_pkg() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new("dangling");
+        let wall = tmp.0.join("wall");
+        fs::create_dir_all(&wall).unwrap();
+        fs::write(wall.join("scene.pkg"), build_pkg(&[("x.txt", b"from-pkg")])).unwrap();
+        symlink(tmp.0.join("nowhere"), wall.join("x.txt")).unwrap();
+        let vfs = WeVirtualFileSystem::mount(wall, tmp.0.join("core"));
+        assert_eq!(vfs.read_bytes("x.txt").unwrap(), b"from-pkg");
     }
 }

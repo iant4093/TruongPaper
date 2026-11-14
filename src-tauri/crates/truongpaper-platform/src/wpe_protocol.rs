@@ -30,12 +30,17 @@ impl WpeAssetSource for WeVirtualFileSystem {
 pub const MAX_RESPONSE_CHUNK: usize = 8 * 1024 * 1024;
 /// Largest non-media file served whole with `200` (scripts, pages, images, wasm).
 pub const MAX_FULL_RESPONSE: usize = 64 * 1024 * 1024;
+/// Largest audio/video file served whole with `200` when the client sent no `Range` header
+/// (`fetch` + `decodeAudioData`). Tauri's protocol API needs the whole body in memory, so this
+/// stays bounded; larger media falls back to a first-chunk `206`.
+pub const MAX_FULL_MEDIA_RESPONSE: usize = 256 * 1024 * 1024;
 
 /// Handles one `wpe://localhost/<path>` request against `vfs`.
 ///
 /// - `200 OK` with the full body when there is no (or a syntactically invalid) `Range` header.
-///   Audio and video larger than [`MAX_RESPONSE_CHUNK`] get a `206` for the first chunk instead,
-///   and other files larger than [`MAX_FULL_RESPONSE`] get `413`.
+///   Audio and video up to [`MAX_FULL_MEDIA_RESPONSE`] are served whole (a `fetch` cannot handle a
+///   partial `206`); larger media gets a `206` for the first chunk, and other files larger than
+///   [`MAX_FULL_RESPONSE`] get `413`. Chunking only happens for requests that sent `Range`.
 /// - `206 Partial Content` for a satisfiable `Range: bytes=...` header, at most
 ///   [`MAX_RESPONSE_CHUNK`] bytes per response.
 /// - `416 Range Not Satisfiable` (`Content-Range: bytes */total`) for a well-formed but
@@ -141,9 +146,9 @@ fn serve<V: WpeAssetSource + ?Sized>(
         // Malformed Range header: RFC 9110 says ignore it and serve the full representation.
     }
 
-    if total_len > MAX_RESPONSE_CHUNK && (mime.starts_with("video/") || mime.starts_with("audio/"))
-    {
-        // Never load a whole large media file: answer with the first chunk and let the player
+    let is_media = mime.starts_with("video/") || mime.starts_with("audio/");
+    if is_media && total_len > MAX_FULL_MEDIA_RESPONSE {
+        // Too large to hold in memory: answer with the first chunk and let the player
         // continue with `Range` requests.
         let end = MAX_RESPONSE_CHUNK - 1;
         let Ok(slice) = asset.read(0..end + 1) else {
@@ -158,7 +163,7 @@ fn serve<V: WpeAssetSource + ?Sized>(
             .body(Cow::Owned(slice))
             .expect("static 206 response headers are valid");
     }
-    if total_len > MAX_FULL_RESPONSE {
+    if !is_media && total_len > MAX_FULL_RESPONSE {
         return error_response(StatusCode::PAYLOAD_TOO_LARGE, b"Payload Too Large");
     }
     let Ok(bytes) = asset.read(0..total_len) else {
@@ -220,9 +225,17 @@ pub fn guess_mime_type(path: &Path) -> &'static str {
         Some("mp4" | "m4v") => "video/mp4",
         Some("webm") => "video/webm",
         Some("mov") => "video/quicktime",
-        Some("ogg" | "ogv") => "video/ogg",
+        Some("mkv") => "video/x-matroska",
+        Some("avi") => "video/x-msvideo",
+        Some("ogv") => "video/ogg",
+        Some("ogg" | "oga") => "audio/ogg",
+        Some("opus") => "audio/opus",
         Some("mp3") => "audio/mpeg",
-        Some("wav") => "audio/wav",
+        Some("wav" | "wave") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("m4a") => "audio/mp4",
+        Some("aac") => "audio/aac",
+        Some("weba") => "audio/webm",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -232,6 +245,12 @@ pub fn guess_mime_type(path: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("woff") => "font/woff",
         Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("eot") => "application/vnd.ms-fontobject",
+        Some("ico") => "image/x-icon",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -403,23 +422,19 @@ mod tests {
     }
 
     #[test]
-    fn large_media_without_range_gets_first_chunk_as_206() {
+    fn media_without_range_is_served_whole_with_200() {
         let vfs = big(MAX_RESPONSE_CHUNK + 1);
+        for p in ["/v.webm", "/a.mp3", "/a.flac"] {
+            let res = handle_wpe_protocol_request(&vfs, req(p, None));
+            assert_eq!(res.status(), StatusCode::OK, "{p}");
+            assert_eq!(res.body().len(), MAX_RESPONSE_CHUNK + 1);
+            assert!(res.headers().get(header::CONTENT_RANGE).is_none());
+        }
+        // Media above the whole-body limit falls back to a first-chunk 206.
+        let vfs = big(MAX_FULL_MEDIA_RESPONSE + 1);
         let res = handle_wpe_protocol_request(&vfs, req("/v.webm", None));
         assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(res.body().len(), MAX_RESPONSE_CHUNK);
-        assert_eq!(
-            hdr(&res, header::CONTENT_RANGE),
-            format!(
-                "bytes 0-{}/{}",
-                MAX_RESPONSE_CHUNK - 1,
-                MAX_RESPONSE_CHUNK + 1
-            )
-        );
-        // Exactly one chunk still returns the plain 200.
-        let vfs = big(MAX_RESPONSE_CHUNK);
-        let res = handle_wpe_protocol_request(&vfs, req("/v.webm", None));
-        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[test]
@@ -522,6 +537,13 @@ mod tests {
             ("v.M4V", "video/mp4"),
             ("v.mov", "video/quicktime"),
             ("v.ogv", "video/ogg"),
+            ("a.ogg", "audio/ogg"),
+            ("a.flac", "audio/flac"),
+            ("a.m4a", "audio/mp4"),
+            ("a.opus", "audio/opus"),
+            ("a.aac", "audio/aac"),
+            ("a.weba", "audio/webm"),
+            ("f.otf", "font/otf"),
             ("a.mp3", "audio/mpeg"),
             ("a.wav", "audio/wav"),
             ("i.jpeg", "image/jpeg"),

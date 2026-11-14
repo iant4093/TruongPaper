@@ -267,6 +267,20 @@ impl MacVideoDecoder {
     /// Returns `(width, height, stride)`. Returns `None` without touching AVFoundation while
     /// paused once a first frame was delivered.
     pub fn copy_latest_bgra_frame_into(&mut self, buf: &mut Vec<u8>) -> Option<(u32, u32, usize)> {
+        self.with_latest_bgra_frame(|width, height, stride, pixels| {
+            fill_pooled(buf, pixels);
+            (width, height, stride)
+        })
+    }
+
+    /// Runs `f(width, height, stride, pixels)` on the newest decoded frame without copying it:
+    /// `pixels` borrows the locked (IOSurface-backed) `CVPixelBuffer`, so `f` can upload straight
+    /// from it and must not keep the slice. Same `None` rules as
+    /// [`Self::copy_latest_bgra_frame_into`].
+    pub fn with_latest_bgra_frame<R>(
+        &mut self,
+        f: impl FnOnce(u32, u32, usize, &[u8]) -> R,
+    ) -> Option<R> {
         if self.paused && self.delivered_frame {
             return None;
         }
@@ -292,7 +306,7 @@ impl MacVideoDecoder {
             if buffer.is_null() {
                 return None;
             }
-            let frame = read_bgra_pixel_buffer(buffer, buf);
+            let frame = read_bgra_pixel_buffer(buffer, f);
             CVBufferRelease(buffer);
             if frame.is_some() {
                 self.delivered_frame = true;
@@ -398,14 +412,25 @@ fn fill_pooled(buf: &mut Vec<u8>, src: &[u8]) {
     buf.extend_from_slice(src);
 }
 
-/// Copies a non-planar BGRA `CVPixelBuffer` into `buf`; returns `(width, height, stride)`.
+/// Smallest byte length that covers every pixel of a BGRA buffer (the last row's padding is not
+/// needed), or `None` when the geometry is inconsistent with `data_size`.
+fn bgra_visible_len(width: usize, height: usize, stride: usize, data_size: usize) -> Option<usize> {
+    if width == 0 || height == 0 || stride < width.checked_mul(4)? {
+        return None;
+    }
+    let needed = stride.checked_mul(height - 1)?.checked_add(width * 4)?;
+    (data_size >= needed).then_some(needed)
+}
+
+/// Locks a non-planar BGRA `CVPixelBuffer` and hands its pixels to `f` as a borrowed slice (no
+/// copy); returns `f`'s result.
 ///
 /// # Safety
 /// `buffer` must be a valid `CVPixelBufferRef`.
-unsafe fn read_bgra_pixel_buffer(
+unsafe fn read_bgra_pixel_buffer<R>(
     buffer: *mut CVBuffer,
-    buf: &mut Vec<u8>,
-) -> Option<(u32, u32, usize)> {
+    f: impl FnOnce(u32, u32, usize, &[u8]) -> R,
+) -> Option<R> {
     if CVPixelBufferIsPlanar(buffer) != 0
         || CVPixelBufferGetPixelFormatType(buffer) != K_CV_PIXEL_FORMAT_TYPE_32BGRA
     {
@@ -419,24 +444,17 @@ unsafe fn read_bgra_pixel_buffer(
     let height = CVPixelBufferGetHeight(buffer);
     let stride = CVPixelBufferGetBytesPerRow(buffer);
     let base = CVPixelBufferGetBaseAddress(buffer) as *const u8;
-    let len = stride
-        .checked_mul(height)
-        .map(|n| n.min(CVPixelBufferGetDataSize(buffer)));
-    let frame = match len {
-        Some(len)
-            if !base.is_null()
-                && width > 0
-                && height > 0
-                && stride >= width * 4
-                && len >= stride * (height - 1) + width * 4 =>
-        {
-            fill_pooled(buf, std::slice::from_raw_parts(base, len));
-            Some((width as u32, height as u32, stride))
-        }
+    let result = match bgra_visible_len(width, height, stride, CVPixelBufferGetDataSize(buffer)) {
+        Some(len) if !base.is_null() => Some(f(
+            width as u32,
+            height as u32,
+            stride,
+            std::slice::from_raw_parts(base, len),
+        )),
         _ => None,
     };
     CVPixelBufferUnlockBaseAddress(buffer, K_CV_PIXEL_BUFFER_LOCK_READ_ONLY);
-    frame
+    result
 }
 
 #[cfg(test)]
@@ -453,6 +471,16 @@ mod tests {
         assert_eq!(clamp_video_volume(0.3), 0.3);
         assert_eq!(clamp_video_volume(2.0), 1.0);
         assert_eq!(clamp_video_volume(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn visible_len_skips_last_row_padding_and_rejects_bad_geometry() {
+        // 4 px wide, 2 rows, stride 32: the last row only needs 16 bytes.
+        assert_eq!(bgra_visible_len(4, 2, 32, 64), Some(48));
+        assert_eq!(bgra_visible_len(4, 2, 32, 47), None);
+        assert_eq!(bgra_visible_len(4, 2, 12, 64), None);
+        assert_eq!(bgra_visible_len(0, 2, 32, 64), None);
+        assert_eq!(bgra_visible_len(4, 0, 32, 64), None);
     }
 
     #[test]

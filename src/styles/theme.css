@@ -51,6 +51,15 @@ button svg { flex-shrink: 0; }
 .sidebar-spacer { flex: 1; min-height: 30px; }
 .workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .workspace-titlebar { min-height: 51px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #303030; flex-shrink: 0; }
+/* Windows 11 caption buttons: 46x32, flush with the window's top-right corner. */
+.caption-buttons { display: flex; align-self: flex-start; margin-right: -24px; margin-left: -4px; flex-shrink: 0; }
+.caption-button { width: 46px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: #e8e8e8; cursor: default; }
+.caption-button:hover { background: rgba(255,255,255,.08); }
+.caption-button:active { background: rgba(255,255,255,.05); color: #bdbdbd; }
+.caption-button:focus-visible { outline: 1px solid #bbb; outline-offset: -2px; }
+.caption-close { border-top-right-radius: 9px; }
+.caption-close:hover { background: #c42b1c; color: #fff; }
+.caption-close:active { background: #c84031; color: #f0d0cc; }
 .workspace-controls { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-secondary); }
 .display-select { max-width: 235px; }
 .display-select .dropdown-trigger { background: var(--surface-input); font-size: 12px; }

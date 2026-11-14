@@ -43,8 +43,15 @@ const NOT_RENDERABLE_RECHECK: Duration = Duration::from_secs(10);
 const MAX_IDLE_BETWEEN_FULL_TICKS: Duration = Duration::from_secs(30);
 /// Bound for queued manual notes when no scheduler is draining them (tests, early startup).
 const MAX_PENDING_MANUAL_NOTES: usize = 256;
-/// One rotation (apply, including the macOS web ready wait) may not stall the others longer.
+/// The tick waits at most this long for one rotation (apply, including the macOS web ready
+/// wait) so a slow display does not hold up the others. The rotation itself is never cancelled.
 const PLAN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a rotation waits for the per-monitor apply lock (a long manual apply holds it).
+const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// A failed or timed-out rotation is planned again after this delay.
+const RETRY_DELAY: Duration = Duration::from_secs(45);
+/// Retries of one rotation before the scheduler waits for the next interval.
+const MAX_RETRIES: u8 = 3;
 /// Pause before the supervisor restarts a scheduler loop that panicked.
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 
@@ -222,6 +229,10 @@ pub struct RotationScheduler {
     position_changes: Vec<(String, String, usize)>,
     /// Earliest instant at which [`Self::plan`] could have work again (`None` = nothing timed).
     next_wake: Option<Instant>,
+    /// Rotations that failed or timed out, planned again once due.
+    retries: Vec<(PlannedRotation, Instant)>,
+    /// Consecutive failures per monitor.
+    failures: HashMap<String, u8>,
 }
 
 impl RotationScheduler {
@@ -236,7 +247,30 @@ impl RotationScheduler {
             positions: HashMap::new(),
             position_changes: Vec::new(),
             next_wake: None,
+            retries: Vec::new(),
+            failures: HashMap::new(),
         }
+    }
+
+    /// A planned rotation failed or timed out: plan the same rotation again after
+    /// [`RETRY_DELAY`] (at most [`MAX_RETRIES`] times in a row).
+    pub fn note_failed(&mut self, plan: PlannedRotation, now: Instant) {
+        let count = self.failures.entry(plan.monitor_id.clone()).or_insert(0);
+        *count += 1;
+        self.retries
+            .retain(|(p, _)| p.monitor_id != plan.monitor_id);
+        if *count > MAX_RETRIES {
+            self.failures.remove(&plan.monitor_id);
+            return;
+        }
+        let due = now + RETRY_DELAY;
+        self.retries.push((plan, due));
+        self.next_wake = Some(self.next_wake.map_or(due, |n| n.min(due)));
+    }
+
+    /// A rotation of `monitor_id` went through: clears its failure count.
+    pub fn note_succeeded(&mut self, monitor_id: &str) {
+        self.failures.remove(monitor_id);
     }
 
     /// Loads persisted per-display playlist positions (call before the first [`Self::plan`]).
@@ -445,7 +479,29 @@ impl RotationScheduler {
             }
         }
 
-        let mut next: Option<Instant> = None;
+        // Failed rotations whose retry is due. A newer plan or a changed source supersedes them.
+        let mut waiting = Vec::new();
+        for (retry, due) in std::mem::take(&mut self.retries) {
+            let Some(m) = monitors.iter().find(|m| m.monitor_id == retry.monitor_id) else {
+                self.failures.remove(&retry.monitor_id);
+                continue;
+            };
+            if m.source != retry.source || out.iter().any(|p| p.monitor_id == retry.monitor_id) {
+                self.failures.remove(&retry.monitor_id);
+                continue;
+            }
+            if due <= now {
+                if m.renderable {
+                    out.push(retry);
+                } else {
+                    waiting.push((retry, now + NOT_RENDERABLE_RECHECK));
+                }
+            } else {
+                waiting.push((retry, due));
+            }
+        }
+        let mut next: Option<Instant> = waiting.iter().map(|(_, due)| *due).min();
+        self.retries = waiting;
         for m in monitors {
             let Some(s) = self.monitors.get(&m.monitor_id) else {
                 continue;
@@ -744,27 +800,58 @@ async fn run_tick(app: &AppHandle, scheduler: &mut RotationScheduler, live: &[St
             }
         }
     }
-    execute(app, plans, clone_photos).await;
+    for (plan, outcome) in execute(app, plans, clone_photos).await {
+        if outcome.failed {
+            scheduler.note_failed(plan, Instant::now());
+        } else {
+            scheduler.note_succeeded(&plan.monitor_id);
+        }
+    }
 }
 
-/// Runs the planned rotations of different monitors in parallel; each plan has its own
-/// timeout so a slow display does not delay the others.
-async fn execute(app: &AppHandle, plans: Vec<PlannedRotation>, clone_photos: bool) {
+/// What one planned rotation did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PlanOutcome {
+    /// The plan asks for the shared cloned-photo draw.
+    cloned_draw: bool,
+    /// The rotation failed, timed out or could not start; the scheduler retries it.
+    failed: bool,
+}
+
+const PLAN_FAILED: PlanOutcome = PlanOutcome {
+    cloned_draw: false,
+    failed: true,
+};
+
+/// Runs the planned rotations of different monitors in parallel. Each plan's wait is bounded so
+/// a slow display does not delay the others; the rotation itself keeps running in its own task.
+async fn execute(
+    app: &AppHandle,
+    plans: Vec<PlannedRotation>,
+    clone_photos: bool,
+) -> Vec<(PlannedRotation, PlanOutcome)> {
     let mut set = tokio::task::JoinSet::new();
     for plan in plans {
         let app = app.clone();
-        set.spawn(async move { run_plan_with_timeout(&app, plan, clone_photos).await });
+        set.spawn(async move {
+            let outcome = run_plan_with_timeout(&app, &plan, clone_photos).await;
+            (plan, outcome)
+        });
     }
+    let mut results = Vec::new();
     let mut cloned_photo_draw = false;
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok(draw) => cloned_photo_draw |= draw,
+            Ok((plan, outcome)) => {
+                cloned_photo_draw |= outcome.cloned_draw;
+                results.push((plan, outcome));
+            }
             Err(err) => tracing::warn!("rotation scheduler: a rotation task failed: {err}"),
         }
     }
     if cloned_photo_draw {
         let Some(photo) = app.try_state::<PhotoServiceState>() else {
-            return;
+            return results;
         };
         match tokio::time::timeout(PLAN_TIMEOUT, rotate_photo_next(app, &photo, None)).await {
             Ok(Ok(_)) => {}
@@ -774,35 +861,64 @@ async fn execute(app: &AppHandle, plans: Vec<PlannedRotation>, clone_photos: boo
             Err(_) => tracing::warn!("rotation scheduler: cloned photo rotation timed out"),
         }
     }
+    results
 }
 
-/// Returns true when the plan asks for the shared cloned-photo draw.
-async fn run_plan_with_timeout(app: &AppHandle, plan: PlannedRotation, clone_photos: bool) -> bool {
+/// Takes the monitor's apply lock (waiting is not part of the rotation's time limit), then runs
+/// the rotation in its own task and waits for it at most [`PLAN_TIMEOUT`].
+async fn run_plan_with_timeout(
+    app: &AppHandle,
+    plan: &PlannedRotation,
+    clone_photos: bool,
+) -> PlanOutcome {
     let id = plan.monitor_id.clone();
-    with_plan_timeout(&id, PLAN_TIMEOUT, execute_plan(app, plan, clone_photos)).await
+    let guard = match tokio::time::timeout(LOCK_WAIT_TIMEOUT, lock_monitor_apply(&id)).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("rotation scheduler: {id} stayed busy for {LOCK_WAIT_TIMEOUT:?}");
+            return PLAN_FAILED;
+        }
+    };
+    let (app, plan) = (app.clone(), plan.clone());
+    let task = tokio::spawn(async move {
+        let outcome = execute_plan(&app, plan, clone_photos).await;
+        drop(guard);
+        outcome
+    });
+    wait_bounded(&id, PLAN_TIMEOUT, task)
+        .await
+        .unwrap_or(PLAN_FAILED)
 }
 
-/// Bounds one plan; a timed-out plan counts as "no shared photo draw requested".
-async fn with_plan_timeout(
+/// Waits for a spawned rotation at most `limit`. On timeout the task is left running (never
+/// cancelled midway) and `None` is returned.
+async fn wait_bounded<T>(
     id: &str,
     limit: Duration,
-    plan: impl std::future::Future<Output = bool>,
-) -> bool {
-    match tokio::time::timeout(limit, plan).await {
-        Ok(draw) => draw,
+    mut task: tokio::task::JoinHandle<T>,
+) -> Option<T> {
+    match tokio::time::timeout(limit, &mut task).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(err)) => {
+            tracing::warn!("rotation scheduler: rotation of {id} failed: {err}");
+            None
+        }
         Err(_) => {
-            tracing::warn!("rotation scheduler: rotation of {id} timed out after {limit:?}");
-            false
+            tracing::warn!(
+                "rotation scheduler: rotation of {id} still running after {limit:?}; it keeps going"
+            );
+            None
         }
     }
 }
 
-async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -> bool {
+/// Runs one rotation; the caller holds the monitor's apply lock.
+async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -> PlanOutcome {
     let (Some(state), Some(photo)) = (
         app.try_state::<AppState>(),
         app.try_state::<PhotoServiceState>(),
     ) else {
-        return false;
+        return PLAN_FAILED;
     };
     let (state, photo) = (&*state, &*photo);
     tracing::debug!(
@@ -812,9 +928,8 @@ async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -
         p.action
     );
     let id = p.monitor_id.as_str();
-    // Same lock as `monitor_apply_wallpaper`; once held, a rotation planned from an older
-    // snapshot is dropped if the user changed the monitor's source in the meantime.
-    let _apply = lock_monitor_apply(id).await;
+    // A rotation planned from an older snapshot is dropped if the user changed the monitor's
+    // source in the meantime.
     let current = {
         let conn = state.db.lock();
         crate::db::monitor_sources(&conn).map(|mut s| s.remove(id))
@@ -823,11 +938,11 @@ async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -
         Ok(current) if planned_source_is_current(current.as_ref(), &p.source) => {}
         Ok(_) => {
             tracing::debug!("rotation scheduler: {id} changed source; rotation dropped");
-            return false;
+            return PlanOutcome::default();
         }
         Err(err) => {
             tracing::warn!("rotation scheduler: cannot re-read the source of {id}: {err}");
-            return false;
+            return PLAN_FAILED;
         }
     }
     let mut cloned_photo_draw = false;
@@ -846,13 +961,17 @@ async fn execute_plan(app: &AppHandle, p: PlannedRotation, clone_photos: bool) -
             playlist_id, item, ..
         } => show_playlist_item(app, state, photo, id, playlist_id, item, true).await,
     };
+    let failed = res.is_err();
     if let Err(err) = res {
         tracing::warn!(
             "rotation scheduler: {:?} rotation of {id} failed: {err}",
             p.trigger
         );
     }
-    cloned_photo_draw
+    PlanOutcome {
+        cloned_draw: cloned_photo_draw,
+        failed,
+    }
 }
 
 #[cfg(test)]
@@ -861,13 +980,90 @@ mod tests {
 
     #[tokio::test]
     async fn a_stuck_plan_times_out_without_blocking_the_others() {
-        let stuck = with_plan_timeout("a", Duration::from_millis(20), async {
-            std::future::pending::<bool>().await
-        });
-        let quick = with_plan_timeout("b", Duration::from_secs(5), async { true });
+        let stuck = wait_bounded(
+            "a",
+            Duration::from_millis(20),
+            tokio::spawn(std::future::pending::<bool>()),
+        );
+        let quick = wait_bounded("b", Duration::from_secs(5), tokio::spawn(async { true }));
         let (stuck, quick) = tokio::join!(stuck, quick);
-        assert!(!stuck);
-        assert!(quick);
+        assert_eq!(stuck, None);
+        assert_eq!(quick, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_rotation_is_not_cancelled() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&done);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(
+            wait_bounded("a", Duration::from_millis(10), task).await,
+            None
+        );
+        assert!(!done.load(Ordering::SeqCst));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(done.load(Ordering::SeqCst), "the rotation ran to the end");
+    }
+
+    fn retry_tick(id: &str) -> MonitorTick {
+        MonitorTick {
+            monitor_id: id.into(),
+            source: WallpaperSource::PhotoApi,
+            interval_secs: 0,
+            renderable: true,
+            playlist: None,
+        }
+    }
+
+    fn photo_plan(id: &str) -> PlannedRotation {
+        PlannedRotation {
+            monitor_id: id.into(),
+            source: WallpaperSource::PhotoApi,
+            trigger: RotationTrigger::Timer,
+            action: RotationAction::NextPhoto,
+        }
+    }
+
+    #[test]
+    fn a_failed_rotation_is_planned_again_after_the_delay() {
+        let t0 = Instant::now();
+        let mut s = RotationScheduler::new(0);
+        let monitors = [retry_tick("m")];
+        assert_eq!(s.plan(t0, &monitors, 0, false).len(), 1, "launch restore");
+        s.note_failed(photo_plan("m"), t0);
+        assert_eq!(s.next_wake(), Some(t0 + RETRY_DELAY));
+        assert!(s
+            .plan(t0 + Duration::from_secs(1), &monitors, 0, false)
+            .is_empty());
+        let retried = s.plan(t0 + RETRY_DELAY, &monitors, 0, false);
+        assert_eq!(retried, vec![photo_plan("m")]);
+        assert!(s.plan(t0 + RETRY_DELAY * 2, &monitors, 0, false).is_empty());
+    }
+
+    #[test]
+    fn retries_stop_after_the_limit_and_when_the_source_changes() {
+        let t0 = Instant::now();
+        let mut s = RotationScheduler::new(0);
+        for _ in 0..=MAX_RETRIES {
+            s.note_failed(photo_plan("m"), t0);
+        }
+        assert!(s.retries.is_empty(), "gave up after {MAX_RETRIES} retries");
+
+        s.note_failed(photo_plan("m"), t0);
+        let other = MonitorTick {
+            source: WallpaperSource::Workshop {
+                wallpaper_id: "1".into(),
+            },
+            ..retry_tick("m")
+        };
+        s.plan(t0, std::slice::from_ref(&other), 0, false);
+        assert!(s
+            .plan(t0 + RETRY_DELAY, std::slice::from_ref(&other), 0, false)
+            .is_empty());
+        assert!(s.retries.is_empty());
     }
 
     fn ws(id: &str) -> PlaylistItem {

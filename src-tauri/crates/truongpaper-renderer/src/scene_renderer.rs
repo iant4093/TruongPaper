@@ -1094,6 +1094,9 @@ pub struct SceneRenderer {
     textures: HashMap<String, GpuTexture>,
     /// Embedded MP4 `.tex` paths -> placeholder texture size.
     video_textures: HashMap<String, (u32, u32)>,
+    /// CPU-decoded `.tex` assets handed in by [`SceneRenderer::load_with_decoded`]; consumed by
+    /// `ensure_texture`.
+    predecoded: HashMap<String, Result<TexDecode, String>>,
     layers: Vec<Option<GpuLayer>>,
     /// Composition layer whose group each layer draws into (`None` = the scene).
     group_owner: Vec<Option<usize>>,
@@ -1301,6 +1304,119 @@ enum TexDecode {
         height: u32,
         resolution: Vec4,
     },
+}
+
+/// `.tex` assets decoded to CPU buffers without a GPU device; see [`predecode_textures`].
+#[derive(Default)]
+pub struct PredecodedTextures {
+    map: HashMap<String, Result<TexDecode, String>>,
+}
+
+impl PredecodedTextures {
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// Texture paths `SceneRenderer::load` will request for image, composition and particle layers
+/// (model and puppet textures are decoded on demand at load time).
+fn scene_texture_paths(vfs: &WeVirtualFileSystem, graph: &SceneGraph) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut add = |p: &str| {
+        if !p.is_empty() && !p.starts_with("_rt_") && seen.insert(p.to_string()) {
+            out.push(p.to_string());
+        }
+    };
+    for layer in &graph.layers {
+        match &layer.kind {
+            SceneLayerKind::Image { texture_paths, .. } => {
+                for p in texture_paths.iter().flatten() {
+                    add(p);
+                }
+            }
+            SceneLayerKind::Particle { spec, .. } => {
+                for entry in plan_draw_sets(spec) {
+                    let Some(pass) = vfs
+                        .read_string(&entry.material)
+                        .ok()
+                        .and_then(|s| MaterialFile::from_json_str(&s).ok())
+                        .and_then(|m| m.passes.into_iter().next())
+                    else {
+                        continue;
+                    };
+                    for slot in [0usize, 1] {
+                        // Slot 1 is only used by REFRACT particles; others never load it.
+                        if slot == 1 && pass.combos.get("REFRACT").copied().unwrap_or(0) == 0 {
+                            continue;
+                        }
+                        if let Some(Some(t)) = pass.textures.get(slot) {
+                            add(&material_texture_path(t));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(
+            layer.kind,
+            SceneLayerKind::Image { .. } | SceneLayerKind::Composition { .. }
+        ) {
+            let plan = EffectChainPlan::build(vfs, layer, &graph.user_props);
+            for pass in plan.passes() {
+                for b in pass.textures.values() {
+                    if let TextureBinding::Asset(p) = b {
+                        add(p);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Decodes the scene's `.tex` assets into CPU RGBA buffers. Needs no GPU, so it can run on a
+/// loader thread; pass the result to [`SceneRenderer::load_with_decoded`]. Decoding fans out
+/// over a few threads. `should_continue` is polled between textures so a stale load stops early.
+pub fn predecode_textures(
+    vfs: &WeVirtualFileSystem,
+    graph: &SceneGraph,
+    should_continue: &(dyn Fn() -> bool + Sync),
+) -> PredecodedTextures {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let paths = scene_texture_paths(vfs, graph);
+    let next = AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(HashMap::with_capacity(paths.len()));
+    let threads = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .clamp(1, 4)
+        .min(paths.len().max(1));
+    let work = || {
+        while should_continue() {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(path) = paths.get(i) else { break };
+            let decoded = vfs
+                .read_bytes(path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| decode_tex_file(&b));
+            if let Ok(mut map) = results.lock() {
+                map.insert(path.clone(), decoded);
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..threads {
+            scope.spawn(work);
+        }
+        work();
+    });
+    PredecodedTextures {
+        map: results.into_inner().unwrap_or_default(),
+    }
 }
 
 /// Largest edge of an embedded-video placeholder texture.
@@ -1652,6 +1768,7 @@ impl SceneRenderer {
             quad_indices,
             textures: HashMap::new(),
             video_textures: HashMap::new(),
+            predecoded: HashMap::new(),
             layers: Vec::new(),
             group_owner: Vec::new(),
             layer_outputs: HashMap::new(),
@@ -1960,10 +2077,17 @@ impl SceneRenderer {
         if self.textures.contains_key(path) {
             return true;
         }
-        let decoded = vfs
-            .read_bytes(path)
-            .map_err(|e| e.to_string())
-            .and_then(|b| decode_tex_file(&b));
+        let decoded = match self.predecoded.remove(path) {
+            Some(done) => done,
+            None => {
+                if !self.predecoded.is_empty() {
+                    tracing::debug!("texture {path} was not predecoded; decoding on this thread");
+                }
+                vfs.read_bytes(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| decode_tex_file(&b))
+            }
+        };
         match decoded {
             Ok(TexDecode::Image(d)) => {
                 let (texture, view) = upload_rgba(device, queue, path, d.width, d.height, &d.rgba);
@@ -2262,6 +2386,24 @@ impl SceneRenderer {
     /// textures or fonts). Deduplicated, at most 50 entries.
     pub fn diagnostics(&self) -> Vec<String> {
         self.diagnostics.to_vec()
+    }
+
+    /// Like [`Self::load`], but textures decoded ahead of time by [`predecode_textures`] (on a
+    /// worker thread) are uploaded instead of decoded here. Anything missing from `decoded` is
+    /// decoded on the calling thread, so the result is identical to `load`.
+    pub fn load_with_decoded(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &WeVirtualFileSystem,
+        graph: &SceneGraph,
+        decoded: PredecodedTextures,
+    ) -> Vec<String> {
+        self.predecoded = decoded.map;
+        let warnings = self.load(device, queue, vfs, graph);
+        // Free whatever the scene never asked for.
+        self.predecoded = HashMap::new();
+        warnings
     }
 
     /// Uploads textures, compiles every pass shader and allocates FBOs for `graph`. Returns

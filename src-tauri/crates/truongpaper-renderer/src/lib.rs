@@ -63,8 +63,8 @@ pub use scene_math::{
 };
 pub use scene_renderer::{
     composition_capture_matrix, layer_local_projection, layer_quad_vertices, pack_uniform_block,
-    texture_bind_group_layout_entries, FrameUniformInputs, LayerVertex, SceneRenderer,
-    UniformValues,
+    predecode_textures, texture_bind_group_layout_entries, FrameUniformInputs, LayerVertex,
+    PredecodedTextures, SceneRenderer, UniformValues,
 };
 pub use shader_preprocessor::{
     apply_fragment_texcoord_compatibility, apply_linked_varying_compatibility, builtin_uniform,

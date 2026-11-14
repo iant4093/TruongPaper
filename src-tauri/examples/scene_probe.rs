@@ -19,7 +19,9 @@ fn probe_spectrum(frame: u32) -> [f32; 64] {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("warn")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
         .with_writer(std::io::stderr)
         .init();
     pollster::block_on(render())
@@ -168,6 +170,32 @@ async fn render() -> anyhow::Result<()> {
     }
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = SceneRenderer::new(&device, &queue, fmt, runtime.graph().scene_size);
+    if std::env::var("PROBE_LOADTIME").is_ok() {
+        // Render-thread stall of a scene switch: `load` decodes on the calling thread, the new
+        // path decodes on a worker (`predecode_textures`) and only uploads here.
+        // The first load also pays one-time driver and shader-cache warm-up; the second is the
+        // like-for-like baseline for the predecoded load below.
+        renderer.load(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let t = std::time::Instant::now();
+        renderer.load(&device, &queue, &vfs, runtime.graph());
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let before = t.elapsed();
+        let t = std::time::Instant::now();
+        let pre = truongpaper_renderer::predecode_textures(&vfs, runtime.graph(), &|| true);
+        let worker = t.elapsed();
+        let n = pre.len();
+        let t = std::time::Instant::now();
+        renderer.load_with_decoded(&device, &queue, &vfs, runtime.graph(), pre);
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let after = t.elapsed();
+        eprintln!(
+            "LOADTIME render-thread before={:.1}ms after={:.1}ms worker-decode={:.1}ms textures={n}",
+            before.as_secs_f64() * 1e3,
+            after.as_secs_f64() * 1e3,
+            worker.as_secs_f64() * 1e3
+        );
+    }
     let warnings = renderer.load(&device, &queue, &vfs, runtime.graph());
     // Embedded MP4 textures stay white until the host pushes frames; the probe pushes the first
     // frame decoded with `ffmpeg` (when installed) so renders look like the running wallpaper.

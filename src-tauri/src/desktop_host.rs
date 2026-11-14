@@ -1595,6 +1595,18 @@ struct SceneState {
     diag: DiagState,
     /// `SceneGraph::render_epoch` at the last `SceneRenderer::load`.
     loaded_epoch: u64,
+    /// When the last property-triggered reload ran (for the debounce).
+    last_reload: Option<Instant>,
+    /// An epoch change is waiting for the debounce to elapse.
+    reload_pending: bool,
+}
+
+/// Minimum gap between property-triggered scene reloads.
+const PROPERTY_RELOAD_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// True when a property reload may run now.
+fn reload_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= PROPERTY_RELOAD_DEBOUNCE)
 }
 
 /// Diagnostics bookkeeping of one loaded scene.
@@ -1611,21 +1623,45 @@ struct DiagState {
 impl SceneState {
     /// Applies changed user properties: bound values and scripts update live; when a changed
     /// property feeds an effect / bloom binding (baked into GPU plans) the renderer reloads in
-    /// place (textures stay cached, so this is cheap compared to a scene restart).
+    /// place. Decoded textures stay on the GPU ([`SceneRenderer::reload`]) and reloads are
+    /// debounced, so dragging a slider does not rebuild the scene on every event.
     fn apply_properties(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, json: &str) {
         if let Err(err) = self.runtime.apply_user_properties(json) {
             tracing::warn!("scene {}: property update: {err}", self.desc.scene_file);
             return;
         }
+        self.flush_pending_reload(device, queue);
+    }
+
+    /// Runs the property reload when the graph changed and the debounce has elapsed. Returns
+    /// `true` while a reload is still waiting (the host keeps ticking until it ran).
+    fn flush_pending_reload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
         let epoch = self.runtime.graph().render_epoch();
-        if epoch != self.loaded_epoch {
-            self.loaded_epoch = epoch;
-            let warnings = self
-                .renderer
-                .load(device, queue, &self.vfs, self.runtime.graph());
-            self.runtime.add_diagnostics(self.renderer.diagnostics());
-            self.diag.load_warnings = warnings;
+        if epoch == self.loaded_epoch {
+            self.reload_pending = false;
+            return false;
         }
+        let now = Instant::now();
+        if !reload_due(self.last_reload, now) {
+            self.reload_pending = true;
+            return true;
+        }
+        self.reload_pending = false;
+        self.loaded_epoch = epoch;
+        self.last_reload = Some(now);
+        let warnings = self
+            .renderer
+            .reload(device, queue, &self.vfs, self.runtime.graph());
+        if std::env::var_os("TRUONGPAPER_PROBE_RELOAD").is_some() {
+            tracing::info!(
+                "scene {}: property reload took {:?}",
+                self.desc.scene_file,
+                now.elapsed()
+            );
+        }
+        self.runtime.add_diagnostics(self.renderer.diagnostics());
+        self.diag.load_warnings = warnings;
+        false
     }
 
     /// Load warnings plus whatever the scene runtime reports.
@@ -2537,6 +2573,8 @@ fn finish_scene_gpu(
     let loaded_epoch = runtime.graph().render_epoch();
     let mut state = SceneState {
         loaded_epoch,
+        last_reload: None,
+        reload_pending: false,
         wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
         desc: desc.clone(),
         runtime,
@@ -2946,6 +2984,8 @@ fn run_renderer(
                         scene.apply_properties(&gpu.device, &gpu.queue, changed_json);
                     }
                 }
+                // A debounced property reload still waiting: keep ticking until it ran.
+                animating |= scene.flush_pending_reload(&gpu.device, &gpu.queue);
             }
         }
         // One monitor per scene plays its sounds.
@@ -3028,6 +3068,24 @@ fn run_renderer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn property_reload_is_debounced() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(super::reload_due(None, now));
+        assert!(!super::reload_due(Some(now), now));
+        assert!(!super::reload_due(
+            Some(now),
+            now + Duration::from_millis(149)
+        ));
+        assert!(super::reload_due(
+            Some(now),
+            now + Duration::from_millis(150)
+        ));
+        // A clock that went backwards must not wedge the reload.
+        assert!(!super::reload_due(Some(now + Duration::from_secs(1)), now));
+    }
+
     #[test]
     fn scene_monitor_size_is_logical() {
         assert_eq!(super::scene_monitor_size(3456, 2234, 2.0), [1728.0, 1117.0]);

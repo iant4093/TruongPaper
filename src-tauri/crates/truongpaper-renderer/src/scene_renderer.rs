@@ -1145,6 +1145,8 @@ pub struct SceneRenderer {
     /// CPU-decoded `.tex` assets handed in by [`SceneRenderer::load_with_decoded`]; consumed by
     /// `ensure_texture`.
     predecoded: HashMap<String, Result<TexDecode, String>>,
+    /// Paths `ensure_texture` was asked for since the last load started; `reload` drops the rest.
+    used_textures: std::collections::HashSet<String>,
     layers: Vec<Option<GpuLayer>>,
     /// Composition layer whose group each layer draws into (`None` = the scene).
     group_owner: Vec<Option<usize>>,
@@ -1435,36 +1437,88 @@ pub fn predecode_textures(
     graph: &SceneGraph,
     should_continue: &(dyn Fn() -> bool + Sync),
 ) -> PredecodedTextures {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     let paths = scene_texture_paths(vfs, graph);
     let next = AtomicUsize::new(0);
+    let bytes = AtomicU64::new(0);
+    let big = AtomicBool::new(false);
     let results = std::sync::Mutex::new(HashMap::with_capacity(paths.len()));
-    let threads = std::thread::available_parallelism()
+    let max_threads = std::thread::available_parallelism()
         .map_or(2, |n| n.get())
         .clamp(1, 4)
         .min(paths.len().max(1));
-    let work = || {
+    // Any texture above ~16 MP: its decode is large, so run fewer at once.
+    let work = |limit: usize, id: usize| {
         while should_continue() {
+            if id >= limit && big.load(Ordering::Relaxed) {
+                break;
+            }
+            // Over budget: the rest decodes on the render thread when it is needed.
+            if bytes.load(Ordering::Relaxed) >= PREDECODE_BUDGET_BYTES {
+                break;
+            }
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(path) = paths.get(i) else { break };
             let decoded = vfs
                 .read_bytes(path)
                 .map_err(|e| e.to_string())
                 .and_then(|b| decode_tex_file(&b));
+            if let Ok(TexDecode::Image(d)) = &decoded {
+                bytes.fetch_add(d.rgba.len() as u64, Ordering::Relaxed);
+                if u64::from(d.width) * u64::from(d.height) > PREDECODE_BIG_PIXELS {
+                    big.store(true, Ordering::Relaxed);
+                }
+            }
             if let Ok(mut map) = results.lock() {
                 map.insert(path.clone(), decoded);
             }
         }
     };
     std::thread::scope(|scope| {
-        for _ in 1..threads {
-            scope.spawn(work);
+        for id in 1..max_threads {
+            let work = &work;
+            scope.spawn(move || work(PREDECODE_BIG_THREADS, id));
         }
-        work();
+        work(PREDECODE_BIG_THREADS, 0);
     });
     PredecodedTextures {
         map: results.into_inner().unwrap_or_default(),
     }
+}
+
+/// Total decoded RGBA the predecoder may hold before the rest is left to the render thread.
+const PREDECODE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+/// A texture above this many pixels switches predecoding to [`PREDECODE_BIG_THREADS`] threads.
+const PREDECODE_BIG_PIXELS: u64 = 16 * 1000 * 1000;
+const PREDECODE_BIG_THREADS: usize = 2;
+
+/// True when a script or user property can change the value after load (so a tint above 1 may
+/// appear later, which the 8-bit offscreen path clamps per pixel and the direct path cannot).
+fn tint_is_driven<T: Clone>(v: &truongpaper_we_formats::UserBoundValue<T>) -> bool {
+    v.script().is_some() || v.user_property_name().is_some()
+}
+
+/// Tint for a direct-drawn layer. The offscreen path stores 8-bit, which clamps; the direct path
+/// writes into an HDR target, so a script or property that pushes colour, brightness or alpha
+/// above 1 after load must be clamped here.
+fn direct_tint(color: Vec3, brightness: f32, alpha: f32) -> Vec4 {
+    (color * brightness)
+        .clamp(Vec3::ZERO, Vec3::ONE)
+        .extend(alpha.clamp(0.0, 1.0))
+}
+
+/// Copy size between two targets of possibly different extent (a budget-shrunk source).
+fn copy_extent(a: wgpu::Extent3d, b: wgpu::Extent3d) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: a.width.min(b.width),
+        height: a.height.min(b.height),
+        depth_or_array_layers: a.depth_or_array_layers.min(b.depth_or_array_layers),
+    }
+}
+
+/// Drops map entries whose key is not in `used`.
+fn retain_used<V>(map: &mut HashMap<String, V>, used: &std::collections::HashSet<String>) {
+    map.retain(|k, _| used.contains(k));
 }
 
 /// Largest edge of an embedded-video placeholder texture.
@@ -1817,6 +1871,7 @@ impl SceneRenderer {
             textures: HashMap::new(),
             video_textures: HashMap::new(),
             predecoded: HashMap::new(),
+            used_textures: std::collections::HashSet::new(),
             layers: Vec::new(),
             group_owner: Vec::new(),
             layer_outputs: HashMap::new(),
@@ -2122,6 +2177,7 @@ impl SceneRenderer {
         path: &str,
         warnings: &mut Vec<String>,
     ) -> bool {
+        self.used_textures.insert(path.to_string());
         if self.textures.contains_key(path) {
             return true;
         }
@@ -2463,11 +2519,43 @@ impl SceneRenderer {
         vfs: &WeVirtualFileSystem,
         graph: &SceneGraph,
     ) -> Vec<String> {
+        self.load_impl(device, queue, vfs, graph, false)
+    }
+
+    /// Reloads the same scene after a property change: like [`Self::load`], but decoded textures
+    /// stay on the GPU, so only shaders and targets are rebuilt. Textures the new graph no longer
+    /// asks for are dropped afterwards. Only valid for the scene (same `vfs`) that is loaded.
+    pub fn reload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &WeVirtualFileSystem,
+        graph: &SceneGraph,
+    ) -> Vec<String> {
+        let warnings = self.load_impl(device, queue, vfs, graph, true);
+        let used = std::mem::take(&mut self.used_textures);
+        retain_used(&mut self.textures, &used);
+        retain_used(&mut self.video_textures, &used);
+        self.used_textures = used;
+        warnings
+    }
+
+    fn load_impl(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &WeVirtualFileSystem,
+        graph: &SceneGraph,
+        keep_textures: bool,
+    ) -> Vec<String> {
         let mut warnings = Vec::new();
         let (w, h) = clamp_scene_size(device, graph.scene_size);
         // Free what the previous scene left behind; this scene reloads what it needs.
-        self.textures.clear();
-        self.video_textures.clear();
+        self.used_textures.clear();
+        if !keep_textures {
+            self.textures.clear();
+            self.video_textures.clear();
+        }
         self.fbo_bytes_left = MAX_FBO_BYTES;
         // The scene and full-frame targets count against the render-target budget too.
         self.fbo_bytes_left = self
@@ -2569,6 +2657,15 @@ impl SceneRenderer {
                         vfs,
                         layer,
                         plan.expect("image effect plan"),
+                        graph
+                            .scene
+                            .objects
+                            .get(layer.object_index)
+                            .is_some_and(|o| {
+                                tint_is_driven(&o.alpha)
+                                    || tint_is_driven(&o.brightness)
+                                    || tint_is_driven(&o.color)
+                            }),
                         &mut warnings,
                     )
                     .map(|l| GpuLayer::Effects(Box::new(l))),
@@ -3029,6 +3126,7 @@ impl SceneRenderer {
         plain_image_blend(plan)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn load_effect_layer(
         &mut self,
         device: &wgpu::Device,
@@ -3036,6 +3134,7 @@ impl SceneRenderer {
         vfs: &WeVirtualFileSystem,
         layer: &SceneLayer,
         plan: EffectChainPlan,
+        tint_driven: bool,
         warnings: &mut Vec<String>,
     ) -> Option<GpuEffectLayer> {
         warnings.extend(plan.warnings.iter().cloned());
@@ -3077,8 +3176,9 @@ impl SceneRenderer {
             self.ensure_composite_pipeline(device, fbo.format, BlendMode::Normal);
         }
 
-        let direct =
-            self.direct_draw_blend(vfs, layer, &plan, is_composition, fullscreen, samples_scene);
+        let direct = self
+            .direct_draw_blend(vfs, layer, &plan, is_composition, fullscreen, samples_scene)
+            .filter(|_| !tint_driven);
 
         // Phase 2 (immutable): targets, passes, bind groups.
         let mut targets = HashMap::new();
@@ -4138,9 +4238,9 @@ impl SceneRenderer {
                     model_inverse: Mat4::IDENTITY,
                     view_projection: local,
                 },
-                alpha: layer.alpha,
-                color: layer.color,
-                brightness: layer.brightness,
+                alpha: layer.alpha.clamp(0.0, 1.0),
+                color: layer.color.clamp(Vec3::ZERO, Vec3::ONE),
+                brightness: layer.brightness.clamp(0.0, 1.0),
                 ..base_values.clone()
             };
             Self::write_we_uniforms(queue, base, &values, None);
@@ -4158,7 +4258,7 @@ impl SceneRenderer {
                 0,
                 bytemuck::bytes_of(&SimpleUniforms::new(
                     matrices.model_view_projection,
-                    (layer.color * layer.brightness).extend(layer.alpha),
+                    direct_tint(layer.color, layer.brightness, layer.alpha),
                 )),
             );
             let pipeline = &self.composite_pipelines[&(HDR_FORMAT, blend)];
@@ -4477,7 +4577,7 @@ impl SceneRenderer {
                             encoder.copy_texture_to_texture(
                                 source.texture.as_image_copy(),
                                 output.texture.as_image_copy(),
-                                output.texture.size(),
+                                copy_extent(source.texture.size(), output.texture.size()),
                             );
                         }
                     }
@@ -4799,5 +4899,58 @@ mod hostile_size_tests {
         png.extend([8, 6, 0, 0, 0]);
         png.extend([0, 0, 0, 0]);
         assert!(decode_container_image(&png).is_err());
+    }
+}
+
+#[cfg(test)]
+mod round13_tests {
+    use super::*;
+
+    #[test]
+    fn copy_extent_takes_the_smaller_size() {
+        let a = wgpu::Extent3d {
+            width: 100,
+            height: 20,
+            depth_or_array_layers: 1,
+        };
+        let b = wgpu::Extent3d {
+            width: 50,
+            height: 40,
+            depth_or_array_layers: 1,
+        };
+        let e = copy_extent(a, b);
+        assert_eq!((e.width, e.height, e.depth_or_array_layers), (50, 20, 1));
+    }
+
+    #[test]
+    fn direct_tint_clamps_scripted_values() {
+        let t = direct_tint(Vec3::new(2.0, 0.5, -1.0), 2.0, 3.0);
+        assert_eq!(t, Vec4::new(1.0, 1.0, 0.0, 1.0));
+        let t = direct_tint(Vec3::new(0.5, 0.25, 1.0), 0.5, 0.5);
+        assert_eq!(t, Vec4::new(0.25, 0.125, 0.5, 0.5));
+    }
+
+    #[test]
+    fn tint_driven_by_script_or_user_property() {
+        use truongpaper_we_formats::UserBoundValue;
+        let plain: UserBoundValue<f32> = serde_json::from_str("1.0").unwrap();
+        let user: UserBoundValue<f32> =
+            serde_json::from_str(r#"{ "user": "bright", "value": 1.0 }"#).unwrap();
+        let script: UserBoundValue<f32> = serde_json::from_str(
+            r#"{ "script": "export function update(v){return v;}", "value": 1.0 }"#,
+        )
+        .unwrap();
+        assert!(!tint_is_driven(&plain));
+        assert!(tint_is_driven(&user));
+        assert!(tint_is_driven(&script));
+    }
+
+    #[test]
+    fn retain_used_drops_untouched_entries() {
+        let mut map: HashMap<String, u32> = [("a".into(), 1), ("b".into(), 2)].into();
+        let used: std::collections::HashSet<String> = ["b".to_string()].into();
+        retain_used(&mut map, &used);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("b"));
     }
 }

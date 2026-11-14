@@ -422,10 +422,25 @@ fn fallback_font_for(font: &FontVec, c: char) -> Option<&'static FontVec> {
     if !wants_fallback(c) || font.glyph_id(c).0 != 0 {
         return None;
     }
+    // A glyph no fallback has would otherwise read every fallback file again on each call.
+    static MISSING: std::sync::Mutex<Option<std::collections::HashSet<char>>> =
+        std::sync::Mutex::new(None);
+    if MISSING
+        .lock()
+        .is_ok_and(|m| m.as_ref().is_some_and(|set| set.contains(&c)))
+    {
+        return None;
+    }
     // Later fonts are only read when the earlier ones lack the glyph.
-    (0..CJK_FALLBACK_FONTS.len())
+    let found = (0..CJK_FALLBACK_FONTS.len())
         .filter_map(cjk_fallback_font)
-        .find(|f| f.glyph_id(c).0 != 0)
+        .find(|f| f.glyph_id(c).0 != 0);
+    if found.is_none() {
+        if let Ok(mut m) = MISSING.lock() {
+            m.get_or_insert_with(Default::default).insert(c);
+        }
+    }
+    found
 }
 
 /// Inputs that determine a rasterized bitmap.

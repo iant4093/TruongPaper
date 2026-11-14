@@ -397,14 +397,19 @@ const CJK_FALLBACK_FONTS: &[&str] = &[
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
 ];
 
-fn cjk_fallback_fonts() -> &'static [FontVec] {
-    static FONTS: std::sync::OnceLock<Vec<FontVec>> = std::sync::OnceLock::new();
-    FONTS.get_or_init(|| {
-        CJK_FALLBACK_FONTS
-            .iter()
-            .filter_map(|p| std::fs::read(p).ok().and_then(font_from_bytes))
-            .collect()
-    })
+/// The `idx`th fallback font, read from disk on first use and then shared. `None` when the
+/// file is missing or unreadable.
+fn cjk_fallback_font(idx: usize) -> Option<&'static FontVec> {
+    static FONTS: [std::sync::OnceLock<Option<FontVec>>; CJK_FALLBACK_FONTS.len()] =
+        [const { std::sync::OnceLock::new() }; CJK_FALLBACK_FONTS.len()];
+    FONTS
+        .get(idx)?
+        .get_or_init(|| {
+            std::fs::read(CJK_FALLBACK_FONTS[idx])
+                .ok()
+                .and_then(font_from_bytes)
+        })
+        .as_ref()
 }
 
 /// True for characters worth a fallback lookup (not whitespace, controls or ASCII).
@@ -417,7 +422,10 @@ fn fallback_font_for(font: &FontVec, c: char) -> Option<&'static FontVec> {
     if !wants_fallback(c) || font.glyph_id(c).0 != 0 {
         return None;
     }
-    cjk_fallback_fonts().iter().find(|f| f.glyph_id(c).0 != 0)
+    // Later fonts are only read when the earlier ones lack the glyph.
+    (0..CJK_FALLBACK_FONTS.len())
+        .filter_map(cjk_fallback_font)
+        .find(|f| f.glyph_id(c).0 != 0)
 }
 
 /// Inputs that determine a rasterized bitmap.
@@ -815,9 +823,23 @@ mod tests {
     }
 
     #[test]
+    fn fallback_fonts_are_lazy_and_shared() {
+        assert!(cjk_fallback_font(CJK_FALLBACK_FONTS.len()).is_none());
+        for i in 0..CJK_FALLBACK_FONTS.len() {
+            let (a, b) = (cjk_fallback_font(i), cjk_fallback_font(i));
+            assert_eq!(
+                a.map(|f| f as *const FontVec),
+                b.map(|f| f as *const FontVec)
+            );
+        }
+        // ASCII never triggers a fallback lookup.
+        assert!(!wants_fallback('a'));
+    }
+
+    #[test]
     fn cjk_text_falls_back_to_a_system_font() {
         assert!(!wants_fallback('a') && !wants_fallback(' ') && wants_fallback('\u{3042}'));
-        let Some(cjk) = cjk_fallback_fonts().first() else {
+        let Some(cjk) = (0..CJK_FALLBACK_FONTS.len()).find_map(cjk_fallback_font) else {
             return; // no CJK system font on this machine
         };
         if cjk.glyph_id('\u{3042}').0 == 0 {

@@ -104,6 +104,8 @@ impl ParticleSystemInstance {
         burst: bool,
     ) -> ParticleSystemInstance {
         let mut inst = ParticleSystemInstance::new_unwarmed((**file).clone());
+        static NEXT_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        inst.instance_seed = NEXT_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         inst.anchor = anchor;
         inst.draw_scale = self.draw_scale * spec.scale.x;
         inst.overrides = self.overrides;
@@ -119,6 +121,9 @@ impl ParticleSystemInstance {
     /// Spawns, moves and steps the child systems after this system's own step.
     pub(crate) fn step_children(&mut self, dt: f32, cursor: Vec3) {
         if self.groups.is_empty() {
+            // Nobody consumes the events; keep them from accumulating.
+            self.spawn_events.clear();
+            self.death_events.clear();
             return;
         }
         let spawns = std::mem::take(&mut self.spawn_events);
@@ -276,7 +281,13 @@ impl ParticleSystemInstance {
             let frame = sheet.map(|s| {
                 let n = s.frame_count().max(1);
                 if self.spec.random_frame {
-                    (random_frame_index(p.id, n), s)
+                    (
+                        random_frame_index(
+                            p.id ^ self.instance_seed.wrapping_mul(0x2545_f491_4f6c_dd1d),
+                            n,
+                        ),
+                        s,
+                    )
                 } else {
                     let t = (norm_age * self.spec.sequence_multiplier).rem_euclid(1.0);
                     (((t * n as f32) as usize).min(n - 1), s)
@@ -727,6 +738,22 @@ mod tests {
     }
 
     #[test]
+    fn leaf_systems_do_not_accumulate_events() {
+        let root = parse(
+            r#"{"maxcount":50,"renderer":[],
+                "emitter":[{"name":"sphererandom","rate":200,"distancemin":0,"distancemax":0}],
+                "initializer":[{"name":"lifetimerandom","min":0.1,"max":0.1}]}"#,
+        );
+        let mut sys = ParticleSystemInstance::new(root);
+        for _ in 0..100 {
+            sys.step(0.05, Vec3::ZERO);
+            sys.step_children(0.05, Vec3::ZERO);
+        }
+        assert!(sys.spawn_events.is_empty());
+        assert!(sys.death_events.is_empty());
+    }
+
+    #[test]
     fn non_finite_particles_are_killed() {
         let root = parse(
             r#"{"maxcount":10,"renderer":[],
@@ -766,5 +793,13 @@ mod random_frame_tests {
         }
         assert!(seen.iter().filter(|s| **s).count() >= 6);
         assert_eq!(random_frame_index(3, 1), 0);
+    }
+
+    #[test]
+    fn instance_seed_changes_the_frame_for_the_same_id() {
+        let mix = |seed: u64| 1u64 ^ seed.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        let picks: std::collections::HashSet<usize> =
+            (1..40).map(|s| random_frame_index(mix(s), 8)).collect();
+        assert!(picks.len() >= 5);
     }
 }

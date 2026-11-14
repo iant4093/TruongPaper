@@ -493,7 +493,13 @@ fn find_next_header(bytes: &[u8], from: usize) -> Option<usize> {
 /// to zero would otherwise fill the mesh with NaN).
 fn safe_inverse(m: &Mat4) -> Mat4 {
     let det = m.determinant();
-    if !det.is_finite() || det.abs() < 1e-12 {
+    // Relative to the column lengths (Hadamard's bound), so a small uniform scale is still
+    // invertible while a collapsed axis is not.
+    let bound: f32 = [m.x_axis, m.y_axis, m.z_axis, m.w_axis]
+        .iter()
+        .map(|c| c.length())
+        .product();
+    if !det.is_finite() || !bound.is_finite() || bound <= 0.0 || det.abs() < bound * 1e-6 {
         return Mat4::IDENTITY;
     }
     let inv = m.inverse();
@@ -858,6 +864,17 @@ mod resync_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_uniform_scale_is_still_inverted() {
+        let m = Mat4::from_scale(Vec3::splat(1e-4));
+        let inv = safe_inverse(&m);
+        assert!((inv.x_axis.x - 1e4).abs() < 1.0);
+        assert_eq!(
+            safe_inverse(&Mat4::from_scale(Vec3::new(1.0, 0.0, 1.0))),
+            Mat4::IDENTITY
+        );
+    }
 
     #[test]
     fn singular_bone_gives_finite_bind_offsets() {

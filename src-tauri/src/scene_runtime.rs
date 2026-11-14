@@ -568,6 +568,19 @@ impl SceneRuntime {
         }
     }
 
+    /// Brings back slots the breaker disabled: a property change may be what they were waiting
+    /// for, and a disabled slot otherwise stays off for the rest of the scene.
+    fn reenable_disabled_slots(&mut self) {
+        for (slot, value) in self.engine.reenable_disabled_slots() {
+            self.disabled_slots.retain(|s| *s != slot);
+            self.failed_slots.retain(|s| *s != slot);
+            if !self.registered_slots.contains(&slot) {
+                self.registered_slots.push(slot.clone());
+            }
+            self.slot_values.insert(slot, value);
+        }
+    }
+
     /// Forwards a desktop cursor event (`cursorMove/Down/Up/Click`) to every script.
     pub fn dispatch_cursor(
         &mut self,
@@ -594,6 +607,7 @@ impl SceneRuntime {
     pub fn apply_user_properties(&mut self, changed_json: &str) -> anyhow::Result<()> {
         let changed_json = plain_properties_json(changed_json);
         self.reapply_all = true;
+        self.reenable_disabled_slots();
         self.graph.apply_user_properties(&changed_json)?;
         // Instance-level `scriptproperties` bound to the changed properties.
         for slot in self.graph.property_scripts() {
@@ -1568,8 +1582,10 @@ mod tests {
         let mut rt = SceneRuntime::load(&t.vfs(), "scene.json", None, MONITOR).unwrap();
         rt.engine
             .set_error_disable_after(std::time::Duration::from_millis(30));
+        rt.engine.set_error_disable_min_frames(2);
         step(&mut rt);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        step(&mut rt);
+        step(&mut rt);
         step(&mut rt);
         assert_eq!(rt.script_slots().len(), 1, "{:?}", rt.script_slots());
         assert!(rt
@@ -1582,6 +1598,12 @@ mod tests {
         rt.apply_user_properties("{}").unwrap();
         step(&mut rt);
         assert_eq!(layer(&rt, "Still").transform.scale.x, 2.0);
+        // The disabled slot is re-enabled by the property change.
+        assert_eq!(rt.script_slots().len(), 2, "{:?}", rt.script_slots());
+        assert!(!rt
+            .diagnostics()
+            .iter()
+            .any(|d| d.contains("threw on every frame")));
     }
 
     #[test]

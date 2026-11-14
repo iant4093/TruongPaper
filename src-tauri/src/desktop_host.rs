@@ -262,6 +262,97 @@ pub fn next_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BACKOFF)
 }
 
+const SCENE_BLOCKED_MESSAGE: &str = "Scene disabled after repeated GPU errors or renderer crashes";
+/// Uncaptured wgpu errors of one scene within [`FAULT_WINDOW`] that mark it `load_failed`.
+const FAULT_ERROR_LIMIT: usize = 5;
+/// Window in which [`FAULT_ERROR_LIMIT`] errors count as "repeated".
+const FAULT_WINDOW: Duration = Duration::from_secs(10);
+/// Render-thread panics while one scene was active that mark it `load_failed`.
+const FAULT_PANIC_LIMIT: u32 = 2;
+
+/// Crash-loop guard: remembers which scene was being loaded or drawn, counts the GPU errors and
+/// render-thread panics it caused, and blocks it once it keeps doing so. Without it a scene that
+/// triggers a deterministic validation error is restored and reloaded after every restart of the
+/// renderer, which shows a black desktop in a loop.
+#[derive(Debug, Default)]
+pub struct FaultLedger {
+    /// Scene being loaded or drawn right now.
+    current: Option<String>,
+    errors: HashMap<String, Vec<Instant>>,
+    panics: HashMap<String, u32>,
+    blocked: HashSet<String>,
+    /// Blocked since the last [`Self::take_newly_blocked`].
+    fresh: Vec<String>,
+}
+
+impl FaultLedger {
+    pub fn set_current(&mut self, key: Option<&str>) {
+        if self.current.as_deref() != key {
+            self.current = key.map(str::to_owned);
+        }
+    }
+
+    pub fn is_blocked(&self, key: &str) -> bool {
+        self.blocked.contains(key)
+    }
+
+    fn block(&mut self, key: &str) {
+        if self.blocked.insert(key.to_string()) {
+            self.fresh.push(key.to_string());
+        }
+        self.errors.remove(key);
+    }
+
+    /// An uncaptured GPU error happened. Returns the scene it was blamed on when this blocked it.
+    pub fn note_error(&mut self, now: Instant) -> Option<String> {
+        let key = self.current.clone()?;
+        if self.blocked.contains(&key) {
+            return None;
+        }
+        let log = self.errors.entry(key.clone()).or_default();
+        log.retain(|t| now.saturating_duration_since(*t) < FAULT_WINDOW);
+        log.push(now);
+        if log.len() >= FAULT_ERROR_LIMIT {
+            self.block(&key);
+            return Some(key);
+        }
+        None
+    }
+
+    /// The render thread panicked. Returns the scene blamed when this blocked it.
+    pub fn note_panic(&mut self) -> Option<String> {
+        let key = self.current.take()?;
+        let n = self.panics.entry(key.clone()).or_insert(0);
+        *n += 1;
+        if *n >= FAULT_PANIC_LIMIT && !self.blocked.contains(&key) {
+            self.block(&key);
+            return Some(key);
+        }
+        None
+    }
+
+    pub fn take_newly_blocked(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fresh)
+    }
+}
+
+static SCENE_FAULTS: Mutex<Option<FaultLedger>> = Mutex::new(None);
+
+fn with_faults<R>(f: impl FnOnce(&mut FaultLedger) -> R) -> R {
+    f(SCENE_FAULTS.lock().get_or_insert_with(FaultLedger::default))
+}
+
+fn scene_blocked(desc: &SceneDescriptor) -> bool {
+    with_faults(|l| l.is_blocked(&scene_key(desc)))
+}
+
+/// Pixel size of the host scene target: finite, within `1..=MAX_SCENE_TARGET_DIMENSION`.
+/// (`f32::clamp` passes NaN through and `NaN as u32` is 0, which `create_texture` rejects.)
+fn scene_target_dimension(v: f32) -> u32 {
+    let v = if v.is_finite() { v } else { 1.0 };
+    v.clamp(1.0, MAX_SCENE_TARGET_DIMENSION).round() as u32
+}
+
 /// How an old and a new monitor layout differ (by monitor id).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GeometryDiff {
@@ -1380,6 +1471,12 @@ impl LatestGenerations {
     fn is_current(&self, monitor: &str, generation: u64) -> bool {
         self.0.lock().get(monitor).is_none_or(|g| *g == generation)
     }
+
+    /// Forgets monitors that are gone. A job still queued for one counts as current again
+    /// (unknown monitor); the host discards its result because the monitor no longer exists.
+    fn retain_monitors(&self, live: &[String]) {
+        self.0.lock().retain(|id, _| live.contains(id));
+    }
 }
 
 /// Frees big discarded values (stale scene loads) on a background thread so dropping them
@@ -1551,6 +1648,11 @@ impl SceneLoadWorker {
     /// Tells the worker which generation each monitor now wants.
     fn note_generation(&self, monitor: &str, generation: u64) {
         self.latest.note(monitor, generation);
+    }
+
+    /// Prunes the generation table to the monitors that still exist.
+    fn retain_monitors(&self, live: &[String]) {
+        self.latest.retain_monitors(live);
     }
 
     fn submit(&self, job: SceneJob) {
@@ -1908,6 +2010,31 @@ impl MonitorRenderer {
         self.config.width.max(1) as f32 / self.config.height.max(1) as f32
     }
 
+    /// Tells the crash-loop guard which scene this monitor is about to load or draw.
+    fn mark_current(&self) {
+        with_faults(|l| match &self.content {
+            Content::Scene(scene) => l.set_current(Some(&scene_key(&scene.desc))),
+            _ => l.set_current(None),
+        });
+    }
+
+    /// Drops the scene and shows the failure state (black surface plus the error card), as for
+    /// a scene that failed to load. The scene is not restored again.
+    fn fail_scene(&mut self, device: &wgpu::Device, rt: Option<&MonitorRuntime>, message: String) {
+        let had_scene = matches!(self.content, Content::Scene(_));
+        self.content = Content::None;
+        self.load_failed = true;
+        self.dirty = true;
+        self.pending_error = Some(WallpaperErrorPayload {
+            monitor_id: self.monitor_id.clone(),
+            wallpaper_id: rt.and_then(|r| r.wallpaper_id.clone()),
+            message,
+        });
+        if had_scene {
+            release_gpu_and_heap(device);
+        }
+    }
+
     /// (Re)loads the monitor content when the host generation changed.
     fn sync_content(
         &mut self,
@@ -1996,6 +2123,10 @@ impl MonitorRenderer {
                         return;
                     }
                 }
+                if scene_blocked(&desc) {
+                    self.fail_scene(device, rt, SCENE_BLOCKED_MESSAGE.into());
+                    return;
+                }
                 // The CPU stage runs on the worker; the old scene keeps rendering until the
                 // new one is ready (`finish_scene` swaps them).
                 self.awaiting_photo = Some(generation);
@@ -2062,6 +2193,11 @@ impl MonitorRenderer {
         }
         self.awaiting_photo = None;
         self.dirty = true;
+        if scene_blocked(&done.desc) {
+            discard(done);
+            self.fail_scene(device, rt, SCENE_BLOCKED_MESSAGE.into());
+            return;
+        }
         // Free the old scene before the GPU stage: keeping both held well over 1 GB for large
         // 4K scenes. The poll lets wgpu actually destroy its textures before the heap is trimmed.
         if matches!(self.content, Content::Scene(_)) {
@@ -2069,6 +2205,7 @@ impl MonitorRenderer {
             release_gpu_and_heap(device);
         }
         let desc = done.desc;
+        with_faults(|l| l.set_current(Some(&scene_key(&desc))));
         let loaded = done.result.and_then(|cpu| {
             finish_scene_gpu(device, queue, cpu, &desc, rt).map_err(|err| err.to_string())
         });
@@ -2488,14 +2625,14 @@ fn finish_scene_gpu(
     } = cpu;
     let scene_size = runtime.graph().scene_size;
     let (w, h) = (
-        scene_size.x.clamp(1.0, MAX_SCENE_TARGET_DIMENSION),
-        scene_size.y.clamp(1.0, MAX_SCENE_TARGET_DIMENSION),
+        scene_target_dimension(scene_size.x),
+        scene_target_dimension(scene_size.y),
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("desktop_scene_target"),
         size: wgpu::Extent3d {
-            width: w.round() as u32,
-            height: h.round() as u32,
+            width: w,
+            height: h,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -2547,7 +2684,7 @@ fn finish_scene_gpu(
         sample_view,
         view_id: next_view_id(),
         content_serial: next_view_id(),
-        aspect: w / h,
+        aspect: w as f32 / h as f32,
         sounds: None,
         sound_owner: false,
         sound_unavailable: false,
@@ -2606,11 +2743,21 @@ fn create_gpu(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> Op
         },
         None,
     )) {
-        Ok((device, queue)) => Some(Gpu {
-            adapter,
-            device,
-            queue,
-        }),
+        Ok((device, queue)) => {
+            // wgpu panics on an uncaptured error by default; log it and count it against the
+            // scene instead, so one bad pipeline cannot crash-loop the renderer.
+            device.on_uncaptured_error(Box::new(|err| {
+                tracing::error!("wgpu uncaptured error: {err}");
+                if let Some(key) = with_faults(|l| l.note_error(Instant::now())) {
+                    tracing::error!("scene {key} caused repeated GPU errors; disabling it");
+                }
+            }));
+            Some(Gpu {
+                adapter,
+                device,
+                queue,
+            })
+        }
         Err(err) => {
             tracing::warn!("wgpu device request failed: {err}");
             None
@@ -2662,7 +2809,12 @@ fn render_main(app: AppHandle, host: Arc<WallpaperHost>, settings: Arc<Mutex<App
             Ok(RunEnd::Shutdown) => break,
             Ok(RunEnd::SetupFailed) => tracing::warn!("desktop renderer setup failed"),
             Ok(RunEnd::DeviceLost) => tracing::warn!("wgpu device lost; recreating the renderer"),
-            Err(_) => tracing::error!("desktop render thread panicked; restarting it"),
+            Err(_) => {
+                tracing::error!("desktop render thread panicked; restarting it");
+                if let Some(key) = with_faults(FaultLedger::note_panic) {
+                    tracing::error!("scene {key} panicked the render thread twice; disabling it");
+                }
+            }
         }
         if started.elapsed() >= MAX_BACKOFF {
             backoff = INITIAL_BACKOFF;
@@ -2747,6 +2899,7 @@ fn run_renderer(
     let mut span_notified: HashSet<(String, u64)> = HashSet::new();
 
     let end = loop {
+        with_faults(|l| l.set_current(None));
         if host.is_shutting_down() {
             break RunEnd::Shutdown;
         }
@@ -2805,6 +2958,7 @@ fn run_renderer(
                 if !geoms.is_empty() {
                     let ids: Vec<String> = geoms.iter().map(|g| g.id.clone()).collect();
                     host.retain_monitors(&ids);
+                    scene_worker.retain_monitors(&ids);
                 }
                 // Displays that came back (or are new) lost their runtime: have the scheduler
                 // re-apply their persisted source so they are not left black.
@@ -2925,8 +3079,15 @@ fn run_renderer(
             }
         };
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
+        let newly_blocked = with_faults(FaultLedger::take_newly_blocked);
         for m in &mut monitors {
             let rt = rt_of(&m.monitor_id);
+            if let Content::Scene(scene) = &m.content {
+                if newly_blocked.contains(&scene_key(&scene.desc)) {
+                    m.fail_scene(&gpu.device, rt, SCENE_BLOCKED_MESSAGE.into());
+                }
+            }
+            m.mark_current();
             m.sync_content(
                 &gpu.device,
                 &gpu.queue,
@@ -2964,6 +3125,7 @@ fn run_renderer(
             let span = span_on
                 .then(|| span_transform(&geoms, &m.monitor_id))
                 .flatten();
+            m.mark_current();
             animating |= m.frame(
                 &gpu.device,
                 &gpu.queue,
@@ -3307,6 +3469,84 @@ mod tests {
             vec!["A"]
         );
         assert_eq!(GeometryDiff::between(&old, &old).unchanged.len(), old.len());
+    }
+
+    #[test]
+    fn latest_generations_forget_removed_monitors() {
+        let latest = LatestGenerations::default();
+        latest.note("A", 3);
+        latest.note("B", 4);
+        latest.retain_monitors(&["A".to_string()]);
+        assert!(latest.is_current("A", 3));
+        assert!(!latest.is_current("A", 2));
+        assert_eq!(latest.0.lock().len(), 1);
+    }
+
+    #[test]
+    fn scene_target_dimension_is_nan_safe() {
+        assert_eq!(scene_target_dimension(f32::NAN), 1);
+        assert_eq!(scene_target_dimension(f32::INFINITY), 1);
+        assert_eq!(scene_target_dimension(f32::NEG_INFINITY), 1);
+        assert_eq!(scene_target_dimension(-5.0), 1);
+        assert_eq!(scene_target_dimension(1919.6), 1920);
+        assert_eq!(
+            scene_target_dimension(1.0e9),
+            MAX_SCENE_TARGET_DIMENSION as u32
+        );
+    }
+
+    #[test]
+    fn repeated_gpu_errors_block_only_the_scene_that_caused_them() {
+        let mut l = FaultLedger::default();
+        let t0 = Instant::now();
+        // No scene active: errors are only logged.
+        assert_eq!(l.note_error(t0), None);
+        l.set_current(Some("bad"));
+        for i in 0..FAULT_ERROR_LIMIT - 1 {
+            assert_eq!(l.note_error(t0 + Duration::from_millis(i as u64)), None);
+        }
+        assert!(!l.is_blocked("bad"));
+        assert_eq!(
+            l.note_error(t0 + Duration::from_secs(1)).as_deref(),
+            Some("bad")
+        );
+        assert!(l.is_blocked("bad"));
+        assert!(!l.is_blocked("good"));
+        assert_eq!(l.take_newly_blocked(), ["bad"]);
+        assert!(l.take_newly_blocked().is_empty());
+        // Further errors of a blocked scene do not report it again.
+        assert_eq!(l.note_error(t0 + Duration::from_secs(2)), None);
+    }
+
+    #[test]
+    fn spread_out_gpu_errors_do_not_block() {
+        let mut l = FaultLedger::default();
+        l.set_current(Some("s"));
+        let t0 = Instant::now();
+        for i in 0..20u64 {
+            let at = t0 + FAULT_WINDOW * (i as u32) + Duration::from_secs(1);
+            assert_eq!(l.note_error(at), None);
+        }
+        assert!(!l.is_blocked("s"));
+    }
+
+    #[test]
+    fn a_scene_that_panics_the_render_thread_twice_is_blocked() {
+        let mut l = FaultLedger::default();
+        // A panic with no scene active blames nobody.
+        assert_eq!(l.note_panic(), None);
+        l.set_current(Some("crashy"));
+        assert_eq!(l.note_panic(), None);
+        assert!(!l.is_blocked("crashy"));
+        // The restart reloads the same scene, which panics again.
+        l.set_current(Some("crashy"));
+        assert_eq!(l.note_panic().as_deref(), Some("crashy"));
+        assert!(l.is_blocked("crashy"));
+        assert_eq!(l.take_newly_blocked(), ["crashy"]);
+        // Other scenes keep their own count.
+        l.set_current(Some("other"));
+        assert_eq!(l.note_panic(), None);
+        assert!(!l.is_blocked("other"));
     }
 
     #[test]

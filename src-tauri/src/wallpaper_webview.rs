@@ -288,9 +288,61 @@ pub fn plan_os_suspend(windows: &[(String, bool, bool, bool)]) -> Vec<(String, b
         .collect()
 }
 
+/// How often windows that should be awake get `Resume` + `SetIsVisible(true)` again (the safety
+/// net for a suspend that raced with an uncover or failed half way).
+const REASSERT_INTERVAL: Duration = Duration::from_secs(15);
+/// A suspend that was not confirmed is not requested again for this long.
+const SUSPEND_RETRY: Duration = Duration::from_secs(15);
+
+/// Labels of loaded windows that must not be suspended or hidden. Input is
+/// `(label, loaded, wanted)` where `wanted` is [`os_suspend_wanted`].
+pub fn plan_reassert(windows: &[(String, bool, bool)]) -> Vec<String> {
+    windows
+        .iter()
+        .filter(|(_, loaded, wanted)| *loaded && !*wanted)
+        .map(|(label, _, _)| label.clone())
+        .collect()
+}
+
+/// `true` when a suspend may be requested: none is pending or the retry delay has passed.
+pub fn suspend_gate_open(not_before: Option<Instant>, now: Instant) -> bool {
+    not_before.is_none_or(|t| now >= t)
+}
+
+/// Per window: sequence number of the last suspend / resume request (a late completion of an
+/// older request is ignored) and the earliest time the next suspend may be requested.
+type SuspendGate = (u64, Option<Instant>);
+static SUSPEND_GATE: LazyLock<Mutex<HashMap<String, SuspendGate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether a suspend request for `label` may go out now.
+fn suspend_allowed(label: &str) -> bool {
+    let gate = SUSPEND_GATE.lock();
+    suspend_gate_open(gate.get(label).and_then(|g| g.1), Instant::now())
+}
+
+/// Registers a new request for `label` and returns its sequence number. A suspend closes the gate
+/// until its completion (or [`SUSPEND_RETRY`]); a resume opens it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn next_suspend_seq(label: &str, suspend: bool) -> u64 {
+    let mut gate = SUSPEND_GATE.lock();
+    let entry = gate.entry(label.to_string()).or_insert((0, None));
+    entry.0 += 1;
+    entry.1 = suspend.then(|| Instant::now() + SUSPEND_RETRY);
+    entry.0
+}
+
+/// Whether `seq` is still the newest request for `label`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_latest_suspend(label: &str, seq: u64) -> bool {
+    SUSPEND_GATE.lock().get(label).is_some_and(|g| g.0 == seq)
+}
+
 /// Suspends (`true`) or resumes (`false`) the WebView2 of `label`. WebView2 only suspends a hidden
-/// webview, so it is hidden first and shown again after the resume. Other platforms: no-op (the
-/// JS pause is all that is applied there).
+/// webview, so it is hidden first and shown again after the resume. Requests for one window go
+/// through `with_webview` in order (main thread), each tagged with a sequence number so a late
+/// `TrySuspend` completion cannot overwrite the state of a newer resume. The completion callback
+/// records `os_suspended`. Other platforms: no-op (the JS pause is all that is applied there).
 #[cfg(target_os = "windows")]
 fn set_os_suspended(app: &AppHandle, label: &str, suspend: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
@@ -300,22 +352,41 @@ fn set_os_suspended(app: &AppHandle, label: &str, suspend: bool) {
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
+    let seq = next_suspend_seq(label, suspend);
+    let name = label.to_string();
     let result = window.with_webview(move |webview| unsafe {
         let controller = webview.controller();
         let Ok(core) = controller.CoreWebView2() else {
+            tracing::debug!("webview {name}: CoreWebView2 unavailable (suspend={suspend})");
             return;
         };
         let Ok(core3) = core.cast::<ICoreWebView2_3>() else {
+            tracing::debug!("webview {name}: ICoreWebView2_3 unavailable (suspend={suspend})");
             return;
         };
         if suspend {
-            let _ = controller.SetIsVisible(false);
-            let handler =
-                TrySuspendCompletedHandler::create(Box::new(|_result, _suspended| Ok(())));
-            let _ = core3.TrySuspend(&handler);
+            let hidden = controller.SetIsVisible(false);
+            let done_name = name.clone();
+            let handler = TrySuspendCompletedHandler::create(Box::new(move |result, suspended| {
+                let ok = result.is_ok() && suspended;
+                tracing::debug!(
+                    "webview {done_name}: TrySuspend completed (ok={ok}, result={result:?})"
+                );
+                if is_latest_suspend(&done_name, seq) {
+                    if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == done_name) {
+                        w.os_suspended = ok;
+                    }
+                }
+                Ok(())
+            }));
+            let started = core3.TrySuspend(&handler);
+            tracing::debug!(
+                "webview {name}: SetIsVisible(false)={hidden:?} TrySuspend={started:?}"
+            );
         } else {
-            let _ = core3.Resume();
-            let _ = controller.SetIsVisible(true);
+            let resumed = core3.Resume();
+            let shown = controller.SetIsVisible(true);
+            tracing::debug!("webview {name}: Resume={resumed:?} SetIsVisible(true)={shown:?}");
         }
     });
     if let Err(err) = result {
@@ -879,6 +950,7 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
     let mut display_check_at: Option<Instant> = None;
     let mut last_epoch = u64::MAX;
     let mut last_suspended = false;
+    let mut reassert_at = Instant::now();
 
     while !host.is_shutting_down() {
         let epoch = host.epoch();
@@ -970,11 +1042,22 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
             }
 
             for (label, suspend) in suspend_plan.iter().filter(|(_, s)| *s) {
+                // A suspend that was not confirmed yet (or failed) is retried after a delay,
+                // not on every pass.
+                if cfg!(target_os = "windows") && !suspend_allowed(label) {
+                    continue;
+                }
                 set_os_suspended(&app, label, *suspend);
+                if !cfg!(target_os = "windows") {
+                    if let Some(w) = WINDOWS.lock().values_mut().find(|w| &w.label == label) {
+                        w.os_suspended = true;
+                    }
+                }
             }
-            for (label, suspend) in &suspend_plan {
+            // A resume is recorded at once; a suspend is recorded by its completion callback.
+            for (label, _) in suspend_plan.iter().filter(|(_, s)| !*s) {
                 if let Some(w) = WINDOWS.lock().values_mut().find(|w| &w.label == label) {
-                    w.os_suspended = *suspend;
+                    w.os_suspended = false;
                 }
             }
 
@@ -1007,6 +1090,32 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
         if display_check_at.is_none_or(|t| t.elapsed() >= GEOMETRY_REFRESH) {
             follow_display_changes(&app);
             display_check_at = Some(Instant::now());
+        }
+
+        // 3c. Windows safety net: a suspend that raced with an uncover (or a failed
+        // `TrySuspend` after the page was hidden) must not leave the wallpaper black.
+        if cfg!(target_os = "windows") && reassert_at.elapsed() >= REASSERT_INTERVAL {
+            reassert_at = Instant::now();
+            let windows: Vec<(String, bool, bool)> = WINDOWS
+                .lock()
+                .iter()
+                .map(|(id, w)| {
+                    let policy = host
+                        .monitor(id)
+                        .map_or(MonitorPlaybackPolicy::Playing, |rt| rt.policy);
+                    (
+                        w.label.clone(),
+                        w.loaded,
+                        os_suspend_wanted(policy, suspended),
+                    )
+                })
+                .collect();
+            for label in plan_reassert(&windows) {
+                set_os_suspended(&app, &label, false);
+                if let Some(w) = WINDOWS.lock().values_mut().find(|w| w.label == label) {
+                    w.os_suspended = false;
+                }
+            }
         }
 
         let playing = |id: &str| !suspended && host.monitor_should_render(id);
@@ -1370,6 +1479,35 @@ mod tests {
         assert!(os_suspend_wanted(Playing, true));
         assert!(!os_suspend_wanted(Playing, false));
         assert!(!os_suspend_wanted(PausedBattery, false));
+    }
+
+    #[test]
+    fn reassert_targets_loaded_windows_that_should_be_awake() {
+        let windows = [
+            ("a".to_string(), true, false),
+            ("b".to_string(), true, true),
+            ("c".to_string(), false, false),
+        ];
+        assert_eq!(plan_reassert(&windows), ["a"]);
+    }
+
+    #[test]
+    fn suspend_requests_are_sequenced_and_retried_after_a_delay() {
+        let label = "seq-test-window";
+        let first = next_suspend_seq(label, true);
+        assert!(is_latest_suspend(label, first));
+        assert!(!suspend_allowed(label), "a pending suspend closes the gate");
+        let resume = next_suspend_seq(label, false);
+        assert!(
+            !is_latest_suspend(label, first),
+            "a late completion is ignored"
+        );
+        assert!(is_latest_suspend(label, resume));
+        assert!(suspend_allowed(label), "a resume opens the gate");
+        let now = Instant::now();
+        assert!(suspend_gate_open(None, now));
+        assert!(!suspend_gate_open(Some(now + SUSPEND_RETRY), now));
+        assert!(suspend_gate_open(Some(now), now + SUSPEND_RETRY));
     }
 
     #[test]

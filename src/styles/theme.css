@@ -52,7 +52,10 @@ button svg { flex-shrink: 0; }
 .workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .workspace-titlebar { min-height: 51px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #303030; flex-shrink: 0; }
 /* Windows 11 caption buttons: 46x32, flush with the window's top-right corner. */
-.caption-buttons { display: flex; align-self: flex-start; margin-right: -24px; margin-left: -4px; flex-shrink: 0; }
+.caption-buttons { display: flex; align-self: flex-start; margin-right: -24px; margin-left: auto; flex-shrink: 0; }
+/* Windows: display picker and Current wallpaper sit together on the left; the brand starts at the top. */
+.windows-caption .workspace-titlebar { justify-content: flex-start; }
+.windows-caption .app-brand { height: 51px; padding-top: 0; padding-bottom: 0; margin-bottom: 14px; flex-shrink: 0; }
 .caption-button { width: 46px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: #e8e8e8; cursor: default; }
 .caption-button:hover { background: rgba(255,255,255,.08); }
 .caption-button:active { background: rgba(255,255,255,.05); color: #bdbdbd; }

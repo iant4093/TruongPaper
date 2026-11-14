@@ -168,14 +168,15 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className={`app-window-frame studio-shell${nativeMacTitlebar ? ' native-titlebar' : ''}`}>
+    <div className={`app-window-frame studio-shell${nativeMacTitlebar ? ' native-titlebar' : ''}${windowsCaption ? ' windows-caption' : ''}`}>
       <Suspense fallback={null}>
         {authOpen && <SteamAuthModal />}
         {previewOpen && <WorkshopPreviewModal />}
       </Suspense>
       <FeedbackHost floatingToasts={false} />
       <aside className="app-sidebar">
-        <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && !windowsCaption && <WindowControls />}</div>
+        {/* Windows keeps its window buttons top-right, so the sidebar needs no title bar row. */}
+        {!windowsCaption && <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && <WindowControls />}</div>}
         <div className="app-brand" data-tauri-drag-region><img src="/app-icon.png" width={23} height={23} alt="" /><span>TruongPaper</span></div>
         <nav aria-label="Studio views" className="sidebar-nav">
           {STUDIO_TABS.filter(([key]) => key !== 'settings').map(navButton)}

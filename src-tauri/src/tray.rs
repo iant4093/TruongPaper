@@ -148,46 +148,191 @@ fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
         return;
     }
 
-    let scale_factor = popover.scale_factor().unwrap_or(1.0);
-    let win_size: PhysicalSize<u32> = popover.outer_size().unwrap_or_else(|_| {
-        PhysicalSize::new((360.0 * scale_factor) as u32, (480.0 * scale_factor) as u32)
-    });
-
+    // The hidden popover's own monitor and scale say nothing about where the tray is: use the
+    // monitor under the icon (its DPI, bounds and work area).
+    let fallback_scale = popover.scale_factor().unwrap_or(1.0);
     let (icon_x, icon_y) = match tray_rect.position {
         Position::Physical(p) => (p.x as f64, p.y as f64),
-        Position::Logical(l) => (l.x * scale_factor, l.y * scale_factor),
+        Position::Logical(l) => (l.x * fallback_scale, l.y * fallback_scale),
     };
     let (icon_w, icon_h) = match tray_rect.size {
         tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
-        tauri::Size::Logical(l) => (l.width * scale_factor, l.height * scale_factor),
+        tauri::Size::Logical(l) => (l.width * fallback_scale, l.height * fallback_scale),
     };
-
-    let mut target_x = (icon_x + (icon_w / 2.0) - (win_size.width as f64 / 2.0)).round() as i32;
-
-    let margin_px = (6.0 * scale_factor).round() as i32;
-    let mut target_y = if cfg!(target_os = "macos") {
-        (icon_y + icon_h).round() as i32 + margin_px
-    } else {
-        icon_y.round() as i32 - (win_size.height as i32) - margin_px
+    let monitor = app
+        .monitor_from_point(icon_x + icon_w / 2.0, icon_y + icon_h / 2.0)
+        .ok()
+        .flatten()
+        .or_else(|| popover.current_monitor().ok().flatten());
+    let scale = monitor
+        .as_ref()
+        .map(|m| m.scale_factor())
+        .unwrap_or(fallback_scale);
+    let popover_size = PhysicalSize::new(
+        (POPOVER_WIDTH * scale).round() as u32,
+        (POPOVER_HEIGHT * scale).round() as u32,
+    );
+    let _ = popover.set_size(tauri::Size::Physical(popover_size));
+    let (target_x, target_y) = match &monitor {
+        Some(m) => {
+            let (mp, ms) = (m.position(), m.size());
+            let wa = m.work_area();
+            place_popover(
+                IRect::new(icon_x, icon_y, icon_w, icon_h),
+                (popover_size.width as f64, popover_size.height as f64),
+                IRect::new(mp.x as f64, mp.y as f64, ms.width as f64, ms.height as f64),
+                IRect::new(
+                    wa.position.x as f64,
+                    wa.position.y as f64,
+                    wa.size.width as f64,
+                    wa.size.height as f64,
+                ),
+                6.0 * scale,
+            )
+        }
+        None => (
+            (icon_x + icon_w / 2.0 - popover_size.width as f64 / 2.0).round() as i32,
+            (icon_y - popover_size.height as f64).round() as i32,
+        ),
     };
-
-    if let Ok(Some(monitor)) = popover.current_monitor() {
-        let mon_pos = monitor.position();
-        let mon_size = monitor.size();
-        let min_x = mon_pos.x + margin_px;
-        let max_x = mon_pos.x + (mon_size.width as i32) - (win_size.width as i32) - margin_px;
-        let min_y = mon_pos.y + margin_px;
-        let max_y = mon_pos.y + (mon_size.height as i32) - (win_size.height as i32) - margin_px;
-
-        target_x = target_x.clamp(min_x, max_x.max(min_x));
-        target_y = target_y.clamp(min_y, max_y.max(min_y));
-    }
 
     let _ = popover.set_position(Position::Physical(PhysicalPosition::new(
         target_x, target_y,
     )));
     let _ = popover.show();
     let _ = popover.set_focus();
+}
+
+/// Popover size in logical points (matches `tauri.conf.json`).
+const POPOVER_WIDTH: f64 = 360.0;
+const POPOVER_HEIGHT: f64 = 480.0;
+
+/// A physical-pixel rectangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct IRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl IRect {
+    fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
+        Self { x, y, w, h }
+    }
+    fn right(&self) -> f64 {
+        self.x + self.w
+    }
+    fn bottom(&self) -> f64 {
+        self.y + self.h
+    }
+}
+
+/// Top-left of the popover: next to the tray icon on the inner side of the taskbar, which may
+/// be at the bottom, top, left or right (found by comparing the work area with the monitor),
+/// kept inside the work area so it never covers the taskbar. The macOS menu bar is a top bar.
+fn place_popover(
+    icon: IRect,
+    size: (f64, f64),
+    monitor: IRect,
+    work: IRect,
+    margin: f64,
+) -> (i32, i32) {
+    let (w, h) = size;
+    let (cx, cy) = (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0);
+    // The edge the taskbar takes room from; with an auto-hidden taskbar (work area equals the
+    // monitor) the nearest monitor edge to the icon.
+    #[derive(PartialEq)]
+    enum Edge {
+        Top,
+        Bottom,
+        Left,
+        Right,
+    }
+    let edge = if work.y > monitor.y {
+        Edge::Top
+    } else if work.bottom() < monitor.bottom() {
+        Edge::Bottom
+    } else if work.x > monitor.x {
+        Edge::Left
+    } else if work.right() < monitor.right() {
+        Edge::Right
+    } else {
+        let d = [
+            (cy - monitor.y, 0),
+            (monitor.bottom() - cy, 1),
+            (cx - monitor.x, 2),
+            (monitor.right() - cx, 3),
+        ];
+        match d.iter().min_by(|a, b| a.0.total_cmp(&b.0)).map(|d| d.1) {
+            Some(0) => Edge::Top,
+            Some(2) => Edge::Left,
+            Some(3) => Edge::Right,
+            _ => Edge::Bottom,
+        }
+    };
+    let (x, y) = match edge {
+        Edge::Bottom => (cx - w / 2.0, work.bottom().min(icon.y) - h - margin),
+        Edge::Top => (cx - w / 2.0, work.y.max(icon.bottom()) + margin),
+        Edge::Left => (work.x.max(icon.right()) + margin, cy - h / 2.0),
+        Edge::Right => (work.right().min(icon.x) - w - margin, cy - h / 2.0),
+    };
+    let clamp = |v: f64, lo: f64, hi: f64| v.max(lo).min(hi.max(lo));
+    (
+        clamp(x, work.x + margin, work.right() - w - margin).round() as i32,
+        clamp(y, work.y + margin, work.bottom() - h - margin).round() as i32,
+    )
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    const SIZE: (f64, f64) = (360.0, 480.0);
+    const MON: IRect = IRect {
+        x: 0.0,
+        y: 0.0,
+        w: 2560.0,
+        h: 1440.0,
+    };
+
+    #[test]
+    fn bottom_taskbar_opens_above_the_icon() {
+        let work = IRect::new(0.0, 0.0, 2560.0, 1392.0);
+        let icon = IRect::new(2300.0, 1400.0, 24.0, 24.0);
+        let (x, y) = place_popover(icon, SIZE, MON, work, 6.0);
+        assert_eq!(y, 1392 - 480 - 6);
+        assert_eq!(x, 2312 - 180);
+    }
+
+    #[test]
+    fn top_taskbar_opens_below_the_icon() {
+        let work = IRect::new(0.0, 48.0, 2560.0, 1392.0);
+        let icon = IRect::new(2300.0, 12.0, 24.0, 24.0);
+        assert_eq!(place_popover(icon, SIZE, MON, work, 6.0).1, 54);
+    }
+
+    #[test]
+    fn side_taskbars_open_beside_the_icon() {
+        let left = IRect::new(62.0, 0.0, 2498.0, 1440.0);
+        let icon = IRect::new(20.0, 1300.0, 24.0, 24.0);
+        let (x, y) = place_popover(icon, SIZE, MON, left, 6.0);
+        assert_eq!(x, 68);
+        assert_eq!(y, 1440 - 480 - 6);
+        let right = IRect::new(0.0, 0.0, 2498.0, 1440.0);
+        let icon = IRect::new(2516.0, 700.0, 24.0, 24.0);
+        assert_eq!(place_popover(icon, SIZE, MON, right, 6.0).0, 2498 - 360 - 6);
+    }
+
+    #[test]
+    fn auto_hidden_taskbar_uses_the_nearest_edge_and_stays_on_the_monitor() {
+        // Second monitor above-right of the primary (negative y), taskbar auto-hidden.
+        let mon = IRect::new(2560.0, -820.0, 1440.0, 2560.0);
+        let icon = IRect::new(3900.0, 1700.0, 24.0, 24.0);
+        let (x, y) = place_popover(icon, SIZE, mon, mon, 6.0);
+        assert!(y < 1700 && y >= -820, "{y}");
+        assert!(x + 360 <= 4000 && x >= 2560, "{x}");
+    }
 }
 
 #[cfg(test)]

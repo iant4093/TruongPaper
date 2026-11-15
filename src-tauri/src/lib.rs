@@ -2,6 +2,7 @@
 pub mod audio_bridge;
 pub mod commands;
 pub mod controls;
+pub mod data_dir;
 pub mod db;
 pub mod desktop_host;
 pub mod gpu_select;
@@ -62,6 +63,21 @@ fn register_bundled_core_assets(app: &tauri::App) {
     }
 }
 
+/// Where TruongPaper keeps its database, downloads and caches, plus the old folder when this
+/// launch moved them. On Windows that is Local AppData: hundreds of MB of wallpapers and the
+/// WebView2 cache must not roam with the user profile. Older builds used Roaming; their data
+/// moves over once.
+fn data_dir(
+    app: &tauri::App,
+) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Box<dyn std::error::Error>> {
+    let roaming = app.path().app_data_dir()?;
+    if !cfg!(target_os = "windows") {
+        return Ok((roaming, None));
+    }
+    let local = app.path().app_local_data_dir()?;
+    Ok(data_dir::choose_and_migrate(&roaming, &local, DB_FILE_NAME))
+}
+
 /// Argument the login item starts TruongPaper with: wallpapers start, Studio stays hidden.
 const AUTOSTART_ARG: &str = "--autostart";
 
@@ -83,9 +99,19 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     register_bundled_core_assets(app);
-    let app_data_dir = app.path().app_data_dir()?;
+    let (app_data_dir, moved_from) = data_dir(app)?;
     std::fs::create_dir_all(&app_data_dir)?;
     let conn = truongpaper_core::open_and_initialize_db(&app_data_dir.join(DB_FILE_NAME))?;
+    if let Some(old) = &moved_from {
+        match data_dir::rewrite_moved_paths(&conn, old, &app_data_dir) {
+            Ok(n) => tracing::info!(
+                "moved app data from {} to {} ({n} library paths updated)",
+                old.display(),
+                app_data_dir.display()
+            ),
+            Err(err) => tracing::warn!("could not update library paths after the move: {err}"),
+        }
+    }
     clock.mark("database ready");
     let http = reqwest::Client::builder()
         .user_agent(concat!("TruongPaper/", env!("CARGO_PKG_VERSION")))

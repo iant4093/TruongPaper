@@ -84,10 +84,10 @@ mod sync {
         // Encoding may take a while. A wallpaper change queues another pass, so drop this
         // result when the monitor already shows something else.
         if !state.settings.lock().sync_lock_screen
-            || !state
+            || state
                 .host
                 .monitor(&key.0)
-                .is_some_and(|rt| rt.generation == key.1)
+                .is_none_or(|rt| rt.generation != key.1)
         {
             let _ = tokio::fs::remove_file(&output).await;
             return Ok(());

@@ -747,7 +747,7 @@ fn attach_to_desktop(
             tracing::warn!("wallpaper window has no HWND");
             return;
         };
-        let hwnd = windows::Win32::Foundation::HWND(tauri_hwnd.0 as *mut std::ffi::c_void);
+        let hwnd = windows::Win32::Foundation::HWND(tauri_hwnd.0);
         let rect = windows::Win32::Foundation::RECT {
             left: x,
             top: y,

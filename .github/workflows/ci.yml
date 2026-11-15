@@ -84,7 +84,7 @@ jobs:
         run: node scripts/bundle-depotdownloader.mjs
 
       - name: Rust format and lint
-        if: matrix.os == 'macos-latest'
+        # Both OSes: most Windows code is behind cfg(windows) and is only linted here.
         working-directory: src-tauri
         # Pinned so a new stable release cannot add lints that fail unrelated changes.
         # Raise it on purpose after running clippy with the new version locally.

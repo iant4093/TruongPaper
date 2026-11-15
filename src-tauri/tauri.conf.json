@@ -49,6 +49,7 @@
         "scope": [
           "$APPDATA/TruongPaper/**",
           "$APPDATA/wallpapers/**",
+          "$APPLOCALDATA/wallpapers/**",
           "$HOME/Library/Application Support/com.iantruong.truongpaper/**"
         ]
       }

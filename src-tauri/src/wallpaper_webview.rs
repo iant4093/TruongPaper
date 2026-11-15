@@ -619,8 +619,9 @@ pub async fn show(
             .additional_browser_args(truongpaper_platform::WEBVIEW2_WALLPAPER_BROWSER_ARGS)
             // WebView2 paints white until the page draws; black blends with the wallpaper.
             .background_color(tauri::window::Color(0, 0, 0, 255));
-        if let Ok(dir) = app.path().app_data_dir() {
-            builder = builder.data_directory(dir.join("wallpaper-webview"));
+        // Same folder as the rest of the app data (Local AppData; see `lib.rs::data_dir`).
+        if let Some(state) = app.try_state::<crate::state::AppState>() {
+            builder = builder.data_directory(state.app_data_dir.join("wallpaper-webview"));
         }
     }
     host.set_webview_vfs(&label, &spec.wallpaper_id, vfs);

@@ -437,22 +437,28 @@ async fn start_wallpaper_runtime(
         #[cfg(target_os = "windows")]
         Ok(WallpaperRuntimeKind::Application) => {
             let exe = application_exe_path(install_dir, &project_file)?;
-            let (w, h) = live_monitors(app)
-                .into_iter()
+            let rect = live_monitors(app)
+                .iter()
                 .find(|m| m.id == monitor_id)
-                .map(|m| (m.width as i32, m.height as i32))
+                .map(crate::host::application_rect)
                 .ok_or_else(|| format!("Monitor '{monitor_id}' is not connected"))?;
+            // Spawn first: a launch failure must not leave the monitor marked Application
+            // with no process.
+            let spawn_exe = exe.clone();
+            let process = tokio::task::spawn_blocking(move || {
+                truongpaper_platform::application::ApplicationWallpaperProcess::spawn(
+                    &spawn_exe, rect,
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("Could not start '{}': {e}", item.title))?;
             host.set_runtime(
                 monitor_id,
-                ActiveRuntime::Application {
-                    exe_path: exe.clone(),
-                },
+                ActiveRuntime::Application { exe_path: exe },
                 adjustments,
                 false,
             );
-            let process =
-                truongpaper_platform::application::ApplicationWallpaperProcess::spawn(&exe, w, h)
-                    .map_err(|e| format!("Could not start '{}': {e}", item.title))?;
             host.set_application_process(monitor_id, process);
             Ok(())
         }

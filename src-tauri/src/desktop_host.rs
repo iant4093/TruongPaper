@@ -3200,6 +3200,8 @@ fn run_renderer(
                 }
                 host.set_live_renderer_attached(!monitors.is_empty());
                 crate::wallpaper_webview::reattach_all();
+                #[cfg(target_os = "windows")]
+                host.reattach_applications(&live_monitors_cached(app));
                 // Explorer can still be starting after `TaskbarCreated`, so no desktop layer was
                 // found. Let the supervisor retry with backoff instead of staying blank.
                 if monitors.is_empty() && !geoms.is_empty() {

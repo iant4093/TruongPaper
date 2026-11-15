@@ -235,6 +235,19 @@ pub fn span_route(
     (source != target && incoming_is_gpu && !target_is_native).then(|| source.to_string())
 }
 
+/// Physical virtual-screen rect an Application wallpaper window covers on `monitor`.
+#[cfg(target_os = "windows")]
+pub fn application_rect(
+    monitor: &crate::commands::monitor::LiveMonitor,
+) -> truongpaper_platform::application::MonitorRect {
+    truongpaper_platform::application::MonitorRect {
+        x: monitor.x,
+        y: monitor.y,
+        width: monitor.width as i32,
+        height: monitor.height as i32,
+    }
+}
+
 impl WallpaperHost {
     /// Marks a state change: wakes the render loop and the webview bridge.
     fn bump(&self) {
@@ -399,8 +412,12 @@ impl WallpaperHost {
             }
         }
         #[cfg(target_os = "windows")]
-        if let Some(mut process) = self.applications.lock().remove(monitor_id) {
-            process.stop();
+        {
+            // Stopped outside the lock: `stop` waits (bounded) for the process to exit.
+            let old = self.applications.lock().remove(monitor_id);
+            if let Some(mut process) = old {
+                process.stop();
+            }
         }
         let global = *self.global_paused.lock();
         let mut monitors = self.monitors.lock();
@@ -563,12 +580,46 @@ impl WallpaperHost {
         monitor_id: &str,
         process: truongpaper_platform::application::ApplicationWallpaperProcess,
     ) {
-        if let Some(mut old) = self
+        let old = self
             .applications
             .lock()
-            .insert(monitor_id.to_string(), process)
-        {
+            .insert(monitor_id.to_string(), process);
+        if let Some(mut old) = old {
             old.stop();
+        }
+        // The webview bridge applies the current pause state to the new process.
+        self.bump();
+    }
+
+    /// Re-attaches every Application wallpaper window behind the desktop icons (Explorer
+    /// restart, display change), following its monitor's current rect. Windows of monitors not
+    /// in `live` keep their last rect.
+    #[cfg(target_os = "windows")]
+    pub fn reattach_applications(&self, live: &[crate::commands::monitor::LiveMonitor]) {
+        for (id, process) in self.applications.lock().iter() {
+            let rect = live.iter().find(|m| &m.id == id).map(application_rect);
+            process.reattach(rect);
+        }
+    }
+
+    /// Suspends the processes of Application wallpapers whose monitor is not `playing`
+    /// (user pause, Smart Pause, display asleep) and resumes the others.
+    #[cfg(target_os = "windows")]
+    pub fn sync_application_suspension(&self, playing: impl Fn(&str) -> bool) {
+        // `playing` reads the monitor map: evaluate it before taking the applications lock.
+        let ids: Vec<String> = self.applications.lock().keys().cloned().collect();
+        let wanted: Vec<(String, bool)> = ids
+            .into_iter()
+            .map(|id| {
+                let suspend = !playing(&id);
+                (id, suspend)
+            })
+            .collect();
+        let applications = self.applications.lock();
+        for (id, suspend) in wanted {
+            if let Some(process) = applications.get(&id) {
+                process.set_suspended(suspend);
+            }
         }
     }
 
@@ -801,8 +852,11 @@ impl WallpaperHost {
         self.pending_photos.lock().clear();
         self.render_events.lock().clear();
         #[cfg(target_os = "windows")]
-        for (_, mut process) in self.applications.lock().drain() {
-            process.stop();
+        {
+            let processes: Vec<_> = self.applications.lock().drain().collect();
+            for (_, mut process) in processes {
+                process.stop();
+            }
         }
     }
 }

@@ -406,32 +406,36 @@ pub struct SpanTransform {
     pub aspect: f32,
 }
 
-/// Sub-rectangle of the union of `geoms` (logical points) covered by `monitor_id`.
+/// The rectangle a monitor takes in the span canvas. macOS lays displays out in logical points;
+/// Windows lays them out in physical pixels with a different DPI per monitor, so dividing each
+/// origin by its own scale left gaps or overlaps between mixed-scaling displays.
+fn span_rect(g: &MonitorGeometry) -> ScreenRect {
+    if cfg!(target_os = "windows") {
+        let (x, y, w, h) = g.physical;
+        ScreenRect::new(x as f64, y as f64, w as f64, h as f64)
+    } else {
+        g.logical
+    }
+}
+
+/// Sub-rectangle of the union of `geoms` covered by `monitor_id`.
 pub fn span_transform(geoms: &[MonitorGeometry], monitor_id: &str) -> Option<SpanTransform> {
-    let me = geoms.iter().find(|g| g.id == monitor_id)?;
-    let min_x = geoms.iter().map(|g| g.logical.x).fold(f64::MAX, f64::min);
-    let min_y = geoms.iter().map(|g| g.logical.y).fold(f64::MAX, f64::min);
-    let max_x = geoms
+    let me = span_rect(geoms.iter().find(|g| g.id == monitor_id)?);
+    let rects: Vec<ScreenRect> = geoms.iter().map(span_rect).collect();
+    let min_x = rects.iter().map(|r| r.x).fold(f64::MAX, f64::min);
+    let min_y = rects.iter().map(|r| r.y).fold(f64::MAX, f64::min);
+    let max_x = rects.iter().map(|r| r.x + r.width).fold(f64::MIN, f64::max);
+    let max_y = rects
         .iter()
-        .map(|g| g.logical.x + g.logical.width)
-        .fold(f64::MIN, f64::max);
-    let max_y = geoms
-        .iter()
-        .map(|g| g.logical.y + g.logical.height)
+        .map(|r| r.y + r.height)
         .fold(f64::MIN, f64::max);
     let (w, h) = ((max_x - min_x), (max_y - min_y));
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
     Some(SpanTransform {
-        offset: [
-            ((me.logical.x - min_x) / w) as f32,
-            ((me.logical.y - min_y) / h) as f32,
-        ],
-        scale: [
-            (me.logical.width / w) as f32,
-            (me.logical.height / h) as f32,
-        ],
+        offset: [((me.x - min_x) / w) as f32, ((me.y - min_y) / h) as f32],
+        scale: [(me.width / w) as f32, (me.height / h) as f32],
         aspect: (w / h) as f32,
     })
 }
@@ -3497,6 +3501,28 @@ mod tests {
             let fitted = scene_cursor_sample(image_edge, &uniforms).unwrap();
             assert!(fitted.pos[1].abs() < 0.0001);
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn span_on_mixed_scaling_windows_displays_has_no_gap() {
+        // A 3840 px panel at 150% beside a 1920 px panel at 100% that starts at x = 3840.
+        let a = MonitorGeometry {
+            id: "A".into(),
+            logical: ScreenRect::new(0.0, 0.0, 2560.0, 1440.0),
+            physical: (0, 0, 3840, 2160),
+        };
+        let b = MonitorGeometry {
+            id: "B".into(),
+            logical: ScreenRect::new(3840.0, 0.0, 1920.0, 1080.0),
+            physical: (3840, 0, 1920, 1080),
+        };
+        let geoms = [a, b];
+        let ta = span_transform(&geoms, "A").unwrap();
+        let tb = span_transform(&geoms, "B").unwrap();
+        // B starts exactly where A ends: no gap, no overlap.
+        assert!((ta.offset[0] + ta.scale[0] - tb.offset[0]).abs() < 1e-6);
+        assert!((tb.offset[0] + tb.scale[0] - 1.0).abs() < 1e-6);
     }
 
     #[test]

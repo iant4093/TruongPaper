@@ -119,7 +119,9 @@ it('badges items GGNetwork has and disables its button when the mirror lacks the
     : cmd === 'steam_guest_availability' ? { '1234567890': 'unavailable' } : cmd === 'steam_inspect_url' ? item : {});
   render(<><WorkshopBrowser /><WorkshopPreviewModal /></>);
   const result = await screen.findByRole('button', {name:'Preview Test mountain'});
-  expect(invokeMock).toHaveBeenCalledWith('steam_guest_availability', { workshopIds: ['1234567890'] });
+  // The check runs in an effect after the results render.
+  await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('steam_guest_availability', { workshopIds: ['1234567890'] }));
+  await vi.waitFor(() => expect(useAppStore.getState().guestAvailability['1234567890']).toBe('unavailable'));
   expect(screen.queryByText('GGNetwork')).toBeNull();
   await act(async () => { fireEvent.click(result); });
   const button = await screen.findByRole('button', {name:'Not on GGNetwork'});

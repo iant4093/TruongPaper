@@ -120,6 +120,13 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     clock.mark("http client ready");
 
     let state = AppState::new(conn, app_data_dir.clone(), http.clone());
+    if cfg!(target_os = "windows") {
+        let conn = state.db.lock();
+        let mut settings = state.settings.lock();
+        if state::migrate_legacy_hotkeys(&conn, &mut settings) {
+            tracing::info!("default hotkeys now include Shift (AltGr is Ctrl+Alt on Windows)");
+        }
+    }
     // Windows ids used to be GDI names (`\\.\DISPLAY5`); carry their data over to stable ids.
     // Once only: a later run could otherwise move a disconnected monitor's old row onto a
     // different monitor that inherited its GDI number.

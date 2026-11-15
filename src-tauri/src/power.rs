@@ -153,6 +153,13 @@ mod platform {
         match msg {
             WM_WTSSESSION_CHANGE if wparam.0 as u32 == WTS_SESSION_LOCK => emit("pause", "lock"),
             WM_WTSSESSION_CHANGE if wparam.0 as u32 == WTS_SESSION_UNLOCK => emit("resume", "lock"),
+            // Switching user or moving the session to Remote Desktop hides this desktop too.
+            WM_WTSSESSION_CHANGE if wparam.0 as u32 == WTS_CONSOLE_DISCONNECT => {
+                emit("pause", "lock")
+            }
+            WM_WTSSESSION_CHANGE if wparam.0 as u32 == WTS_CONSOLE_CONNECT => {
+                emit("resume", "lock")
+            }
             WM_POWERBROADCAST if wparam.0 as u32 == PBT_APMSUSPEND => emit("pause", "sleep"),
             WM_POWERBROADCAST if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC => {
                 emit("resume", "sleep")
@@ -199,7 +206,20 @@ mod platform {
                 Some(hinstance.into()),
                 None,
             ) {
-                let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+                // At login (autostart) Terminal Services may not be ready yet and this fails
+                // (RPC_S_INVALID_BINDING); without it lock/unlock is never seen. Retry for a
+                // minute: 0.5 s, 1 s, 2 s, 4 s ... capped at 8 s.
+                let mut delay = std::time::Duration::from_millis(500);
+                let mut waited = std::time::Duration::ZERO;
+                while let Err(err) = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) {
+                    if waited >= std::time::Duration::from_secs(60) {
+                        tracing::warn!("lock/unlock detection unavailable: {err}");
+                        break;
+                    }
+                    std::thread::sleep(delay);
+                    waited += delay;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(8));
+                }
                 let _ = RegisterPowerSettingNotification(
                     HANDLE(hwnd.0),
                     &GUID_CONSOLE_DISPLAY_STATE,

@@ -42,6 +42,9 @@ const BATTERY_OPTIONS = [
 const parseFps = (v: string): AppSettings['fpsCap'] =>
   v === 'display_native' ? 'display_native' : (Number(v) as 30 | 60 | 120);
 
+/** Windows defaults add Shift: AltGr is Ctrl+Alt there. */
+const HOTKEY_SHIFT = /Win/.test(navigator.platform) ? 'Shift+' : '';
+
 /** Two accelerator fields saved together. */
 const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = ({ nextHotkey, pauseHotkey }) => {
   const updateSettings = useAppStore((s) => s.updateSettings);
@@ -70,14 +73,14 @@ const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = (
       <form className="card" style={{ padding: 16 }} onSubmit={(e) => void save(e)}>
         <label className="settings-field">
           <span>Next wallpaper</span>
-          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+Right" value={next} onChange={(e) => { editedRef.current = true; setNext(e.target.value); }} />
+          <input type="text" className="button" placeholder={`CmdOrCtrl+Alt+${HOTKEY_SHIFT}Right`} value={next} onChange={(e) => { editedRef.current = true; setNext(e.target.value); }} />
         </label>
         <label className="settings-field">
           <span>Pause / resume</span>
-          <input type="text" className="button" placeholder="CmdOrCtrl+Alt+P" value={pause} onChange={(e) => { editedRef.current = true; setPause(e.target.value); }} />
+          <input type="text" className="button" placeholder={`CmdOrCtrl+Alt+${HOTKEY_SHIFT}P`} value={pause} onChange={(e) => { editedRef.current = true; setPause(e.target.value); }} />
         </label>
         <div className="view-subtitle" style={{ marginBottom: 10 }}>
-          Type a combination such as CmdOrCtrl+Alt+Right. Work anywhere, even when TruongPaper is in the background. Leave empty to turn off.
+          Type a combination such as CmdOrCtrl+Alt+{HOTKEY_SHIFT}Right. Work anywhere, even when TruongPaper is in the background. Leave empty to turn off.
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button type="submit" className="button" disabled={!dirty}>Save shortcuts</button>

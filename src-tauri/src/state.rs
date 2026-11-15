@@ -123,6 +123,35 @@ pub fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     s
 }
 
+/// Once only: moves hotkeys still on the old defaults ([`truongpaper_core::LEGACY_HOTKEYS`]) to
+/// the current defaults and saves them. A hotkey the user changed stays. Returns whether any
+/// hotkey changed.
+pub fn migrate_legacy_hotkeys(conn: &Connection, s: &mut AppSettings) -> bool {
+    const FLAG: &str = "hotkeys_altgr_migrated";
+    if get_setting::<bool>(conn, FLAG)
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let (old_next, old_pause) = truongpaper_core::LEGACY_HOTKEYS;
+    let mut changed = false;
+    if s.next_hotkey == old_next && old_next != truongpaper_core::DEFAULT_NEXT_HOTKEY {
+        s.next_hotkey = truongpaper_core::DEFAULT_NEXT_HOTKEY.into();
+        changed = true;
+    }
+    if s.pause_hotkey == old_pause && old_pause != truongpaper_core::DEFAULT_PAUSE_HOTKEY {
+        s.pause_hotkey = truongpaper_core::DEFAULT_PAUSE_HOTKEY.into();
+        changed = true;
+    }
+    if changed && persist_settings(conn, s).is_err() {
+        return false;
+    }
+    let _ = truongpaper_core::set_setting(conn, FLAG, &true);
+    changed
+}
+
 /// Longest accepted accelerator string.
 const MAX_HOTKEY_LEN: usize = 64;
 
@@ -273,10 +302,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_hotkeys_move_once_and_custom_ones_stay() {
+        let conn = test_db();
+        let (old_next, old_pause) = truongpaper_core::LEGACY_HOTKEYS;
+        let mut s = AppSettings {
+            next_hotkey: old_next.into(),
+            pause_hotkey: "Ctrl+F9".into(),
+            ..AppSettings::default()
+        };
+        let changed = migrate_legacy_hotkeys(&conn, &mut s);
+        assert_eq!(changed, cfg!(target_os = "windows"));
+        assert_eq!(s.next_hotkey, truongpaper_core::DEFAULT_NEXT_HOTKEY);
+        assert_eq!(s.pause_hotkey, "Ctrl+F9");
+        assert_eq!(
+            load_settings(&conn).pause_hotkey,
+            if changed {
+                "Ctrl+F9"
+            } else {
+                truongpaper_core::DEFAULT_PAUSE_HOTKEY
+            }
+        );
+        // Choosing the old combination on purpose afterwards is kept.
+        s.pause_hotkey = old_pause.into();
+        assert!(!migrate_legacy_hotkeys(&conn, &mut s));
+        assert_eq!(s.pause_hotkey, old_pause);
+    }
+
+    #[test]
     fn hotkey_settings_default_trim_and_persist() {
         let defaults = AppSettings::default();
-        assert_eq!(defaults.next_hotkey, "CmdOrCtrl+Alt+Right");
-        assert_eq!(defaults.pause_hotkey, "CmdOrCtrl+Alt+P");
+        assert_eq!(defaults.next_hotkey, truongpaper_core::DEFAULT_NEXT_HOTKEY);
+        assert_eq!(
+            defaults.pause_hotkey,
+            truongpaper_core::DEFAULT_PAUSE_HOTKEY
+        );
         // A blob saved before the hotkeys existed keeps the defaults.
         let conn = test_db();
         set_setting(
@@ -285,7 +344,10 @@ mod tests {
             &json!({"rotationIntervalSeconds": 60}),
         )
         .unwrap();
-        assert_eq!(load_settings(&conn).next_hotkey, "CmdOrCtrl+Alt+Right");
+        assert_eq!(
+            load_settings(&conn).next_hotkey,
+            truongpaper_core::DEFAULT_NEXT_HOTKEY
+        );
         let merged = sanitize_settings(
             merge_settings_patch(
                 &defaults,

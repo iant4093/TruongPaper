@@ -422,8 +422,18 @@ fn default_render_gpu() -> String {
     DEFAULT_RENDER_GPU.into()
 }
 
+/// Windows adds Shift: AltGr is Ctrl+Alt there, so a Ctrl+Alt hotkey swallows AltGr+P on
+/// keyboard layouts that type a character with it (Polish, some Nordic layouts).
+#[cfg(not(target_os = "windows"))]
 pub const DEFAULT_NEXT_HOTKEY: &str = "CmdOrCtrl+Alt+Right";
+#[cfg(not(target_os = "windows"))]
 pub const DEFAULT_PAUSE_HOTKEY: &str = "CmdOrCtrl+Alt+P";
+#[cfg(target_os = "windows")]
+pub const DEFAULT_NEXT_HOTKEY: &str = "CmdOrCtrl+Alt+Shift+Right";
+#[cfg(target_os = "windows")]
+pub const DEFAULT_PAUSE_HOTKEY: &str = "CmdOrCtrl+Alt+Shift+P";
+/// Defaults of builds before the Windows change; [`LEGACY_HOTKEYS`] users get the new ones.
+pub const LEGACY_HOTKEYS: (&str, &str) = ("CmdOrCtrl+Alt+Right", "CmdOrCtrl+Alt+P");
 
 fn default_next_hotkey() -> String {
     DEFAULT_NEXT_HOTKEY.into()

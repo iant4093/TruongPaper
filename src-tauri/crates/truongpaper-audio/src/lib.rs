@@ -1010,16 +1010,18 @@ mod tests {
             .expect("capture must be released on stop");
     }
 
-    /// Backend that feeds synthetic PCM for ~300 ms from its own thread, then stops calling
-    /// back, like WASAPI loopback when playback ends.
-    struct BurstBackend;
+    /// Backend that feeds synthetic PCM from its own thread until `seen` is set (or 5 s pass),
+    /// then stops calling back, like WASAPI loopback when playback ends. Waiting for `seen`
+    /// instead of a fixed 300 ms keeps a slow CI runner from missing the whole burst.
+    struct BurstBackend(Arc<AtomicBool>);
 
     impl LoopbackBackend for BurstBackend {
         fn start(&mut self, ring: Arc<Mutex<StereoRingBuffer>>) -> anyhow::Result<f32> {
+            let seen = Arc::clone(&self.0);
             std::thread::spawn(move || {
                 let chunk = sine(1000.0, 0.01, 480);
-                let end = Instant::now() + Duration::from_millis(300);
-                while Instant::now() < end {
+                let end = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < end && !seen.load(Ordering::Acquire) {
                     ring.lock().push_interleaved(&chunk, 1);
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -1031,8 +1033,12 @@ mod tests {
     #[test]
     fn worker_publishes_then_watchdog_zeros_frame() {
         let latest = Arc::new(ArcSwap::from_pointee(AudioSpectrumFrame::default()));
+        let seen = Arc::new(AtomicBool::new(false));
+        let backend_seen = Arc::clone(&seen);
         let handle = spawn_audio_worker(
-            || Some(Box::new(BurstBackend) as Box<dyn LoopbackBackend>),
+            move || {
+                Some(Box::new(BurstBackend(Arc::clone(&backend_seen))) as Box<dyn LoopbackBackend>)
+            },
             Arc::clone(&latest),
             Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             Arc::new(AtomicBool::new(false)),
@@ -1051,6 +1057,7 @@ mod tests {
         };
 
         assert!(wait_for(&|f| !f.is_silent()), "live audio must publish");
+        seen.store(true, Ordering::Release);
         assert!(
             wait_for(&|f| f.is_silent()),
             "frame must return to zeros without further callbacks"

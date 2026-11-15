@@ -87,7 +87,7 @@ These items were listed as missing earlier and are now in the code:
 
 ## Remaining code limitations
 
-- Windows embedded scene MP4 decoding (D3D11VA / Media Foundation) is not implemented: the scene keeps a placeholder for the video layer. Standalone video wallpapers use WebView2.
+- Windows embedded scene MP4s are decoded by Media Foundation's `IMFMediaEngine` (`truongpaper-platform/src/windows_video.rs`) with audio, looping, speed and volume, but frames reach `wgpu` through a CPU copy (D3D11 staging map, then texture upload) rather than a shared GPU texture. Codecs Windows does not ship (HEVC/VP9 without the Store extensions) keep the placeholder and log a warning. Standalone video wallpapers use WebView2.
 - Native macOS system-audio capture through a process tap/ScreenCaptureKit is not integrated. The capture ring has an injection hook, but the current backend uses a virtual loopback audio device and never falls back to the hardware microphone.
 - Sound-layer minimum/maximum repeat times are not scheduled (no repeat logic exists in the sound player); random mode plays one selected sound. Pausing the sound-owning display can transfer ownership and restart sound layers.
 - Morph targets lack a documented binary layout; caller-supplied vertex deltas are supported, but scene files are not read for them.

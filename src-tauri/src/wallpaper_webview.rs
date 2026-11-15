@@ -1086,6 +1086,10 @@ fn bridge_main(app: AppHandle, host: Arc<WallpaperHost>) {
                     }
                 }
             }
+
+            // 3c. Application wallpapers: suspend the process tree while not playing.
+            #[cfg(target_os = "windows")]
+            host.sync_application_suspension(playing);
         }
 
         // 1b. Follow display changes (moved / resized / disconnected monitors); the monitor

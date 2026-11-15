@@ -330,8 +330,8 @@ mod placement_tests {
         let mon = IRect::new(2560.0, -820.0, 1440.0, 2560.0);
         let icon = IRect::new(3900.0, 1700.0, 24.0, 24.0);
         let (x, y) = place_popover(icon, SIZE, mon, mon, 6.0);
-        assert!(y < 1700 && y >= -820, "{y}");
-        assert!(x + 360 <= 4000 && x >= 2560, "{x}");
+        assert!((-820..1700).contains(&y), "{y}");
+        assert!((2560..=4000 - 360).contains(&x), "{x}");
     }
 }
 

@@ -151,7 +151,23 @@ pub fn audio_script(
     adjustments: &crate::models::UniversalAdjustments,
 ) -> String {
     match kind {
-        WebviewKind::Web => web_volume_script(adjustments.volume, adjustments.muted),
+        // Volume plus playback speed and picture controls; any change resends the script.
+        WebviewKind::Web => {
+            let picture = serde_json::json!({
+                "playbackSpeed": adjustments.playback_speed,
+                "zoom": adjustments.zoom,
+                "offsetX": adjustments.offset_x,
+                "offsetY": adjustments.offset_y,
+                "brightness": adjustments.brightness,
+                "contrast": adjustments.contrast,
+                "saturation": adjustments.saturation,
+                "hueShift": adjustments.hue_shift,
+            });
+            format!(
+                "{}window.__truongpaper_apply_web_adjustments?.({picture});",
+                web_volume_script(adjustments.volume, adjustments.muted)
+            )
+        }
         WebviewKind::Video => serde_json::to_string(adjustments)
             .map_err(|e| e.to_string())
             .and_then(|json| truongpaper_renderer::video_adjustments_js(&json))
@@ -1461,11 +1477,27 @@ mod tests {
         assert_eq!(
             plan,
             vec![
-                ("wallpaper-A".to_string(), web_volume_script(0.5, false)),
-                ("wallpaper-B".to_string(), web_volume_script(0.5, true)),
+                (
+                    "wallpaper-A".to_string(),
+                    audio_script(WebviewKind::Web, &adj["A"])
+                ),
+                (
+                    "wallpaper-B".to_string(),
+                    audio_script(WebviewKind::Web, &adj["B"])
+                ),
             ],
             "unloaded windows and windows without host state are skipped"
         );
+        assert!(plan[0].1.starts_with(&web_volume_script(0.5, false)));
+        assert!(plan[1].1.starts_with(&web_volume_script(0.5, true)));
+        assert!(plan[0].1.contains("__truongpaper_apply_web_adjustments"));
+        // A speed change alone resends the script.
+        let mut faster = adj.clone();
+        faster.get_mut("A").unwrap().playback_speed = 2.0;
+        let synced_a = [state("A", WebviewKind::Web, true, Some(plan[0].1.clone()))];
+        let resend = plan_audio_updates(&synced_a, &faster);
+        assert_eq!(resend.len(), 1);
+        assert!(resend[0].1.contains("\"playbackSpeed\":2.0"));
         let synced = [
             state("A", WebviewKind::Web, true, Some(plan[0].1.clone())),
             state("B", WebviewKind::Web, true, Some(plan[1].1.clone())),

@@ -108,7 +108,7 @@
     frame.handle = requestFrame((time) => {
       frame.handle = null;
       if (paused || !frames.delete(id)) return;
-      frame.callback.call(window, time);
+      frame.callback.call(window, pageClock(time));
     });
   }
 
@@ -152,6 +152,53 @@
   }, true);
   document.addEventListener('animationstart', () => { if (paused) pauseAnimations(); }, true);
   document.addEventListener('transitionrun', () => { if (paused) pauseAnimations(); }, true);
+
+  // Playback speed and picture controls (Details panel), the same math as the video host.
+  let rate = 1;
+  const setRate = Object.getOwnPropertyDescriptor(media, 'playbackRate');
+  function syncRate(element) {
+    try {
+      if (setRate?.set) setRate.set.call(element, rate);
+      else element.playbackRate = rate;
+    } catch {}
+  }
+  document.addEventListener('play', (event) => {
+    if (event.target instanceof HTMLMediaElement) syncRate(event.target);
+  }, true);
+  document.addEventListener('animationstart', () => {
+    if (rate !== 1) for (const a of document.getAnimations()) a.playbackRate = rate;
+  }, true);
+  // Canvas wallpapers animate from the frame timestamp: hand them a clock that runs at `rate`.
+  let clockBase = 0;
+  let realBase = 0;
+  const pageClock = (real) => clockBase + (real - realBase) * rate;
+  window.__truongpaper_apply_web_adjustments = (adj) => {
+    const next = Math.min(3, Math.max(0.1, Number(adj?.playbackSpeed ?? 1) || 1));
+    if (next !== rate) {
+      const now = performance.now();
+      clockBase = pageClock(now);
+      realBase = now;
+      rate = next;
+      document.querySelectorAll('video, audio').forEach(syncRate);
+      for (const element of activeMedia) syncRate(element);
+      for (const a of document.getAnimations()) {
+        if (a.id !== 'truongpaper-reveal') a.playbackRate = rate;
+      }
+    }
+    const root = document.documentElement;
+    if (!root) return;
+    const zoom = Number(adj?.zoom ?? 1);
+    const x = Number(adj?.offsetX ?? 0) * 50;
+    const y = Number(adj?.offsetY ?? 0) * 50;
+    const brightness = 1 + Number(adj?.brightness ?? 0);
+    const contrast = Number(adj?.contrast ?? 1);
+    const saturation = Number(adj?.saturation ?? 1);
+    const hue = Number(adj?.hueShift ?? 0);
+    root.style.transformOrigin = 'center center';
+    root.style.transform = zoom === 1 && x === 0 && y === 0 ? '' : `scale(${zoom}) translate(${x}vw, ${y}vh)`;
+    root.style.filter = brightness === 1 && contrast === 1 && saturation === 1 && hue === 0
+      ? '' : `brightness(${brightness}) contrast(${contrast}) saturate(${saturation}) hue-rotate(${hue}rad)`;
+  };
 
   window.__truongpaper_set_paused = (next) => {
     if (paused === next) return;

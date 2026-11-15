@@ -16,7 +16,15 @@ use url::Url;
 use zip::ZipArchive;
 
 const LOOKUP: &str = "https://api.ggntw.com/steam.request";
-const CDN: &str = "https://hk-cdn.ggntw.com/";
+/// GGNetwork's file servers, as listed by its own download page, tried in order. One that is
+/// down or slow to answer (hk-cdn timed out in November 2026) is skipped for the next.
+const CDNS: &[&str] = &[
+    "https://cdn.ggntw.com/",
+    "https://hk-cdn.ggntw.com/",
+    "https://cdn.ggntw.ru/",
+];
+/// How long a file server gets to start answering before the next one is tried.
+const CDN_ANSWER_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ENTRIES: usize = 12_000;
@@ -31,7 +39,20 @@ struct ProviderReply {
     url: Option<String>,
 }
 
+/// The download on every file server, in [`CDNS`] order.
+fn cdn_urls(reply: ProviderReply, id: &str) -> Result<Vec<Url>> {
+    let key = download_key(reply, id)?;
+    CDNS.iter()
+        .map(|base| Ok(Url::parse(base)?.join(&key)?))
+        .collect()
+}
+
+#[cfg(test)]
 fn cdn_url(reply: ProviderReply, id: &str) -> Result<Url> {
+    Ok(cdn_urls(reply, id)?.remove(0))
+}
+
+fn download_key(reply: ProviderReply, id: &str) -> Result<String> {
     if reply.result == 10 {
         bail!("GGNetwork requires its own account for this wallpaper. Try Steam for this item.");
     }
@@ -69,7 +90,7 @@ fn cdn_url(reply: ProviderReply, id: &str) -> Result<Url> {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
         "GGNetwork returned an invalid download key."
     );
-    Ok(Url::parse(CDN)?.join(key)?)
+    Ok(key.to_string())
 }
 
 fn guest_client(timeout: Duration) -> Result<reqwest::Client> {
@@ -107,7 +128,7 @@ fn classify(reply: ProviderReply, id: &str) -> GuestAvailability {
     if reply.result == 10 {
         return GuestAvailability::Unavailable;
     }
-    if cdn_url(reply, id).is_ok() {
+    if download_key(reply, id).is_ok() {
         GuestAvailability::Available
     } else {
         GuestAvailability::Unavailable
@@ -236,7 +257,7 @@ pub async fn download_guest_workshop(
     }
     let reply =
         serde_json::from_slice(&json).context("GGNetwork returned an unreadable response.")?;
-    let url = cdn_url(reply, id)?;
+    let urls = cdn_urls(reply, id)?;
 
     let root = destination
         .parent()
@@ -246,16 +267,23 @@ pub async fn download_guest_workshop(
         .prefix(".guest-")
         .tempdir_in(root)?;
     let archive_path = staging.path().join("wallpaper.zip");
-    let mut response = client
-        .get(url)
-        .timeout(Duration::from_secs(15 * 60))
-        .send()
-        .await
-        .map_err(|_| anyhow::anyhow!("Could not reach GGNetwork's file server."))?;
-    ensure!(
-        response.status().is_success(),
-        "GGNetwork's file server could not deliver this wallpaper."
-    );
+    let mut response = None;
+    for url in urls {
+        let host = url.host_str().unwrap_or_default().to_string();
+        let request = client.get(url).timeout(Duration::from_secs(15 * 60)).send();
+        match tokio::time::timeout(CDN_ANSWER_TIMEOUT, request).await {
+            Ok(Ok(resp)) if resp.status().is_success() => {
+                response = Some(resp);
+                break;
+            }
+            Ok(Ok(resp)) => tracing::warn!("GGNetwork server {host} answered {}", resp.status()),
+            Ok(Err(err)) => tracing::warn!("GGNetwork server {host}: {err}"),
+            Err(_) => tracing::warn!("GGNetwork server {host} did not answer in time"),
+        }
+    }
+    let mut response = response.context(
+        "None of GGNetwork's file servers could deliver this wallpaper. Try again later or use Steam.",
+    )?;
     let expected = response.content_length();
     ensure!(
         expected.is_none_or(|size| size <= MAX_ARCHIVE_BYTES),
@@ -506,8 +534,18 @@ mod tests {
             cdn_url(reply("123456789", good), "123456789")
                 .unwrap()
                 .host_str(),
-            Some("hk-cdn.ggntw.com")
+            Some("cdn.ggntw.com")
         );
+        let all: Vec<String> = cdn_urls(reply("123456789", good), "123456789")
+            .unwrap()
+            .iter()
+            .map(|u| u.host_str().unwrap().to_string())
+            .collect();
+        assert_eq!(all, ["cdn.ggntw.com", "hk-cdn.ggntw.com", "cdn.ggntw.ru"]);
+        assert!(cdn_urls(reply("123456789", good), "123456789")
+            .unwrap()
+            .iter()
+            .all(|u| u.path() == "/exampleKey1234567"));
         assert!(cdn_url(reply("123456780", good), "123456789").is_err());
         assert!(cdn_url(
             reply(

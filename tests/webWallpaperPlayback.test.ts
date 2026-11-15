@@ -28,6 +28,7 @@ function page() {
   const idle = new Media();
   const animation = {
     playState: 'running',
+    playbackRate: 1,
     pause() { this.playState = 'paused'; },
     play() { this.playState = 'running'; },
   };
@@ -36,16 +37,20 @@ function page() {
     cancelAnimationFrame(handle: number) { pending.delete(handle); },
     __truongpaper_set_paused(_paused: boolean) {},
     __truongpaper_set_volume(_volume: number) {},
+    __truongpaper_apply_web_adjustments(_adj: Record<string, number>) {},
     AudioNode,
   };
+  const root = { style: {} as Record<string, string> };
   const document = {
     addEventListener: vi.fn(),
     getAnimations: () => [animation],
     querySelectorAll: () => [playing, idle],
+    documentElement: root,
   };
-  runInNewContext(preload, { window: win, document, HTMLMediaElement: Media, AudioNode });
+  const clock = { t: 0, now() { return this.t; } };
+  runInNewContext(preload, { window: win, document, HTMLMediaElement: Media, AudioNode, performance: clock });
   return {
-    win, playing, idle, animation, AudioNode,
+    win, playing, idle, animation, AudioNode, root, clock,
     frame(time: number) {
       for (const [id, callback] of [...pending]) {
         if (pending.delete(id)) callback(time);
@@ -106,4 +111,29 @@ it('scales a wallpaper’s own media mix and Web Audio output without changing p
   expect(master.gain.value).toBe(0);
   node.disconnect(context.destination);
   expect(AudioNode.nativeDisconnect).toHaveBeenCalledWith(master);
+});
+
+it('applies playback speed to media, animations and the frame clock, and the picture controls to the page', async () => {
+  const { win, frame, playing, animation, root, clock } = page();
+  await playing.play();
+  const draw = vi.fn();
+  win.requestAnimationFrame(draw);
+  frame(1000);
+  expect(draw).toHaveBeenLastCalledWith(1000);
+
+  clock.t = 1000;
+  win.__truongpaper_apply_web_adjustments({ playbackSpeed: 2, brightness: 0.2, contrast: 1, saturation: 1.5, hueShift: 0, zoom: 1, offsetX: 0, offsetY: 0 });
+  expect((playing as unknown as { playbackRate: number }).playbackRate).toBe(2);
+  expect(animation.playbackRate).toBe(2);
+  expect(root.style.filter).toBe('brightness(1.2) contrast(1) saturate(1.5) hue-rotate(0rad)');
+  expect(root.style.transform).toBe('');
+
+  // The page clock keeps running from where it was, at twice the speed.
+  win.requestAnimationFrame(draw);
+  frame(1500);
+  expect(draw).toHaveBeenLastCalledWith(2000);
+
+  win.__truongpaper_apply_web_adjustments({ playbackSpeed: 1, brightness: 0, contrast: 1, saturation: 1, hueShift: 0, zoom: 1.5, offsetX: 0.2, offsetY: 0 });
+  expect(root.style.filter).toBe('');
+  expect(root.style.transform).toBe('scale(1.5) translate(10vw, 0vh)');
 });

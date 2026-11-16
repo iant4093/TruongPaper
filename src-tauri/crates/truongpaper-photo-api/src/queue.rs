@@ -1,4 +1,4 @@
-//! Offline photo queue refill (docs/02 Sections 2 and 4, step 5).
+//! Offline photo queue refill.
 //!
 //! The queue keeps [`QUEUE_TARGET_UNUSED`] unused photos on disk so rotation needs zero API
 //! calls. A refill is triggered when the unused count drops to [`QUEUE_REFILL_THRESHOLD`] or

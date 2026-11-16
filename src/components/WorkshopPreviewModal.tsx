@@ -1,5 +1,5 @@
 // src/components/WorkshopPreviewModal.tsx
-// §2.1 Floating Liquid Glass "Workshop Preview & Download" modal driven by
+// Floating Liquid Glass "Workshop Preview & Download" modal driven by
 // `steam_inspect_url` + `steam-download://progress` events.
 import React, { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';

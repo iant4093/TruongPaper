@@ -1,4 +1,4 @@
-//! Per-monitor `wgpu` 23 compositor host pipeline (`docs/01-SYSTEM-ARCHITECTURE.md` §3.3).
+//! Per-monitor `wgpu` 23 compositor host pipeline.
 //!
 //! Deviation from the doc: `wgpu::RenderPassColorAttachment::depth_slice` does not exist in
 //! `wgpu` 23 (added in a later release), so those field initialisers were removed.
@@ -765,9 +765,8 @@ pub fn upload_rgba_texture(
 }
 
 // ---------------------------------------------------------------------------------------------
-// CPU-side helpers mirroring `compositor.wgsl` (not in the doc's §3.3 listing; they encode the
-// constants documented in the WGSL comments and `docs/04` §"Transition Duration Slider" so the
-// host can build `CompositorUniforms` without magic numbers, and so the UV math is unit-testable).
+// CPU-side helpers mirroring `compositor.wgsl`: they encode the constants documented in the
+// WGSL comments (including the transition duration range) so the host can build `CompositorUniforms` without magic numbers, and so the UV math is unit-testable).
 // ---------------------------------------------------------------------------------------------
 
 /// `CompositorUniforms::{from,to}_fit_mode` values.

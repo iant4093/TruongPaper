@@ -1,7 +1,7 @@
 //! Minimal JSON value + parser used by the shader preprocessor (`// [COMBO]` / uniform comment
 //! metadata) and the particle system (`particles/*.json`).
 //!
-//! NOTE: the spec (`docs/03` §4.4 / §5.3) uses `serde_json::Value`, but `serde`/`serde_json` are
+//! NOTE: the scene loaders were written against `serde_json::Value`, but `serde`/`serde_json` are
 //! not dependencies of `truongpaper-renderer`. This module mirrors the small subset of the
 //! `serde_json::Value` API the spec code relies on (`get`, `as_str`, `as_f64`, `as_i64`, `as_u64`).
 //! If `serde_json` is later added to this crate, this module can be replaced by `serde_json::Value`.

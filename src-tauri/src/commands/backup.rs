@@ -1,4 +1,4 @@
-//! `backup_export` / `backup_import` (docs/04 §5.1): one JSON file with the user's settings,
+//! `backup_export` / `backup_import`: one JSON file with the user's settings,
 //! playlists, favorites and per-wallpaper customization. Wallpaper files, Steam account data and
 //! secrets are never part of it.
 

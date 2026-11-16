@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// tests/steamAuthModal.test.tsx — QR matrix rendering & 2FA flow (§4.4)
+// tests/steamAuthModal.test.tsx — QR matrix rendering & 2FA flow
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 

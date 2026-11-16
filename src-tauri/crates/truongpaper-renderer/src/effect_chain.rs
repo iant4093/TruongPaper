@@ -1,5 +1,4 @@
-//! Multi-pass ping-pong FBO effect chain planner and bloom plan
-//! (`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` §7.2 item 3, `docs/05` Phase 6).
+//! Multi-pass ping-pong FBO effect chain planner and bloom plan.
 //!
 //! [`EffectChainPlan::build`] turns a layer's `effects` into a device-free list of
 //! [`EffectStep`]s that `scene_renderer::SceneRenderer` executes:

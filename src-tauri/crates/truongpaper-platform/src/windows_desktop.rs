@@ -1,5 +1,5 @@
 //! Windows desktop integration (classic Win10/11 23H2 `WorkerW` AND Windows 11 24H2+ raised
-//! layered desktop). Spec: `docs/01-SYSTEM-ARCHITECTURE.md` section 2.1 (pitfall #1).
+//! layered desktop).
 //!
 //! Compiled as `crate::win_desktop` (Windows only).
 //!

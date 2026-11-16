@@ -1,5 +1,4 @@
 //! OS Sleep, Display Off, and Session Lock observer (`system-power` event).
-//! Spec: `docs/01-SYSTEM-ARCHITECTURE.md` §6.2.
 //!
 //! Besides emitting `system-power`, every event updates process-wide flags that the Smart Pause
 //! loop (`smart_pause.rs`) reads as `SystemPowerState::display_asleep`.

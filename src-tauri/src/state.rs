@@ -12,7 +12,7 @@ use truongpaper_core::{get_setting, set_setting, AppSettings, CoreResult};
 
 /// `settings` table key holding the serialized [`AppSettings`].
 pub const SETTING_APP_SETTINGS: &str = "app_settings";
-/// `settings` key read by `photo_rotate_next` (docs/02 §6).
+/// `settings` key read by `photo_rotate_next`.
 pub const SETTING_SKIP_MISMATCHED_ORIENTATION: &str = "skip_mismatched_orientation";
 /// `settings` key of the multi-monitor mode (`"independent"` by default). Photo rotation always
 /// picks one photo per display; `"span"` is applied by the renderer.
@@ -58,7 +58,7 @@ impl AppState {
     }
 
     /// Terminates DepotDownloader sidecars and releases every wallpaper host resource so the
-    /// updater can overwrite the binary (docs/06 §5.1).
+    /// updater can overwrite the binary.
     pub async fn shutdown_all_wallpaper_hosts(&self) {
         self.shutdown_now();
     }

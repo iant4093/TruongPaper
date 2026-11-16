@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// tests/propertyInspectorComponent.test.tsx — dynamic project.json controls (§3)
+// tests/propertyInspectorComponent.test.tsx — dynamic project.json controls
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 

@@ -1,6 +1,6 @@
 import { Dropdown } from './Dropdown';
 // src/components/PresetBar.tsx
-// "[Preset: Default v]" selector above the Live Inspector (§2 layout) backed by
+// "[Preset: Default v]" selector above the Live Inspector, backed by
 // `wallpaper_save_preset` / `wallpaper_apply_preset`.
 import React, { useState } from 'react';
 import { Save } from 'lucide-react';

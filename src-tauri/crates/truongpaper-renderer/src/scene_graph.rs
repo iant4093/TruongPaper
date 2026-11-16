@@ -1,4 +1,4 @@
-//! `scene.json` scene-graph loader (`docs/05` Phase 6, `docs/03` §7.1 and §7.2).
+//! `scene.json` scene-graph loader.
 //!
 //! [`SceneGraph::load`] reads `scene.json` through the 4-layer VFS (pitfall #6), parses it with
 //! `truongpaper_we_formats::parse_scene_json`, resolves every user-bound value against the
@@ -191,7 +191,7 @@ impl CameraState {
 
     /// Advances the camera by `dt` seconds. `pointer` is the cursor in `[0,1]` on the monitor.
     ///
-    /// Parallax follows `docs/03` §7.2 item 2: the target is
+    /// Parallax: the target is
     /// `parallax_eye_offset(pointer, amount, influence)` and the smoothed offset approaches it
     /// exponentially with time constant `cameraparallaxdelay` (`<= 0` jumps immediately).
     pub fn step(&mut self, dt: f32, pointer: Vec2, runtime: &CameraRuntime) {
@@ -404,7 +404,7 @@ impl ScriptProperty {
     }
 }
 
-/// A scripted property (`docs/03` §7.1 Form D) for the SceneScript engine.
+/// A scripted property (Form D) for the SceneScript engine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyScriptSlot {
     /// `"<layer name or id>/<property>"`.

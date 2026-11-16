@@ -1,4 +1,4 @@
-//! `settings_get` / `settings_update` (docs/04 §5.1). Settings are persisted in the SQLite
+//! `settings_get` / `settings_update`. Settings are persisted in the SQLite
 //! `settings` table; the photo pipeline keys are mirrored so `photo_*` commands see them.
 
 use crate::state::AppState;

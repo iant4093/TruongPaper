@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// tests/store.test.ts — Zustand store actions must call the §5.1 commands with the exact arg keys.
+// tests/store.test.ts — Zustand store actions must call the commands with the exact arg keys.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const invokeMock = vi.fn();
@@ -256,7 +256,7 @@ describe('store → invoke() contract', () => {
 });
 
 describe('store → listen() event wiring', () => {
-  it('subscribes to all §5.1 events and applies payloads', async () => {
+  it('subscribes to all IPC events and applies payloads', async () => {
     const unlisten = await useAppStore.getState().initAppListeners();
     expect([...listeners.keys()].sort()).toEqual(
       [

@@ -1,5 +1,5 @@
-//! Desktop render surfaces and the `truongpaper-render` thread (docs/01 §1 thread model, §2
-//! desktop windows, §3 compositor, §5 cursor, §6.1 pause semantics).
+//! Desktop render surfaces and the `truongpaper-render` thread (thread model,
+//! desktop windows, compositor, cursor, pause semantics).
 //!
 //! - macOS: one `TruongDesktopWindow` per `NSScreen` at `kCGDesktopWindowLevel`
 //!   (`truongpaper_platform::mac_desktop`), created on the main thread together with a `wgpu`
@@ -769,7 +769,7 @@ fn scene_cursor_sample(
 // Cursor polling
 // ---------------------------------------------------------------------------------------------
 
-/// Polls the desktop cursor for one monitor (docs/01 §5). The desktop windows ignore mouse
+/// Polls the desktop cursor for one monitor. The desktop windows ignore mouse
 /// events, so positions are read from the OS.
 #[derive(Default)]
 pub struct CursorPoller {

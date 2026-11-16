@@ -1,4 +1,4 @@
-//! Headless tests for scene-space MVP construction (docs/03 §7.2).
+//! Headless tests for scene-space MVP construction.
 
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use truongpaper_renderer::*;

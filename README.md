@@ -97,7 +97,7 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 **Scene, Video, Web & Application Runtimes**
 
 - **Scene wallpapers**: native Rust `.pkg` (`PKGV0001`–`PKGV0022+`) memory-mapped archive reader, `.tex` (`TEXV0005` / `TEXB0001`–`TEXB0004` / `TEXS0001`–`TEXS0003`) LZ4/DXT1/DXT3/DXT5/RG88/R8/MP4 texture decoder, 4-layer Virtual File System, HLSL/GLSL-to-WGSL shader preprocessor, multi-pass FBO effects, GPU/SIMD particle systems, `.mdl` skeletal puppet warp, and an embedded `rquickjs` SceneScript runtime (`init`, `update`, `cursorMove`, `applyUserProperties`, `engine.registerAudioBuffers`)
-- **Scene engine summary**: image, text, particle, sound, group and static 3D model layers; 30 bundled clean-room stock effects plus translation of Workshop effect shaders; particle systems with 9 operators, child systems (static, follow, spawn, death), rope trails, sprite sheets and refracting sprites; skeletal puppets with animation layers; bloom, camera parallax and user-property bindings that apply live. Original stand-ins for Wallpaper Engine's stock textures are bundled, and text layers fall back to system fonts, including CJK fonts. Grading 124 Workshop scenes by eye against their preview images gave 77 "yes", 55 "mostly" and 2 "no"; see [docs/SCENE-COMPATIBILITY.md](docs/SCENE-COMPATIBILITY.md) for supported features, limits and remaining causes
+- **Scene engine summary**: image, text, particle, sound, group and static 3D model layers; 30 bundled clean-room stock effects plus translation of Workshop effect shaders; particle systems with 9 operators, child systems (static, follow, spawn, death), rope trails, sprite sheets and refracting sprites; skeletal puppets with animation layers; bloom, camera parallax and user-property bindings that apply live. Original stand-ins for Wallpaper Engine's stock textures are bundled, and text layers fall back to system fonts, including CJK fonts. Grading 124 Workshop scenes by eye against their preview images gave 77 "yes", 55 "mostly" and 2 "no"
 - **Scene report**: warnings the renderer collects while loading a scene (skipped scripts, fallback shaders and similar) appear as a collapsed **Scene report** in the wallpaper's details panel
 - **Video wallpapers**: looping playback through WKWebView / WebView2 (codec support depends on the platform), plus AVFoundation decoding for embedded scene videos on macOS with gapless loop, playback speed (`0.1x`–`3.0x`) and volume control
 - **Web wallpapers**: embedded `wry` desktop WebView with `window.wallpaperPropertyListener` and 60 Hz 128-band stereo `window.wallpaperRegisterAudioListener` injection
@@ -127,7 +127,7 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 ## Install
 
-Download the latest installers from [GitHub Releases](https://github.com/iant4093/TruongPaper/releases/latest). Installed apps update themselves from there. See [the testing checklist](docs/MANUAL-TESTING.md) and [remaining limitations](docs/RELEASE-READINESS.md).
+Download the latest installers from [GitHub Releases](https://github.com/iant4093/TruongPaper/releases/latest). Installed apps update themselves from there.
 
 **macOS** (Apple Silicon, macOS 14.2 or later)
 
@@ -239,8 +239,7 @@ The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository 
 │   └── examples/           wallpaper_smoke, scene_probe and other developer tools
 ├── tests/                  Vitest unit and component tests
 ├── scripts/                DepotDownloader sidecar bundling, core-asset texture generation, release packaging
-├── docs/                   Design specs (01-06), scene compatibility, release readiness, manual
-│                           testing checklist, README screenshots and icon
+├── docs/                   README screenshots and icon
 ├── .github/                CI/release workflow and Dependabot
 ├── index.html              Main Studio window entry
 ├── tray.html               Menu Bar / System Tray popover entry

@@ -1,5 +1,5 @@
 //! IPC types shared by the Tauri command layer that are not already provided by
-//! `truongpaper-core` / `truongpaper-photo-api` (docs/04 §5 `src/types/ipc.ts`).
+//! `truongpaper-core` / `truongpaper-photo-api` (mirrored in `src/types/ipc.ts`).
 //!
 //! Photo types (`PhotoItem`, `SavedAlbum`, `PublicCatalogAlbum`, `PhotoStatus`, `FilterMode`)
 //! come from `truongpaper_photo_api` re-exports; `WorkshopPreview` comes from
@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use truongpaper_renderer::{CompositorUniforms, FitMode, TransitionMode};
 
 // ---------------------------------------------------------------------------------------------
-// Event channel names (docs/04 §5.1 "Rust → Frontend Event Channels")
+// Event channel names
 // ---------------------------------------------------------------------------------------------
 
 pub const EVENT_WALLPAPER_CHANGED: &str = "wallpaper://changed";
@@ -100,7 +100,7 @@ impl IpcTransitionType {
 // Universal adjustments
 // ---------------------------------------------------------------------------------------------
 
-/// `UniversalAdjustments` with the documented ranges (docs/04 §5).
+/// `UniversalAdjustments` with the documented ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UniversalAdjustments {

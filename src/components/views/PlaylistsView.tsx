@@ -1,5 +1,5 @@
 // src/components/views/PlaylistsView.tsx
-// §2.4 View 3: "Unified Playlists & Rotation" View
+// View 3: "Unified Playlists & Rotation" View
 import React, { useRef, useState } from 'react';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { Download, Pencil, Plus, Save, Trash2, Upload } from 'lucide-react';

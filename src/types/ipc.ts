@@ -257,7 +257,7 @@ export interface GpuAdapterInfo {
 }
 
 // ---------------------------------------------------------------------------
-// §5.1 Tauri v2 IPC command & event registry (single source of truth for the
+// Tauri v2 IPC command & event registry (single source of truth for the
 // frontend, the browser-preview mock and the contract tests).
 // ---------------------------------------------------------------------------
 
@@ -325,7 +325,7 @@ export const IPC_COMMANDS = [
 
 export type IpcCommand = (typeof IPC_COMMANDS)[number];
 
-/** Rust → frontend event channels (§5.1). */
+/** Rust → frontend event channels. */
 export const IPC_EVENTS = [
   'wallpaper://changed',
   'photo-queue://updated',

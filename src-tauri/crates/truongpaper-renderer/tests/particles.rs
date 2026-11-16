@@ -1,4 +1,4 @@
-//! Headless tests for the CPU particle system and vertex builders (docs/03 §5).
+//! Headless tests for the CPU particle system and vertex builders.
 
 use glam::Vec3;
 use std::mem::{offset_of, size_of};

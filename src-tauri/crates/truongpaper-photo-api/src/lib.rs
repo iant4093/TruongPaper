@@ -1,6 +1,5 @@
 //! `truongpaper-photo-api`: Ian Truong Photography API v1 client, EXIF-aware decoder,
 //! 5-photo offline queue, persistent shown history, and cache eviction manager.
-//! Complete specification: `docs/02-PHOTO-API-AND-CACHE-SPEC.md`.
 //!
 //! * [`client`]: `GET /v1/photos/random` and `GET /api/public/albums` behind an injectable
 //!   [`PhotoTransport`].

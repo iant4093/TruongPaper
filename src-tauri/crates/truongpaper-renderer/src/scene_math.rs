@@ -1,5 +1,5 @@
-//! Scene coordinate system and `g_ModelViewProjectionMatrix` construction
-//! (`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` §7.2, items 1 and 2). Pure `glam` math.
+//! Scene coordinate system and `g_ModelViewProjectionMatrix` construction.
+//! Pure `glam` math.
 //!
 //! The doc gives prose, not code; these functions transcribe it directly:
 //! - Projection: `Mat4::orthographic_rh(0, w, 0, h, -1000, 1000)`; `(0,0)` is bottom-left.
@@ -90,7 +90,7 @@ pub fn scene_view_matrix(eye_offset: Vec2) -> Mat4 {
     Mat4::from_translation(Vec3::new(-eye_offset.x, -eye_offset.y, 0.0))
 }
 
-/// Per-pass matrices bound as built-in uniforms (§4.3).
+/// Per-pass matrices bound as built-in uniforms.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PassMatrices {
     /// `g_ModelViewProjectionMatrix` (also `g_EffectModelViewProjectionMatrix`).

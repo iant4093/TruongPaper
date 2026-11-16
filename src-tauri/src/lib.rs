@@ -394,34 +394,33 @@ mod tests {
             .collect()
     }
 
-    /// Command names listed in docs/04 §5.1 (`invoke<...>('name'` / `invoke('name'`).
-    fn documented_commands() -> BTreeSet<String> {
-        let doc = include_str!("../../docs/04-UI-UX-LIQUID-GLASS-SPEC.md");
-        let start = doc
-            .find("### 5.1 Complete Tauri v2 IPC Commands")
-            .expect("§5.1 heading");
-        let end = start + doc[start..].find("#### Rust").expect("§5.1 events heading");
-        doc[start..end]
-            .split("invoke")
-            .skip(1)
-            .filter_map(|chunk| {
-                let q = chunk.find('\'')?;
-                let rest = &chunk[q + 1..];
-                Some(rest[..rest.find('\'')?].to_string())
-            })
+    /// The frontend's IPC registry (`src/types/ipc.ts`), the single list of commands and events.
+    const IPC_TS: &str = include_str!("../../src/types/ipc.ts");
+
+    /// Quoted names inside `export const <name> = [ ... ] as const;` of `ipc.ts`.
+    fn ipc_ts_list(name: &str) -> BTreeSet<String> {
+        let start = IPC_TS
+            .find(&format!("export const {name} = ["))
+            .unwrap_or_else(|| panic!("{name} in ipc.ts"));
+        let body = &IPC_TS[start..];
+        let body = &body[..body.find("] as const").expect("end of list")];
+        body.lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('\''))
+            .filter_map(|l| l.split('\'').nth(1).map(str::to_string))
             .collect()
     }
 
     #[test]
-    fn registered_commands_match_docs_04_section_5_1() {
-        let documented = documented_commands();
-        assert_eq!(documented.len(), 55, "doc list changed: {documented:?}");
-        assert_eq!(registered_commands(), documented);
+    fn registered_commands_match_the_frontend_registry() {
+        let listed = ipc_ts_list("IPC_COMMANDS");
+        assert!(listed.len() > 50, "IPC_COMMANDS parse: {listed:?}");
+        assert_eq!(registered_commands(), listed);
     }
 
     #[test]
-    fn event_names_match_docs_04_section_5_1() {
-        let doc = include_str!("../../docs/04-UI-UX-LIQUID-GLASS-SPEC.md");
+    fn event_names_match_the_frontend_registry() {
+        let listed = ipc_ts_list("IPC_EVENTS");
         for name in [
             crate::models::EVENT_WALLPAPER_CHANGED,
             crate::models::EVENT_PHOTO_QUEUE_UPDATED,
@@ -433,10 +432,7 @@ mod tests {
             crate::models::EVENT_PLAYBACK_PAUSE_CHANGED,
             crate::models::EVENT_SYSTEM_POWER,
         ] {
-            assert!(
-                doc.contains(&format!("- `{name}`:")),
-                "{name} not in docs/04"
-            );
+            assert!(listed.contains(name), "{name} not in IPC_EVENTS");
         }
     }
 

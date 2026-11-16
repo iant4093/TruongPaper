@@ -1,4 +1,4 @@
-//! Shared SQLite data-access helpers for the photo cache (docs/02 Sections 2-4 and 6).
+//! Shared SQLite data-access helpers for the photo cache.
 //!
 //! Every function takes a plain `&Connection` / `&mut Connection` (or an
 //! `Arc<Mutex<Connection>>` for the `_unlocked` variants) so the photo-api crate and the
@@ -443,7 +443,7 @@ pub fn mark_photo_shown_in_transaction(
 /// Checks API metadata against local state BEFORE the image is downloaded.
 ///
 /// Order: blacklist, orientation (only when both dimensions are known), unused queue (also
-/// counts photos currently on screen, docs/02 Section 2), persistent history.
+/// counts photos currently on screen), persistent history.
 pub fn classify_candidate(
     conn: &Connection,
     photo_id: &str,

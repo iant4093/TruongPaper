@@ -1,7 +1,7 @@
 // src/dev/mockTauri.ts
-// Browser-preview mock (docs/06 §7.2). Activates automatically when the UI is
+// Browser-preview mock. Activates automatically when the UI is
 // opened at http://localhost:1420 without the Tauri shell and implements every
-// §5.1 command with in-memory sample data so the whole studio is interactive.
+// command with in-memory sample data so the whole studio is interactive.
 import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import type {
   AppSettings,
@@ -23,7 +23,7 @@ import type {
   BackupImportSummary,
 } from '../types/ipc';
 
-/** Commands added after the §5.1 registry; kept in one block so the registry list stays untouched. */
+/** Commands added after the registry; kept in one block so the registry list stays untouched. */
 type ExtraCommand = 'library_set_favorite' | 'playlist_delete' | 'backup_export' | 'backup_import' | 'photo_retry_now';
 
 type Args = Record<string, unknown>;
@@ -241,7 +241,7 @@ export interface MockBackend {
 }
 
 /**
- * Pure in-memory implementation of every §5.1 command. `emitEvent` receives the
+ * Pure in-memory implementation of every command. `emitEvent` receives the
  * Rust → frontend events the real backend would send; `schedule` controls timing
  * of simulated async work (download progress, QR codes).
  */
@@ -423,7 +423,7 @@ export function createMockBackend(
     historyCount += 1;
     const source = monitors.find((m) => m.monitorId === monitorId)?.activeSource ?? { kind: 'photo_api' };
     emitEvent('wallpaper://changed', { monitorId, source, currentItem: shown, transitionUsed: settings.transitionType });
-    // Background refill once the queue drops to <= 2 (docs/05 §4).
+    // Background refill once the queue drops to <= 2.
     if (queue.length <= 2) {
       isRefilling = true;
       schedule(() => {

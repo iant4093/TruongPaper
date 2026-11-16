@@ -1,5 +1,5 @@
 //! Wallpaper library & preset commands: `library_list_wallpapers`, `library_delete_wallpaper`,
-//! `wallpaper_save_preset`, `wallpaper_apply_preset` (docs/04 §5.1).
+//! `wallpaper_save_preset`, `wallpaper_apply_preset`.
 
 use crate::db::{self, WallpaperRow};
 use crate::models::{IpcFitMode, IpcTransitionType, WallpaperItem, WallpaperPreset};

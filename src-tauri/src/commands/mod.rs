@@ -1,4 +1,4 @@
-//! Tauri IPC command handlers. Names and argument names match docs/04 §5.1
+//! Tauri IPC command handlers. Names and argument names match `src/types/ipc.ts`
 //! (camelCase on the JS side maps to the snake_case Rust parameters).
 
 pub mod backup;

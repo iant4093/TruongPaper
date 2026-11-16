@@ -1,4 +1,4 @@
-//! Auto-updater diagnostic & clean shutdown commands (docs/06 §5.1).
+//! Auto-updater diagnostic & clean shutdown commands.
 
 #[tauri::command]
 pub async fn update_feed_status(app: tauri::AppHandle) -> String {

@@ -1,5 +1,5 @@
 //! Per-monitor scene loop glue: `truongpaper_renderer::SceneGraph` + `truongpaper_scenescript`
-//! property scripts + camera parallax/shake + particles + sound-layer plans (docs/03 §7-§8).
+//! property scripts + camera parallax/shake + particles + sound-layer plans.
 //!
 //! `truongpaper-renderer` and `truongpaper-scenescript` do not depend on each other, so the frame
 //! step lives here. Everything is device-free; GPU drawing (`SceneRenderer::render`) and audio
@@ -27,7 +27,7 @@ use truongpaper_scenescript::{
 use truongpaper_we_formats::scene_schema::{resolve_bound_bool, resolve_bound_value};
 use truongpaper_we_formats::WeVirtualFileSystem;
 
-/// `input.cursorWorldPosition` for a cursor in `[0,1]` with a top-left origin (docs/03 §8.2):
+/// `input.cursorWorldPosition` for a cursor in `[0,1]` with a top-left origin:
 /// `(x * scene_w, (1 - y) * scene_h, 0)`.
 pub fn cursor_world_position(cursor_norm: [f32; 2], scene_size: [f32; 2]) -> [f32; 3] {
     let [x, y] = finite_cursor(cursor_norm);

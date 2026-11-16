@@ -1,4 +1,4 @@
-//! `playlist_list` / `playlist_save` / `playlist_delete` (docs/04 §5.1).
+//! `playlist_list` / `playlist_save` / `playlist_delete`.
 
 use crate::commands::monitor::{apply_source, lock_monitor_apply};
 use crate::commands::photo::PhotoServiceState;

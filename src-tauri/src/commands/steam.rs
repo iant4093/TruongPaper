@@ -1,4 +1,4 @@
-//! Steam Workshop & Wallpaper Engine commands (docs/04 §5.1, docs/03 §1):
+//! Steam Workshop & Wallpaper Engine commands:
 //! `steam_inspect_url`, `steam_download_workshop_item`, `steam_login_qr`,
 //! `steam_login_credentials`, `steam_submit_2fa_code`, `steam_logout`, `steam_sync_local_folders`.
 //!

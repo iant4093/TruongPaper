@@ -1,7 +1,5 @@
 //! `truongpaper-renderer`: Multi-monitor `wgpu` 23.0 compositor, Kawase blur, Liquid Glass
 //! transitions, Wallpaper Engine `Scene` renderer, shader preprocessor (`naga`), and particle simulator.
-//! Complete specification: `docs/01-SYSTEM-ARCHITECTURE.md` (Section 3) &
-//! `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Sections 4, 5, 7.2).
 
 pub mod compositor;
 pub mod diagnostics;

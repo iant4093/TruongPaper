@@ -1,24 +1,8 @@
-// tests/mockTauri.test.ts — the browser-preview mock must implement every §5.1 command,
-// and the frontend registry must match docs/04 §5.1 exactly.
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+// tests/mockTauri.test.ts — the browser-preview mock must implement every IPC command
+// (`src/types/ipc.ts`; the Rust tests check that list against the registered commands).
 import { describe, expect, it } from 'vitest';
 import { createMockBackend } from '../src/dev/mockTauri';
-import { IPC_COMMANDS, IPC_EVENTS } from '../src/types/ipc';
-
-const doc = readFileSync(resolve(__dirname, '../docs/04-UI-UX-LIQUID-GLASS-SPEC.md'), 'utf8');
-
-function docCommands(): string[] {
-  const section = doc.slice(doc.indexOf('### 5.1'), doc.indexOf('## 6.'));
-  return [...section.matchAll(/invoke<[^>]*>\('([a-z0-9_]+)'/g)].map((m) => m[1]);
-}
-
-function docEvents(): string[] {
-  const section = doc.slice(doc.indexOf('#### Rust'), doc.indexOf('## 6.'));
-  const fromList = [...section.matchAll(/^- `([a-z0-9:/_-]+)`:/gm)].map((m) => m[1]);
-  const fromTray = [...doc.matchAll(/app\.emit\("([^"]+)"/g)].map((m) => m[1]);
-  return [...fromList, ...fromTray];
-}
+import { IPC_COMMANDS } from '../src/types/ipc';
 
 /** Representative, contract-shaped args for every command. */
 const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
@@ -59,16 +43,6 @@ const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   playlist_save: { playlist: { playlistId: 'x', name: 'X', mode: 'photos_only', intervalSeconds: 60, items: [{ kind: 'photo_api_draw' }] } },
   settings_update: { settings: { fpsCap: 120 } },
 };
-
-describe('IPC contract registry', () => {
-  it('IPC_COMMANDS matches docs/04 §5.1 exactly', () => {
-    expect([...IPC_COMMANDS].sort()).toEqual([...new Set(docCommands())].sort());
-  });
-
-  it('IPC_EVENTS matches docs/04 §5.1 events + §4.1 tray events', () => {
-    expect([...IPC_EVENTS].sort()).toEqual([...new Set(docEvents())].sort());
-  });
-});
 
 describe('createMockBackend (browser preview)', () => {
   it.each([...IPC_COMMANDS])('handles %s without throwing', (cmd) => {

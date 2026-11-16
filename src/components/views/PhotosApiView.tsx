@@ -1,5 +1,5 @@
 // src/components/views/PhotosApiView.tsx
-// §2.2 View 1: "Ian's Photos API" Studio View
+// View 1: "Ian's Photos API" Studio View
 import React, { useEffect, useRef, useState } from 'react';
 import { open as openExternal } from '@tauri-apps/plugin-shell';
 import { AnimatePresence, motion } from 'framer-motion';

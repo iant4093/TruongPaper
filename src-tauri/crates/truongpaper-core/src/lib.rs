@@ -1,5 +1,4 @@
 //! `truongpaper-core`: Shared SQLite WAL database schema, IPC models, and error types.
-//! Complete specification: `docs/02-PHOTO-API-AND-CACHE-SPEC.md` & `docs/04-UI-UX-LIQUID-GLASS-SPEC.md`.
 
 pub mod error;
 pub mod models;

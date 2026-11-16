@@ -1,6 +1,5 @@
 //! `truongpaper-scenescript`: Embedded `rquickjs` QuickJS sandbox implementing Wallpaper Engine's
 //! SceneScript runtime (`engine`, `input`, `thisLayer`, `thisScene`, `Vec2/Vec3/Vec4`, `shared`).
-//! Complete specification: `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Sections 8.1-8.3).
 //!
 //! Lifecycle callbacks: `init(value)`, `update(value)`, `cursorMove/Down/Up/Click(event)`,
 //! `applyUserProperties(changedProps)`. Each property script lives in a "slot" keyed by the host

@@ -1,5 +1,5 @@
-//! Headless tests for the compositor WGSL shaders, uniform layouts and CPU fit/transition math
-//! (docs/01 §3). No `wgpu` adapter/device is created.
+//! Headless tests for the compositor WGSL shaders, uniform layouts and CPU fit/transition math.
+//! No `wgpu` adapter/device is created.
 
 use std::mem::{align_of, offset_of, size_of};
 use truongpaper_renderer::*;
@@ -89,35 +89,6 @@ fn compositor_wgsl_parses_and_validates() {
             ("s_linear".into(), 0, 4),
             ("u".into(), 0, 5),
         ]
-    );
-}
-
-#[test]
-fn shaders_match_doc_listing_exactly() {
-    let doc_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../docs/01-SYSTEM-ARCHITECTURE.md"
-    );
-    let Ok(doc) = std::fs::read_to_string(doc_path) else {
-        eprintln!("docs/01 not found; skipping doc/shader parity check");
-        return;
-    };
-    let doc = doc.replace("\r\n", "\n");
-    let blocks: Vec<&str> = doc
-        .split("```wgsl\n")
-        .skip(1)
-        .map(|rest| rest.split("```").next().unwrap())
-        .collect();
-    assert!(blocks.len() >= 2);
-    assert_eq!(
-        blocks[0],
-        KAWASE_BLUR_WGSL.replace("\r\n", "\n"),
-        "kawase_blur.wgsl drifted from docs/01 §3.1"
-    );
-    assert_eq!(
-        blocks[1],
-        COMPOSITOR_WGSL.replace("\r\n", "\n"),
-        "compositor.wgsl drifted from docs/01 §3.2"
     );
 }
 

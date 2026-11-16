@@ -1,5 +1,4 @@
-//! EXIF orientation-aware dimension inspector and `<= 8192px` `wgpu` texture decoder
-//! (docs/02 Section 5).
+//! EXIF orientation-aware dimension inspector and `<= 8192px` `wgpu` texture decoder.
 //!
 //! `imagesize` reads raw SOF dimensions and ignores EXIF `Orientation` 5-8, so a portrait shot
 //! stored as a landscape sensor buffer would be misclassified. These helpers apply the tag, and

@@ -1,5 +1,5 @@
 //! macOS AVFoundation decoder for embedded `.tex` MP4 video textures
-//! (`free_image_format == 35`, docs/03 §6.2 item 2; docs/05 Phase 5 "Video Runtime").
+//! (`free_image_format == 35`).
 //!
 //! Compiled as `crate::mac_video` (macOS only). The renderer extracts the MP4 to
 //! `<wallpaper_dir>/.cache/<name>.mp4`; this module plays that file with `AVPlayer` (hardware
@@ -27,7 +27,7 @@ use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 use objc2_foundation::{NSNumber, NSString};
 
-/// Same range as the renderer's `MIN_PLAYBACK_SPEED..=MAX_PLAYBACK_SPEED` (docs/05 Phase 5).
+/// Same range as the renderer's `MIN_PLAYBACK_SPEED..=MAX_PLAYBACK_SPEED`.
 pub const MIN_VIDEO_RATE: f32 = 0.1;
 pub const MAX_VIDEO_RATE: f32 = 2.0;
 

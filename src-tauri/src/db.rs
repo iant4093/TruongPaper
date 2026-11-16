@@ -70,7 +70,7 @@ impl WallpaperRow {
             install_dir: self.install_dir.clone(),
             bytes: self.bytes,
             audio_reactive: self.audio_reactive,
-            // docs/03 §10: application wallpapers only run on Windows; elsewhere the UI shows the
+            // Application wallpapers only run on Windows; elsewhere the UI shows the
             // "Windows Only" badge.
             windows_only: !truongpaper_platform::is_wallpaper_type_supported_on_this_os(
                 &self.wallpaper_type,

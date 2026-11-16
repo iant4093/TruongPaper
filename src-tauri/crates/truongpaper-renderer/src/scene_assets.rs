@@ -1,5 +1,4 @@
-//! Renderer-local `model.json`, `effect.json` and `material.json` types
-//! (`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` §7.1).
+//! Renderer-local `model.json`, `effect.json` and `material.json` types.
 //!
 //! These mirror `truongpaper_we_formats::{ModelJsonFile, EffectFile, EffectFboSpec,
 //! EffectPassSpec, EffectBindSlot, MaterialFile, MaterialPassSpec}` field for field, with the same

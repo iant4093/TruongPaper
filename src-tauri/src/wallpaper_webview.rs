@@ -1,4 +1,4 @@
-//! Desktop-level webview windows for Web and Video wallpapers (docs/03 §6.2, §6.3, §9) and the
+//! Desktop-level webview windows for Web and Video wallpapers and the
 //! bridge thread that feeds them.
 //!
 //! Each monitor showing a Web or Video wallpaper gets one undecorated `WebviewWindow` labelled
@@ -13,7 +13,7 @@
 //! The bridge thread (`truongpaper-webview-bridge`) closes windows whose monitor switched to
 //! another runtime, starts / suspends the audio loopback worker, pushes 128-float spectrum
 //! frames (60 Hz max), forwards desktop cursor events to Web pages and applies user pause /
-//! Smart Pause (docs/01 §6.1 items 2 and 3).
+//! Smart Pause.
 
 use crate::commands::monitor::LiveMonitor;
 use crate::desktop_host::{

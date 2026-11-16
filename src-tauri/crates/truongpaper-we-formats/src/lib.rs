@@ -1,6 +1,5 @@
 //! `truongpaper-we-formats`: Wallpaper Engine binary format parsers (`.pkg` PKGV, `.tex` TEXV/TEXI/TEXB/TEXS,
 //! `.mdl` MDLV/MDLS/MDLA), 4-layer Virtual File System (`WeVirtualFileSystem`), and `scene.json` schema.
-//! Complete specification: `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Sections 2, 3, 5.4, 8).
 
 pub mod binary;
 pub mod mdl;

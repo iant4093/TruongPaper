@@ -1,4 +1,4 @@
-//! `wgpu` executor for a loaded [`SceneGraph`] (`docs/05` Phase 6, `docs/03` §4, §5, §7.2).
+//! `wgpu` executor for a loaded [`SceneGraph`].
 //!
 //! The pure helpers ([`pack_uniform_block`], [`layer_quad_vertices`],
 //! [`texture_bind_group_layout_entries`], [`reflect_texture_slots`],

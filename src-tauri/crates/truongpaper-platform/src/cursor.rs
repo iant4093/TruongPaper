@@ -1,5 +1,4 @@
 //! Passive desktop cursor forwarding & click-through hit-testing.
-//! Spec: `docs/01-SYSTEM-ARCHITECTURE.md` section 5.
 //!
 //! The wallpaper window sits behind the desktop icons and never takes focus, so the cursor is
 //! polled and normalized to `[0, 1]` monitor-local coordinates (top-left origin) for

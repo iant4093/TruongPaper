@@ -1,5 +1,4 @@
 //! `wpe://` custom protocol handler with HTTP `206 Partial Content` byte-range streaming.
-//! Spec: `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` section 6.1 (pitfall #16).
 //!
 //! `WKWebView` and `WebView2` refuse to play or loop `<video>` / `<audio>` over a custom scheme
 //! unless `Range` requests get `206`, `Accept-Ranges: bytes`, `Content-Range` and `Content-Length`.

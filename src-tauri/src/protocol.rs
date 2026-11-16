@@ -1,4 +1,4 @@
-//! `wpe://localhost/<path>` custom protocol (docs/03 §6.1): serves a wallpaper's 4-layer
+//! `wpe://localhost/<path>` custom protocol: serves a wallpaper's 4-layer
 //! `WeVirtualFileSystem` through `truongpaper_platform::handle_wpe_protocol_request`
 //! (HTTP `206 Partial Content` for media `Range` requests, pitfall #16). Each wallpaper webview
 //! gets the VFS of the wallpaper it shows (`WallpaperHost::vfs_for_webview`), so monitors with

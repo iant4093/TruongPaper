@@ -1,5 +1,5 @@
 // src/components/views/SteamWorkshopView.tsx
-// §2.3 View 2: "Steam Workshop" Library View
+// View 2: "Steam Workshop" Library View
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Search } from 'lucide-react';
 import { WorkshopBrowser } from '../WorkshopBrowser';

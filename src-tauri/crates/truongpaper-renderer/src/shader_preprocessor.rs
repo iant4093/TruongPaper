@@ -1,5 +1,4 @@
-//! Wallpaper Engine GLSL shader preprocessor & `naga` transpiler
-//! (`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` §4).
+//! Wallpaper Engine GLSL shader preprocessor & `naga` transpiler.
 //!
 //! Deviations from the doc listing (all required to compile/run against the real crate set):
 //! - `serde_json::Value` -> `crate::json::Value` (`serde_json` is not a dependency of this crate).
@@ -1074,12 +1073,12 @@ fn normalize_glsl_type(ty: &str) -> &str {
     }
 }
 
-/// Public accessor for the exact preamble prepended to every WE shader (§4.1).
+/// Public accessor for the exact preamble prepended to every WE shader.
 pub fn we_glsl_preamble() -> &'static str {
     WE_GLSL_PREAMBLE
 }
 
-/// The `#require LightingV1` replacement stub (§4.2 Rule 3).
+/// The `#require LightingV1` replacement stub (rule 3).
 pub fn lighting_v1_stub() -> &'static str {
     LIGHTING_V1_STUB
 }
@@ -1139,7 +1138,7 @@ pub fn parse_uniform_comment_metadata(source: &str) -> Vec<UniformCommentMetadat
     out
 }
 
-/// One row of the built-in uniform table (§4.3, `CPass::setupUniforms`).
+/// One row of the built-in uniform table (`CPass::setupUniforms`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinUniform {
     pub name: &'static str,
@@ -1155,7 +1154,7 @@ const fn bu(name: &'static str, glsl_type: &'static str, source: &'static str) -
     }
 }
 
-/// Complete built-in uniform table (§4.3). Rows that the doc collapses (`g_Texture0..7`,
+/// Complete built-in uniform table. Rows that the doc collapses (`g_Texture0..7`,
 /// `Left`/`Right`, `A` / `B`) are expanded into one entry per uniform name.
 pub const WE_BUILTIN_UNIFORMS: &[BuiltinUniform] = &[
     bu(

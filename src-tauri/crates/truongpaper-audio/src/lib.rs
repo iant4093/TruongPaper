@@ -1,7 +1,5 @@
 //! `truongpaper-audio`: System audio loopback capture (Windows WASAPI Loopback + macOS CoreAudio Tap),
 //! 2048-point Hann-windowed `rustfft` analyzer (16/32/64 stereo bands at 60 Hz), and `kira` sound layer player.
-//! Complete specification: `docs/01-SYSTEM-ARCHITECTURE.md` (Section 4) &
-//! `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Section 8.1).
 //!
 //! Architecture:
 //! - A [`LoopbackBackend`] (OS capture, `cpal` on Windows/macOS) pushes PCM into a shared

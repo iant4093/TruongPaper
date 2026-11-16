@@ -2,8 +2,6 @@
 //! Windows 11 24H2 `WS_EX_NOREDIRECTIONBITMAP` + macOS `NSWindow` at `kCGDesktopWindowLevel`),
 //! passive cursor hit-testing, `wpe://` custom protocol handler (with HTTP `206 Partial Content`),
 //! and fullscreen/maximized/battery policy monitor.
-//! Complete specification: `docs/01-SYSTEM-ARCHITECTURE.md` (Sections 2, 5, 6) &
-//! `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Sections 6, 9, 10).
 
 pub mod accent;
 pub mod application;

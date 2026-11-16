@@ -1,5 +1,4 @@
-//! Unified Playlist & Rotation Scheduler (docs/01 §1, docs/04 §2.4 "Rotation Interval & Trigger
-//! Controls").
+//! Unified Playlist & Rotation Scheduler (rotation interval and triggers).
 //!
 //! - Pure part: [`next_due`], [`next_playlist_index`], [`monitor_interval_secs`],
 //!   [`build_monitor_ticks`] and the [`RotationScheduler`] state machine decide which monitor

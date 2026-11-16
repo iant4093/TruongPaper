@@ -1,5 +1,4 @@
 //! Windows `Application` wallpaper host.
-//! Spec: `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` section 10.
 //!
 //! `"type": "application"` Workshop items are native Windows executables. On macOS the UI flags
 //! them `windowsOnly: true` and shows a "Windows Only" badge (see

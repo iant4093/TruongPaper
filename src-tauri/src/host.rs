@@ -19,7 +19,7 @@ use truongpaper_renderer::{CompositorUniforms, RgbaImageData, WallpaperRuntimeKi
 use truongpaper_we_formats::WeVirtualFileSystem;
 
 /// Runtime that plays a library wallpaper of `project_type` on this OS. Application wallpapers
-/// are Windows-only (docs/03 §10); unknown types (e.g. `preset`) are rejected.
+/// are Windows-only; unknown types (e.g. `preset`) are rejected.
 pub fn runtime_kind_for(project_type: &str) -> Result<WallpaperRuntimeKind, String> {
     match WallpaperRuntimeKind::from_project_type(project_type) {
         Some(WallpaperRuntimeKind::Application)
@@ -523,7 +523,7 @@ impl WallpaperHost {
     }
 
     /// Whether any playing monitor shows an audio-reactive scene or Web wallpaper, and the
-    /// audio sensitivity of the first such monitor (docs/01 §6.1 item 4).
+    /// audio sensitivity of the first such monitor.
     pub fn audio_demand(&self) -> Option<f32> {
         self.monitors_snapshot()
             .into_iter()

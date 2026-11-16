@@ -1,5 +1,5 @@
 // src/components/views/SettingsView.tsx
-// Settings: performance, power policy, startup, Steam account & signed auto-updates (docs/06 §5).
+// Settings: performance, power policy, startup, Steam account & signed auto-updates.
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, LogIn, LogOut, RefreshCw, Upload } from 'lucide-react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';

@@ -1,4 +1,4 @@
-//! Headless tests for `shader_preprocessor` (docs/03 §4). No GPU device is created.
+//! Headless tests for `shader_preprocessor`. No GPU device is created.
 
 mod common;
 
@@ -54,7 +54,7 @@ fn sampler_combo_is_shared_by_both_shader_stages() {
 }
 
 // ------------------------------------------------------------------------------------------
-// §4.1 preamble
+// preamble
 // ------------------------------------------------------------------------------------------
 
 #[test]

@@ -1,4 +1,4 @@
-//! CPU particle simulation & vertex builders (`docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` §5).
+//! CPU particle simulation & vertex builders.
 //!
 //! Deviations from the doc listing:
 //! - `serde`/`serde_json` are not dependencies of this crate, so the `#[derive(Serialize,

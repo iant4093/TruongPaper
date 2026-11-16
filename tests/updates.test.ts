@@ -1,4 +1,4 @@
-// tests/updates.test.ts — signed auto-updater service (docs/06 §5) with a mocked plugin-updater.
+// tests/updates.test.ts — signed auto-updater service with a mocked plugin-updater.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const checkMock = vi.fn();

@@ -1,5 +1,5 @@
-//! `.mdl` puppet skeleton (`MDLS`), animation (`MDLA`) parser and CPU bone/morph deformer
-//! (`docs/05` Phase 6). `docs/03` §3.2 only specifies the `MDLV` mesh block (parsed by
+//! `.mdl` puppet skeleton (`MDLS`), animation (`MDLA`) parser and CPU bone/morph deformer.
+//! The `MDLV` mesh block is parsed by
 //! `truongpaper_we_formats::parse_mdl`); the `MDLS`/`MDLA` layouts and the skinning math follow
 //! the task reference notes `reference-mdl-skeleton-and-puppet.md` (summarized from the
 //! open-source `catsout/wallpaper-scene-renderer`).

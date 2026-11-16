@@ -1,5 +1,4 @@
 //! Smart Pause, occlusion & battery policy monitor.
-//! Spec: `docs/01-SYSTEM-ARCHITECTURE.md` section 6.
 //!
 //! The decision logic is split into pure functions over [`ScreenRect`]s
 //! ([`decide_occlusion_win32`], [`decide_occlusion_by_coverage`], [`apply_system_policy`]) so it can

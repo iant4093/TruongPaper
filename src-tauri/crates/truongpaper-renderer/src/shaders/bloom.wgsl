@@ -1,4 +1,4 @@
-// Scene bloom chain (docs/05 Phase 6, linux-wallpaperengine render-target names):
+// Scene bloom chain (linux-wallpaperengine render-target names):
 //   fs_threshold_downsample: scene        -> _rt_4FrameBuffer (1/4)
 //   fs_downsample_blur:      _rt_4        -> _rt_8FrameBuffer (1/8)
 //   fs_blur:                 _rt_8        -> _rt_Bloom        (1/8)

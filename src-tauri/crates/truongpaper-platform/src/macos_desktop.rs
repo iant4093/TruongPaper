@@ -1,5 +1,5 @@
 //! macOS desktop integration: one borderless `NSWindow` per `NSScreen` at
-//! `kCGDesktopWindowLevel`. Spec: `docs/01-SYSTEM-ARCHITECTURE.md` section 2.2 (pitfall #2).
+//! `kCGDesktopWindowLevel`.
 //!
 //! Compiled as `crate::mac_desktop` (macOS only). All AppKit calls require a
 //! [`MainThreadMarker`].

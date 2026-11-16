@@ -1,6 +1,6 @@
 // src-tauri/build.rs
 
-/// Every app command registered in `generate_handler!` (docs/04 §5.1). Declaring them in an app
+/// Every app command registered in `generate_handler!`. Declaring them in an app
 /// ACL manifest makes Tauri ACL-check custom commands: only windows granted the generated
 /// `allow-<command>` permissions in `capabilities/` (the Studio and tray windows) can call them,
 /// so the `wallpaper-*` webviews that run Workshop JavaScript get no IPC access at all.

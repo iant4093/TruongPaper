@@ -1,5 +1,5 @@
 // src/components/views/MonitorsView.tsx
-// §2.5 View 4: "Monitors & Fit" View
+// View 4: "Monitors & Fit" View
 import React, { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Copy, Lock } from 'lucide-react';

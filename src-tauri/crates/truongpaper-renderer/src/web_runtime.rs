@@ -1,4 +1,4 @@
-//! Web runtime helpers (docs/05 Phase 5, docs/03 §6.2, §9).
+//! Web runtime helpers.
 //!
 //! Builds the `wpe://` URLs loaded into the per-monitor desktop webview and the JavaScript
 //! snippets passed to `evaluate_script` that call into `web-wallpaper-preload.js`
@@ -220,7 +220,7 @@ pub fn web_wallpaper_url(project_file: &str) -> Option<String> {
     Some(format!("{}{}", wpe_origin(), encoded.join("/")))
 }
 
-/// URL of the built-in video player for a standalone Video wallpaper (docs/03 §6.2):
+/// URL of the built-in video player for a standalone Video wallpaper:
 /// `<origin>__video_host__.html?file=<encodeURIComponent(file)>`.
 pub fn video_host_url(project_file: &str) -> Option<String> {
     let segments = project_path_segments(project_file)?;

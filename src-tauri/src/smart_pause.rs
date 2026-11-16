@@ -1,4 +1,4 @@
-//! Smart Pause loop (docs/01 §6): every 250 ms (`POLICY_POLL_INTERVAL`) while the policy is
+//! Smart Pause loop: every 250 ms (`POLICY_POLL_INTERVAL`) while the policy is
 //! changing, backing off to once a second after a stable stretch, evaluate each monitor's
 //! playback policy (fullscreen / maximized occlusion, battery, display sleep) and emit
 //! `policy://state-changed` on transitions tracked by `truongpaper_platform::PolicyMonitor`.

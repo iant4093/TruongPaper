@@ -1,4 +1,4 @@
-//! Video runtime (docs/05 Phase 5, docs/03 §6.2).
+//! Video runtime.
 //!
 //! Standalone `"type": "video"` wallpapers are played by the OS webview through
 //! `wpe://localhost/__video_host__.html` (see [`crate::web_runtime::video_host_url`]); WKWebView
@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 
 use truongpaper_we_formats::ParsedTex;
 
-/// Slowest playback rate exposed to the user (docs/05 Phase 5).
+/// Slowest playback rate exposed to the user.
 pub const MIN_PLAYBACK_SPEED: f32 = 0.1;
-/// Fastest playback rate exposed to the user (docs/05 Phase 5).
+/// Fastest playback rate exposed to the user.
 pub const MAX_PLAYBACK_SPEED: f32 = 2.0;
 /// Volumes at or below this are treated as muted (same rule as `video-wallpaper-host.html`).
 pub const MUTE_VOLUME_THRESHOLD: f32 = 0.001;
@@ -191,7 +191,7 @@ pub fn embedded_mp4_cache_path(wallpaper_dir: &Path, tex_virtual_path: &str) -> 
 }
 
 /// Writes the MP4 container embedded in an `FIF_MP4` `.tex` to
-/// `<wallpaper_dir>/.cache/<name>.mp4` (docs/03 §6.2 item 2) and returns its path.
+/// `<wallpaper_dir>/.cache/<name>.mp4` and returns its path.
 ///
 /// Returns `Ok(None)` when the texture is not an MP4 or its first mipmap is not an `ftyp`
 /// container. Reuse requires matching contents; Workshop updates can preserve the file length.

@@ -1,5 +1,4 @@
 //! Single-entry OS Keychain JSON vault (`com.iantruong.truongpaper` / `vault`, pitfall #15).
-//! Spec: `docs/01-SYSTEM-ARCHITECTURE.md` §7.
 //!
 //! Every secret lives in ONE keychain item so macOS prompts for Keychain access at most once.
 //! The [`Store`] trait keeps `cargo test` off the host keychain.

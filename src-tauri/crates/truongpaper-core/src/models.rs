@@ -1,4 +1,4 @@
-//! Shared photo-cache model structs (docs/02 Sections 3 and 4, IPC shapes from Section 6).
+//! Shared photo-cache model structs and their IPC shapes.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -250,7 +250,7 @@ pub struct SavedAlbumUpsert {
     pub added_at: i64,
 }
 
-/// IPC view of a saved album (docs/02 Section 6).
+/// IPC view of a saved album.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedAlbum {

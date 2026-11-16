@@ -1,4 +1,4 @@
-//! Monitor, playback & property customization commands (docs/04 §5.1):
+//! Monitor, playback & property customization commands:
 //! `monitors_list`, `monitor_apply_wallpaper`, `monitor_update_property`,
 //! `monitor_update_adjustments`, `playback_set_paused`.
 

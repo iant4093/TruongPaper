@@ -1,4 +1,4 @@
-//! System-audio loopback bridge (docs/01 §6.1 item 4).
+//! System-audio loopback bridge.
 //!
 //! Capture is demand-owned: removing or pausing the last audio-reactive wallpaper stops the
 //! worker and releases its capture backend. Demand starts a fresh worker on resume.

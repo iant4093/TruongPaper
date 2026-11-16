@@ -32,12 +32,16 @@ function page() {
     pause() { this.playState = 'paused'; },
     play() { this.playState = 'running'; },
   };
+  const timeout = vi.fn((_handler: () => void, _delay?: number) => 1);
+  const interval = vi.fn((_handler: () => void, _delay?: number) => 2);
   const win = {
     requestAnimationFrame(callback: (time: number) => void) { pending.set(++next, callback); return next; },
     cancelAnimationFrame(handle: number) { pending.delete(handle); },
     __truongpaper_set_paused(_paused: boolean) {},
     __truongpaper_set_volume(_volume: number) {},
     __truongpaper_apply_web_adjustments(_adj: Record<string, number>) {},
+    setTimeout: timeout as (handler: () => void, delay?: number) => number,
+    setInterval: interval as (handler: () => void, delay?: number) => number,
     AudioNode,
   };
   const root = { style: {} as Record<string, string> };
@@ -48,9 +52,11 @@ function page() {
     documentElement: root,
   };
   const clock = { t: 0, now() { return this.t; } };
-  runInNewContext(preload, { window: win, document, HTMLMediaElement: Media, AudioNode, performance: clock });
+  const wall = { t: 1_700_000_000_000 };
+  const date = { now: () => wall.t };
+  runInNewContext(preload, { window: win, document, HTMLMediaElement: Media, AudioNode, performance: clock, Date: date });
   return {
-    win, playing, idle, animation, AudioNode, root, clock,
+    win, playing, idle, animation, AudioNode, root, clock, wall, date, timeout, interval,
     frame(time: number) {
       for (const [id, callback] of [...pending]) {
         if (pending.delete(id)) callback(time);
@@ -136,4 +142,29 @@ it('applies playback speed to media, animations and the frame clock, and the pic
   win.__truongpaper_apply_web_adjustments({ playbackSpeed: 1, brightness: 0, contrast: 1, saturation: 1, hueShift: 0, zoom: 1.5, offsetX: 0.2, offsetY: 0 });
   expect(root.style.filter).toBe('');
   expect(root.style.transform).toBe('scale(1.5) translate(10vw, 0vh)');
+});
+
+it('runs Date.now, performance.now and timers at the playback speed', () => {
+  const { win, clock, wall, date, timeout, interval } = page();
+  const start = wall.t;
+  clock.t = 100;
+  wall.t = start + 100;
+  expect(date.now()).toBe(start + 100);
+  win.__truongpaper_apply_web_adjustments({ playbackSpeed: 2 });
+  clock.t = 600;
+  wall.t = start + 600;
+  // Both clocks continue from where they were, twice as fast.
+  expect(clock.now()).toBe(1100);
+  expect(date.now()).toBe(start + 1100);
+
+  const tick = () => {};
+  win.setTimeout(tick, 1000);
+  win.setInterval(tick, 50);
+  win.setTimeout(tick);
+  expect(timeout.mock.calls.map((c) => c[1])).toEqual([500, undefined]);
+  expect(interval.mock.calls.map((c) => c[1])).toEqual([25]);
+
+  win.__truongpaper_apply_web_adjustments({ playbackSpeed: 0.5 });
+  wall.t = start + 1600;
+  expect(date.now()).toBe(start + 1600);
 });

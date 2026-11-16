@@ -293,7 +293,7 @@ pub fn apply_backup(
     let mut applied_sources = Vec::new();
     for (monitor, source) in &backup.monitor_sources {
         let ok = match source {
-            WallpaperSource::PhotoApi => true,
+            WallpaperSource::PhotoApi | WallpaperSource::None => true,
             WallpaperSource::Workshop { wallpaper_id } => existing.contains(wallpaper_id),
             WallpaperSource::Playlist { playlist_id } => known_playlists.contains(playlist_id),
         };

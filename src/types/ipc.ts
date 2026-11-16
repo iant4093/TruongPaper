@@ -202,7 +202,9 @@ export interface PlaybackPauseChanged {
 export type WallpaperSource =
   | { kind: 'photo_api' }
   | { kind: 'workshop'; wallpaperId: string }
-  | { kind: 'playlist'; playlistId: string };
+  | { kind: 'playlist'; playlistId: string }
+  /** No TruongPaper wallpaper: the display shows the system wallpaper. */
+  | { kind: 'none' };
 
 export interface Playlist {
   playlistId: string;
@@ -239,8 +241,10 @@ export interface AppSettings {
   nextHotkey: string;
   /** Global shortcut for Pause / Resume all displays; empty = disabled. */
   pauseHotkey: string;
-  /** GPU for photos and scenes: `integrated` (default), `dedicated` or `adapter:<name>`. */
+  /** GPU for photos and scenes: `auto` (default: the displays' GPU), `integrated`, `dedicated` or `adapter:<name>`. */
   renderGpu: string;
+  /** Windows: the primary display's wallpaper sets the accent color from its scheme color. */
+  adjustWindowsColor?: boolean;
 }
 
 /** A GPU the desktop renderer can use (`gpu_list_adapters`). */
@@ -248,6 +252,8 @@ export interface GpuAdapterInfo {
   name: string;
   kind: 'integrated' | 'dedicated' | 'other';
   inUse: boolean;
+  /** The GPU `auto` picks: the one driving the displays. */
+  recommended?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -132,6 +132,7 @@ export const OFFLINE_NOTICE = 'Offline - showing cached photos';
 
 /** Source value for pickers that mix photos, single wallpapers and playlists. */
 export const sourceKey = (source: WallpaperSource): string =>
-  source.kind === 'photo_api' ? 'photo_api' : source.kind === 'workshop' ? `w:${source.wallpaperId}` : `p:${source.playlistId}`;
+  source.kind === 'photo_api' || source.kind === 'none' ? source.kind
+    : source.kind === 'workshop' ? `w:${source.wallpaperId}` : `p:${source.playlistId}`;
 export const sourceFromKey = (key: string): WallpaperSource =>
-  key === 'photo_api' ? { kind: 'photo_api' } : key.startsWith('w:') ? { kind: 'workshop', wallpaperId: key.slice(2) } : { kind: 'playlist', playlistId: key.slice(2) };
+  key === 'photo_api' ? { kind: 'photo_api' } : key === 'none' ? { kind: 'none' } : key.startsWith('w:') ? { kind: 'workshop', wallpaperId: key.slice(2) } : { kind: 'playlist', playlistId: key.slice(2) };

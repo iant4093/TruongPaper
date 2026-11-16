@@ -29,11 +29,25 @@ fn main() -> anyhow::Result<()> {
 
 async fn render() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
-    let instance = wgpu::Instance::default();
+    // Same backend choice as the app: `WGPU_BACKEND=dx12|vulkan|metal` forces one.
+    // PROBE_GPU=high picks the dedicated GPU, PROBE_GPU=low the integrated one.
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::util::backend_bits_from_env().unwrap_or_default(),
+        ..Default::default()
+    });
+    let power_preference = match std::env::var("PROBE_GPU").as_deref() {
+        Ok("high") => wgpu::PowerPreference::HighPerformance,
+        Ok("low") => wgpu::PowerPreference::LowPower,
+        _ => wgpu::PowerPreference::None,
+    };
     let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            ..Default::default()
+        })
         .await
         .unwrap();
+    eprintln!("adapter: {:?}", adapter.get_info());
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
@@ -311,6 +325,7 @@ async fn render() -> anyhow::Result<()> {
     let bench = std::env::var("PROBE_BENCH").is_ok();
     let (mut bench_render, mut bench_submit, mut bench_n) = (0.0f64, 0.0f64, 0u32);
     let mut bench_step = 0.0f64;
+    let mut bench_frame = 0.0f64;
     for i in 0..frame_count {
         let mut encoder = device.create_command_encoder(&Default::default());
         let audio = if synth_audio {
@@ -367,7 +382,9 @@ async fn render() -> anyhow::Result<()> {
         queue.submit(Some(encoder.finish()));
         let submit_ms = t_render.elapsed().as_secs_f64() * 1000.0;
         device.poll(wgpu::Maintain::Wait);
+        let frame_ms = t_render.elapsed().as_secs_f64() * 1000.0;
         if bench && i >= frame_count / 10 {
+            bench_frame += frame_ms;
             bench_render += render_ms;
             bench_submit += submit_ms;
             bench_step += step_ms;
@@ -376,10 +393,11 @@ async fn render() -> anyhow::Result<()> {
     }
     if bench && bench_n > 0 {
         eprintln!(
-            "BENCH frames={bench_n} render_ms={:.4} render_submit_ms={:.4} step_ms={:.4}",
+            "BENCH frames={bench_n} render_ms={:.4} render_submit_ms={:.4} step_ms={:.4} frame_with_gpu_ms={:.4}",
             bench_render / bench_n as f64,
             bench_submit / bench_n as f64,
-            bench_step / bench_n as f64
+            bench_step / bench_n as f64,
+            bench_frame / bench_n as f64
         );
     }
     // PROBE_TRACE=a,b: prints local/world state of layers whose name contains a filter.

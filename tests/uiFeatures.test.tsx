@@ -289,6 +289,25 @@ describe('Displays: Shows picker', () => {
       fireEvent.click(screen.getByRole('combobox', { name: /Shows on Monitor 1/ }));
       await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'Photos' })); });
       await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource.kind).toBe('photo_api'));
+
+      fireEvent.click(screen.getByRole('combobox', { name: /Shows on Monitor 1/ }));
+      await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'No wallpaper (system wallpaper)' })); });
+      await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource).toEqual({ kind: 'none' }));
+    } finally {
+      await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', before); });
+    }
+  });
+});
+
+describe('No wallpaper', () => {
+  it('hands the selected display back to the system wallpaper from the playback bar', async () => {
+    await openApp();
+    const before = useAppStore.getState().monitors[0].activeSource;
+    try {
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'No wallpaper' })); });
+      await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource).toEqual({ kind: 'none' }));
+      expect(document.querySelector('.now-playing-title')?.textContent).toBe('No wallpaper');
+      expect((screen.getByRole('button', { name: 'No wallpaper' }) as HTMLButtonElement).disabled).toBe(true);
     } finally {
       await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', before); });
     }

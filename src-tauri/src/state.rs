@@ -152,6 +152,29 @@ pub fn migrate_legacy_hotkeys(conn: &Connection, s: &mut AppSettings) -> bool {
     changed
 }
 
+/// Once only: `"integrated"` was the default GPU before `"auto"`, so every install has it
+/// stored. Move it to `"auto"` (the GPU driving the displays); a later explicit choice stays.
+/// Returns whether the setting changed.
+pub fn migrate_render_gpu_auto(conn: &Connection, s: &mut AppSettings) -> bool {
+    const FLAG: &str = "render_gpu_auto_migrated";
+    if get_setting::<bool>(conn, FLAG)
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let changed = s.render_gpu == "integrated";
+    if changed {
+        s.render_gpu = truongpaper_core::DEFAULT_RENDER_GPU.into();
+        if persist_settings(conn, s).is_err() {
+            return false;
+        }
+    }
+    let _ = truongpaper_core::set_setting(conn, FLAG, &true);
+    changed
+}
+
 /// Longest accepted accelerator string.
 const MAX_HOTKEY_LEN: usize = 64;
 
@@ -326,6 +349,22 @@ mod tests {
         s.pause_hotkey = old_pause.into();
         assert!(!migrate_legacy_hotkeys(&conn, &mut s));
         assert_eq!(s.pause_hotkey, old_pause);
+    }
+
+    #[test]
+    fn old_integrated_default_moves_to_auto_once() {
+        let conn = test_db();
+        let mut s = AppSettings {
+            render_gpu: "integrated".into(),
+            ..AppSettings::default()
+        };
+        assert!(migrate_render_gpu_auto(&conn, &mut s));
+        assert_eq!(s.render_gpu, "auto");
+        assert_eq!(load_settings(&conn).render_gpu, "auto");
+        // Picking the integrated GPU again afterwards is kept.
+        s.render_gpu = "integrated".into();
+        assert!(!migrate_render_gpu_auto(&conn, &mut s));
+        assert_eq!(s.render_gpu, "integrated");
     }
 
     #[test]

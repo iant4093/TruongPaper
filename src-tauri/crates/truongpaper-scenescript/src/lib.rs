@@ -851,8 +851,100 @@ pub fn create_sandboxed_runtime() -> rquickjs::Result<(Runtime, Context)> {
     rt.set_gc_threshold(GC_THRESHOLD_BYTES);
     rt.set_loader(WeModuleResolver, WeModuleLoader);
     let ctx = Context::full(&rt)?;
+    ctx.with(|ctx| -> rquickjs::Result<()> {
+        let offset = Function::new(ctx.clone(), |ms: f64| tz_offset_minutes(ms))?;
+        ctx.globals().set("__tzOffset", offset)?;
+        ctx.eval::<(), _>(LOCAL_TIME_JS)?;
+        Ok(())
+    })?;
     Ok((rt, ctx))
 }
+
+/// The OS's offset for the instant `ms` (Unix milliseconds), in `Date.getTimezoneOffset` terms:
+/// minutes to add to local time to get UTC (UTC-8 is `480`), daylight saving included.
+pub fn tz_offset_minutes(ms: f64) -> f64 {
+    use chrono::{Local, Offset, TimeZone};
+    if !ms.is_finite() {
+        return 0.0;
+    }
+    match Local.timestamp_millis_opt(ms as i64) {
+        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {
+            -f64::from(t.offset().fix().local_minus_utc()) / 60.0
+        }
+        chrono::LocalResult::None => 0.0,
+    }
+}
+
+/// QuickJS gets the local time zone wrong on Windows: it reads `TIME_ZONE_INFORMATION.Bias`
+/// (already minutes) and divides it by 60, and ignores daylight saving, so `new Date()`
+/// shows UTC give or take a few minutes and every scene clock is hours off. When the engine
+/// disagrees with the OS, local-time `Date` methods are rebuilt on the UTC ones with the OS
+/// offset (`__tzOffset`). Elsewhere the engine is right and nothing changes.
+const LOCAL_TIME_JS: &str = r#"
+(() => {
+    const D = Date, P = D.prototype, g = globalThis, off = g.__tzOffset;
+    delete g.__tzOffset;
+    const now = D.now();
+    if (new D(now).getTimezoneOffset() === off(now)) return;
+    const getTime = P.getTime, setTime = P.setTime, engineOff = P.getTimezoneOffset;
+    const MIN = 60000;
+    // A date whose UTC fields read as this instant's local fields, and back.
+    const toLocal = (t) => t - off(t) * MIN;
+    const fromLocal = (l) => { const guess = l + off(l) * MIN; return l + off(guess) * MIN; };
+    const def = (name, fn) => Object.defineProperty(P, name, { value: fn, writable: true, configurable: true });
+    const fields = ['FullYear', 'Month', 'Date', 'Day', 'Hours', 'Minutes', 'Seconds', 'Milliseconds'];
+    for (const f of fields) {
+        const getUtc = P['getUTC' + f];
+        def('get' + f, function () {
+            const t = getTime.call(this);
+            return t !== t ? NaN : getUtc.call(new D(toLocal(t)));
+        });
+        if (f === 'Day') continue;
+        const setUtc = P['setUTC' + f];
+        def('set' + f, function (...args) {
+            const t = getTime.call(this);
+            const local = new D(t !== t ? 0 : toLocal(t));
+            const l = setUtc.apply(local, args);
+            return setTime.call(this, l !== l ? NaN : fromLocal(l));
+        });
+    }
+    def('getYear', function () { return this.getFullYear() - 1900; });
+    def('getTimezoneOffset', function () {
+        const t = getTime.call(this);
+        return t !== t ? NaN : off(t);
+    });
+    // Formatting: run the engine's own formatter on an instant shifted so that its (wrong)
+    // local fields come out as the real ones, then fix the zone it prints.
+    const zone = (t) => {
+        const m = -off(t), a = Math.abs(m);
+        return (m < 0 ? '-' : '+') + String(Math.floor(a / 60)).padStart(2, '0') + String(a % 60).padStart(2, '0');
+    };
+    for (const name of ['toString', 'toDateString', 'toTimeString', 'toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
+        const orig = P[name];
+        def(name, function (...args) {
+            const t = getTime.call(this);
+            if (t !== t) return orig.apply(this, args);
+            const s = new D(t);
+            setTime.call(s, t + (engineOff.call(s) - off(t)) * MIN);
+            return orig.apply(s, args).replace(/GMT[+-]\d{4}/, 'GMT' + zone(t));
+        });
+    }
+    function LocalDate(...args) {
+        if (!new.target) return new D().toString();
+        if (args.length >= 2) {
+            const l = D.UTC(...args);
+            return new D(l !== l ? NaN : fromLocal(l));
+        }
+        return new D(...args);
+    }
+    LocalDate.prototype = P;
+    LocalDate.now = D.now;
+    LocalDate.UTC = D.UTC;
+    LocalDate.parse = D.parse;
+    Object.defineProperty(P, 'constructor', { value: LocalDate, writable: true, configurable: true });
+    g.Date = LocalDate;
+})();
+"#;
 
 /// Resolves import specifiers to themselves; only the built-in WE modules exist.
 struct WeModuleResolver;
@@ -1775,6 +1867,56 @@ mod tests {
         ctx.with(|ctx| {
             let val: i32 = ctx.eval("2 + 2").expect("eval");
             assert_eq!(val, 4);
+        });
+    }
+
+    #[test]
+    fn script_dates_use_the_os_time_zone() {
+        use chrono::{Datelike, Local, TimeZone, Timelike};
+        let (_rt, ctx) = create_sandboxed_runtime().expect("init quickjs");
+        ctx.with(|ctx| {
+            // A fixed instant in summer and one in winter (daylight saving differs).
+            for ms in [1_783_000_000_000_i64, 1_768_000_000_000] {
+                let want = Local.timestamp_millis_opt(ms).unwrap();
+                let got: Vec<f64> = ctx
+                    .eval(format!(
+                        "(() => {{ const d = new Date({ms});
+                           return [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getDay(),
+                                   d.getHours(), d.getMinutes(), d.getTimezoneOffset()]; }})()"
+                    ))
+                    .expect("eval");
+                assert_eq!(
+                    got,
+                    vec![
+                        f64::from(want.year()),
+                        f64::from(want.month()),
+                        f64::from(want.day()),
+                        f64::from(want.weekday().num_days_from_sunday()),
+                        f64::from(want.hour()),
+                        f64::from(want.minute()),
+                        tz_offset_minutes(ms as f64),
+                    ],
+                    "instant {ms}"
+                );
+                let text: String = ctx
+                    .eval(format!("new Date({ms}).toTimeString()"))
+                    .expect("eval");
+                assert!(
+                    text.starts_with(&format!("{:02}:{:02}", want.hour(), want.minute())),
+                    "{text}"
+                );
+            }
+            // Local components and setters round-trip.
+            let ok: bool = ctx
+                .eval(
+                    "(() => { const d = new Date(2026, 6, 4, 13, 45, 10);
+                       if (d.getHours() !== 13 || d.getMinutes() !== 45 || d.getDate() !== 4) return false;
+                       d.setHours(7, 5);
+                       return d.getHours() === 7 && d.getMinutes() === 5 && d instanceof Date
+                         && typeof Date() === 'string' && Math.abs(Date.now() - new Date().getTime()) < 1000; })()",
+                )
+                .expect("eval");
+            assert!(ok);
         });
     }
 

@@ -61,6 +61,7 @@ export function currentWallpaperForMonitor(
     ? wallpapers.find((item) => item.wallpaperId === monitor.activeWallpaperId)
     : undefined;
   const photo = monitor && !monitor.activeWallpaperId && monitor.activeSource?.kind !== 'workshop'
+    && monitor.activeSource?.kind !== 'none'
     ? photoStatus?.currentPhotoByMonitor?.[monitor.monitorId]
     : undefined;
   return { wallpaper, photo };

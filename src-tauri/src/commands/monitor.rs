@@ -534,6 +534,7 @@ pub(crate) async fn show_library_wallpaper(
         vfs,
     )
     .await?;
+    crate::accent::wallpaper_applied(app, monitor_id, &item);
     let _ = app.emit(
         EVENT_WALLPAPER_CHANGED,
         WallpaperChangedPayload {
@@ -744,6 +745,43 @@ pub(crate) async fn show_playlist_item(
     }
 }
 
+/// Stops whatever `monitor_id` shows and hands the display back to the system wallpaper: the
+/// render thread hides its desktop surface there and Web/Video windows and Application
+/// processes close.
+pub(crate) fn show_no_wallpaper(
+    app: &AppHandle,
+    state: &AppState,
+    monitor_id: &str,
+) -> Result<(), String> {
+    let source = WallpaperSource::None;
+    {
+        let conn = state.db.lock();
+        db::set_monitor_source(&conn, monitor_id, &source)?;
+    }
+    state.host.set_source(
+        monitor_id,
+        source.clone(),
+        None,
+        UniversalAdjustments::default().compositor_uniforms(IpcTransitionType::Crossfade),
+    );
+    state.host.set_runtime(
+        monitor_id,
+        ActiveRuntime::None,
+        UniversalAdjustments::default(),
+        false,
+    );
+    let _ = app.emit(
+        EVENT_WALLPAPER_CHANGED,
+        WallpaperChangedPayload::<truongpaper_photo_api::PhotoItem> {
+            monitor_id,
+            source: &source,
+            current_item: None,
+            transition_used: IpcTransitionType::Crossfade.as_str(),
+        },
+    );
+    Ok(())
+}
+
 /// Applies `source` to a monitor (the body of `monitor_apply_wallpaper`, also used by the
 /// rotation scheduler to restore persisted sources on launch).
 pub(crate) async fn apply_source(
@@ -763,6 +801,10 @@ pub(crate) async fn apply_source(
         }
         WallpaperSource::Workshop { wallpaper_id } => {
             show_library_wallpaper(app, state, monitor_id, wallpaper_id, source.clone()).await
+        }
+        WallpaperSource::None => {
+            show_no_wallpaper(app, state, monitor_id)?;
+            Ok(())
         }
         WallpaperSource::Playlist { playlist_id } => {
             let playlist = {
@@ -854,6 +896,7 @@ pub async fn monitor_apply_wallpaper(
 
 #[tauri::command]
 pub async fn monitor_update_property(
+    app: AppHandle,
     state: State<'_, AppState>,
     wallpaper_id: String,
     prop_key: String,
@@ -864,9 +907,14 @@ pub async fn monitor_update_property(
         let conn = state.db.lock();
         db::set_user_property(&conn, &wallpaper_id, &prop_key, &prop_value)?;
     }
+    let key = prop_key.trim().to_string();
+    let scheme = key == crate::accent::SCHEME_COLOR_KEY;
     let mut changed = Map::new();
-    changed.insert(prop_key.trim().to_string(), prop_value);
+    changed.insert(key, prop_value);
     forward_properties(&state, &wallpaper_id, &changed);
+    if scheme {
+        crate::accent::refresh(&app);
+    }
     Ok(())
 }
 

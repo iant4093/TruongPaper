@@ -21,7 +21,7 @@
 
 use crate::commands::monitor::live_monitors;
 use crate::host::{ActiveRuntime, MonitorRuntime, RenderEvent, SceneDescriptor, WallpaperHost};
-use crate::models::UniversalAdjustments;
+use crate::models::{UniversalAdjustments, WallpaperSource};
 use crate::scene_runtime::{SceneRuntime, SoundRng};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -881,7 +881,7 @@ mod platform {
 
     thread_local! {
         /// Desktop windows; only touched on the main thread.
-        static WINDOWS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+        static WINDOWS: RefCell<Vec<(String, Retained<NSWindow>)>> = const { RefCell::new(Vec::new()) };
     }
     static OBSERVER_STARTED: AtomicBool = AtomicBool::new(false);
     static SCREENS_CHANGED: AtomicBool = AtomicBool::new(false);
@@ -930,7 +930,7 @@ mod platform {
 
     fn close_all_windows() {
         WINDOWS.with(|w| {
-            for window in w.borrow_mut().drain(..) {
+            for (_, window) in w.borrow_mut().drain(..) {
                 window.orderOut(None);
                 window.close();
             }
@@ -997,6 +997,7 @@ mod platform {
                     let f = window.frame();
                     let width = (f.size.width * scale).round().max(1.0) as u32;
                     let height = (f.size.height * scale).round().max(1.0) as u32;
+                    let keep_id = monitor_id.clone();
                     match surface_for_window(&instance, &window) {
                         Ok(surface) => out.push(SurfaceTarget {
                             monitor_id,
@@ -1007,7 +1008,7 @@ mod platform {
                         }),
                         Err(err) => tracing::warn!("desktop surface for {monitor_id}: {err}"),
                     }
-                    keep.push(window);
+                    keep.push((keep_id, window));
                 }
                 WINDOWS.with(|w| w.borrow_mut().extend(keep));
                 let _ = tx.send(out);
@@ -1025,6 +1026,25 @@ mod platform {
         }
 
         pub fn pump(&mut self) {}
+
+        /// Shows or hides the desktop window of one display (hidden: macOS's own wallpaper).
+        pub fn set_visible(&mut self, app: &AppHandle, monitor_id: &str, visible: bool) {
+            let monitor_id = monitor_id.to_string();
+            let _ = app.run_on_main_thread(move || {
+                WINDOWS.with(|w| {
+                    for (id, window) in w.borrow().iter() {
+                        if *id != monitor_id {
+                            continue;
+                        }
+                        if visible {
+                            window.orderFrontRegardless();
+                        } else {
+                            window.orderOut(None);
+                        }
+                    }
+                });
+            });
+        }
 
         /// Hides and releases every desktop window (call after dropping the surfaces).
         pub fn teardown(&mut self, app: &AppHandle) {
@@ -1047,7 +1067,7 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     pub struct DesktopSurfaces {
-        hwnds: Vec<HWND>,
+        hwnds: Vec<(String, HWND)>,
         events: Receiver<DesktopLifecycleEvent>,
     }
 
@@ -1120,7 +1140,7 @@ mod platform {
                         let _ = DestroyWindow(hwnd);
                         continue;
                     }
-                    self.hwnds.push(hwnd);
+                    self.hwnds.push((m.monitor_id.clone(), hwnd));
                     let Some(raw) = NonZeroIsize::new(hwnd.0 as isize) else {
                         continue;
                     };
@@ -1187,8 +1207,35 @@ mod platform {
             }
         }
 
+        /// Shows or hides the surface window of one display. Hidden, Explorer's desktop
+        /// window behind it paints the Windows wallpaper.
+        pub fn set_visible(&mut self, _app: &AppHandle, monitor_id: &str, visible: bool) {
+            for (id, hwnd) in &self.hwnds {
+                if id != monitor_id {
+                    continue;
+                }
+                // SAFETY: a window created by this thread in `create`.
+                unsafe {
+                    let _ = ShowWindow(*hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                    if !visible {
+                        if let Ok(parent) = GetParent(*hwnd) {
+                            use windows::Win32::Graphics::Gdi::{
+                                RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
+                            };
+                            let _ = RedrawWindow(
+                                Some(parent),
+                                None,
+                                None,
+                                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         pub fn teardown(&mut self, _app: &AppHandle) {
-            for hwnd in self.hwnds.drain(..) {
+            for (_, hwnd) in self.hwnds.drain(..) {
                 // SAFETY: windows created by this thread in `create`.
                 unsafe {
                     let _ = DestroyWindow(hwnd);
@@ -1226,6 +1273,8 @@ mod platform {
         }
 
         pub fn pump(&mut self) {}
+
+        pub fn set_visible(&mut self, _app: &AppHandle, _monitor_id: &str, _visible: bool) {}
 
         pub fn teardown(&mut self, _app: &AppHandle) {}
     }
@@ -1811,6 +1860,8 @@ struct SceneState {
     sound_volume: Option<f32>,
     videos: Vec<EmbeddedVideo>,
     video_settings: Option<VideoPlaybackSettings>,
+    /// Details panel playback speed: scales scene time (animations, particles, scripts).
+    speed: f32,
     rng: SoundRng,
     last_cursor: Option<CursorSample>,
     last_frame: Instant,
@@ -1956,6 +2007,7 @@ impl SceneState {
                 sounds.set_paused(self.paused);
             }
         }
+        self.speed = truongpaper_renderer::clamp_playback_speed(adj.playback_speed);
         let mut settings = video_settings(adj);
         settings.muted |= !self.sound_owner;
         if self.video_settings != Some(settings) {
@@ -2003,6 +2055,8 @@ struct MonitorRenderer {
     stalled: bool,
     /// A scene was replaced by something else: tell the UI to drop its diagnostics.
     diag_clear: Option<Option<String>>,
+    /// The display is set to "No wallpaper": its surface window is hidden.
+    hidden: bool,
 }
 
 /// Renderer state that survives a surface rebuild of an unchanged display.
@@ -2083,6 +2137,7 @@ impl MonitorRenderer {
             ready_scene: None,
             stalled: false,
             diag_clear: None,
+            hidden: false,
         })
     }
 
@@ -2675,7 +2730,7 @@ impl MonitorRenderer {
             label: Some("desktop_scene"),
         });
         let now = Instant::now();
-        let dt = now.duration_since(scene.last_frame).as_secs_f32().min(0.1);
+        let dt = scene_step_dt(now.duration_since(scene.last_frame), scene.speed);
         scene.last_frame = now;
         let uniforms = frame_uniforms(base, 1.0, monitor_aspect, scene.aspect, scene.aspect, time);
 
@@ -2751,6 +2806,17 @@ impl MonitorRenderer {
         self.last_uniforms = Some(*base);
         self.dirty = false;
     }
+}
+
+/// "No wallpaper" on this display: hide the surface so the system wallpaper shows.
+pub fn shows_system_wallpaper(rt: Option<&MonitorRuntime>) -> bool {
+    rt.is_some_and(|rt| rt.source == WallpaperSource::None && rt.active == ActiveRuntime::None)
+}
+
+/// Scene time for one frame: the wall-clock gap (capped at 100 ms so a stall does not jump the
+/// scene) times the playback speed.
+pub fn scene_step_dt(elapsed: Duration, speed: f32) -> f32 {
+    elapsed.as_secs_f32().min(0.1) * truongpaper_renderer::clamp_playback_speed(speed)
 }
 
 /// The screen size scenes see as `engine.screenResolution`: logical points, not backing pixels.
@@ -2851,6 +2917,7 @@ fn finish_scene_gpu(
         sound_volume: None,
         videos,
         video_settings: None,
+        speed: 1.0,
         rng: SoundRng::from_time(),
         last_cursor: None,
         last_frame: Instant::now(),
@@ -2921,14 +2988,22 @@ fn create_gpu(
         })
         .collect();
     let pref = GpuPreference::from_setting(render_gpu);
+    #[cfg(target_os = "windows")]
+    let display_gpus = truongpaper_platform::win_desktop::display_gpu_names();
+    #[cfg(not(target_os = "windows"))]
+    let display_gpus: Vec<String> = Vec::new();
     // Each GPU appears once per backend; a GPU that fails on one backend is tried on the next.
     let mut adapters: Vec<Option<wgpu::Adapter>> = adapters.into_iter().map(Some).collect();
-    for i in rank_adapters(&described, &pref) {
+    for i in rank_adapters(&described, &pref, &display_gpus) {
         let Some(adapter) = adapters[i].take() else {
             continue;
         };
         if let Some(gpu) = open_device(adapter) {
-            host.set_gpu_adapters(unique_adapters(&described, Some(&described[i].0)));
+            host.set_gpu_adapters(unique_adapters(
+                &described,
+                Some(&described[i].0),
+                &display_gpus,
+            ));
             return Some(gpu);
         }
     }
@@ -2943,7 +3018,7 @@ fn create_gpu(
     }))?;
     let name = adapter.get_info().name;
     let gpu = open_device(adapter)?;
-    host.set_gpu_adapters(unique_adapters(&described, Some(&name)));
+    host.set_gpu_adapters(unique_adapters(&described, Some(&name), &display_gpus));
     Some(gpu)
 }
 
@@ -3368,6 +3443,15 @@ fn run_renderer(
         );
         for (m, sound_owner) in monitors.iter_mut().zip(owners) {
             let rt = rt_of(&m.monitor_id);
+            let hide = shows_system_wallpaper(rt);
+            if hide != m.hidden {
+                desktop.set_visible(app, &m.monitor_id, !hide);
+                m.hidden = hide;
+                m.dirty = true;
+            }
+            if hide {
+                continue;
+            }
             let should_render = playing(&m.monitor_id);
             let span = span_on
                 .then(|| span_transform(&geoms, &m.monitor_id))
@@ -3684,6 +3768,36 @@ mod tests {
         );
         assert!(cursor_transitions(Some(s(0.3, false)), None).is_empty());
         assert_eq!(scene_cursor_kind(Click), CursorEventKind::Click);
+    }
+
+    #[test]
+    fn only_no_wallpaper_hides_the_surface() {
+        use crate::host::MonitorRuntime;
+        let none = MonitorRuntime {
+            source: WallpaperSource::None,
+            ..MonitorRuntime::default()
+        };
+        assert!(shows_system_wallpaper(Some(&none)));
+        // A failed load also has no runtime, but keeps its (black) surface.
+        assert!(!shows_system_wallpaper(Some(&MonitorRuntime::default())));
+        assert!(!shows_system_wallpaper(None));
+        let photo = MonitorRuntime {
+            source: WallpaperSource::None,
+            active: ActiveRuntime::Photo { path: None },
+            ..MonitorRuntime::default()
+        };
+        assert!(!shows_system_wallpaper(Some(&photo)));
+    }
+
+    #[test]
+    fn scene_time_follows_playback_speed() {
+        let frame = Duration::from_millis(20);
+        assert!((scene_step_dt(frame, 1.0) - 0.02).abs() < 1e-6);
+        assert!((scene_step_dt(frame, 2.0) - 0.04).abs() < 1e-6);
+        assert!((scene_step_dt(frame, 0.5) - 0.01).abs() < 1e-6);
+        // A stall is capped before scaling; nonsense speeds fall back to the clamp.
+        assert!((scene_step_dt(Duration::from_secs(3), 2.0) - 0.2).abs() < 1e-6);
+        assert!((scene_step_dt(frame, f32::NAN) - 0.02).abs() < 1e-6);
     }
 
     #[test]

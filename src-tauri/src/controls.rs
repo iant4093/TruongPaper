@@ -251,6 +251,7 @@ pub async fn next_on_monitor(app: &AppHandle, monitor_id: &str) -> Result<(), St
         WallpaperSource::Workshop { .. } => {
             Err("This display shows a single wallpaper: nothing to advance".into())
         }
+        WallpaperSource::None => Err("This display has no wallpaper: nothing to advance".into()),
     }
 }
 

@@ -5,6 +5,7 @@
 //! Complete specification: `docs/01-SYSTEM-ARCHITECTURE.md` (Sections 2, 5, 6) &
 //! `docs/03-WALLPAPER-ENGINE-COMPATIBILITY-SPEC.md` (Sections 6, 9, 10).
 
+pub mod accent;
 pub mod application;
 pub mod cursor;
 pub mod display_identity;
@@ -27,6 +28,10 @@ pub mod mac_video;
 #[cfg(target_os = "windows")]
 #[path = "windows_video.rs"]
 pub mod win_video;
+
+#[cfg(target_os = "windows")]
+#[path = "windows_accent.rs"]
+pub mod win_accent;
 
 pub use application::{
     application_launch_args, application_wallpapers_supported,

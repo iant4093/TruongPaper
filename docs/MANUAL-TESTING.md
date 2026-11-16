@@ -156,6 +156,11 @@ Use actual Workshop IDs/links in your report so failures can be reproduced.
 3. If comfortable doing so, restart Windows Explorer from Task Manager and check that the wallpaper reattaches. Otherwise skip this disruption and say so.
 4. Open Settings → Check for Updates. Before the first release exists, an unavailable-feed error is expected; the app must remain usable.
 5. After a first release and a newer signed release are available, test accepting an update: download, installation, restart, and version change. This two-version test cannot be completed before releases exist.
+6. **Scenes are smooth:** open Settings › Graphics card. It lists each GPU once, and the one your monitors are plugged into is marked recommended and in use. Apply a complex 4K scene at 120 fps; it should not stutter.
+7. **Clocks:** apply a scene with a clock (e.g. 4K SCI-FI Black Hole). It shows the same time as the taskbar, including after a daylight-saving change.
+8. **Playback speed:** on a scene and on a web wallpaper (e.g. Rainy Day), set Playback Speed to 2.00x, then 0.25x. The animation speeds up and slows down.
+9. **Scheme color:** apply a scene to the main display and change its Scheme Color. Start, the taskbar accent and Settings › Personalization › Colors follow it. Turn off Settings › Windows color and check that changing it no longer touches Windows.
+10. **No wallpaper:** press No wallpaper in the playback bar. The Windows wallpaper shows on that display, the others keep theirs, and choosing a wallpaper again brings TruongPaper back. Restart the app; the display stays on the Windows wallpaper.
 
 ## Send results back
 

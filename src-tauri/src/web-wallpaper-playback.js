@@ -168,16 +168,40 @@
   document.addEventListener('animationstart', () => {
     if (rate !== 1) for (const a of document.getAnimations()) a.playbackRate = rate;
   }, true);
-  // Canvas wallpapers animate from the frame timestamp: hand them a clock that runs at `rate`.
+  // Wallpapers animate from the frame timestamp, performance.now(), Date.now() (GSAP, most
+  // canvas effects) or timers: all of them run at `rate`. `new Date()` keeps the real time so
+  // clocks stay right.
+  const realPerfNow = performance.now.bind(performance);
+  const realDateNow = Date.now;
   let clockBase = 0;
   let realBase = 0;
+  let dateBase = realDateNow();
+  let dateRealBase = dateBase;
   const pageClock = (real) => clockBase + (real - realBase) * rate;
+  try {
+    Object.defineProperty(performance, 'now', { configurable: true, writable: true, value: () => pageClock(realPerfNow()) });
+  } catch {}
+  Date.now = () => Math.floor(dateBase + (realDateNow() - dateRealBase) * rate);
+  const scaleDelay = (delay) => {
+    const ms = Number(delay) || 0;
+    return rate === 1 || !(ms > 0) ? delay : ms / rate;
+  };
+  for (const name of ['setTimeout', 'setInterval']) {
+    const real = window[name];
+    if (typeof real !== 'function') continue;
+    window[name] = function (handler, delay, ...args) {
+      return real.call(window, handler, scaleDelay(delay), ...args);
+    };
+  }
   window.__truongpaper_apply_web_adjustments = (adj) => {
     const next = Math.min(3, Math.max(0.1, Number(adj?.playbackSpeed ?? 1) || 1));
     if (next !== rate) {
-      const now = performance.now();
+      const now = realPerfNow();
+      const dateNow = realDateNow();
       clockBase = pageClock(now);
       realBase = now;
+      dateBase = dateBase + (dateNow - dateRealBase) * rate;
+      dateRealBase = dateNow;
       rate = next;
       document.querySelectorAll('video, audio').forEach(syncRate);
       for (const element of activeMedia) syncRate(element);

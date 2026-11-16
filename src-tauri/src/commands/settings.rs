@@ -78,6 +78,10 @@ pub async fn settings_update(
         state.host.request_renderer_restart();
     }
 
+    if before.adjust_windows_color != after.adjust_windows_color {
+        crate::accent::refresh(&app);
+    }
+
     #[cfg(target_os = "windows")]
     if before.sync_lock_screen != after.sync_lock_screen {
         super::lock_screen::request_sync(&app);

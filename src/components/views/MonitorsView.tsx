@@ -22,6 +22,8 @@ export function describeSource(
       return lookup.wallpaperTitle(source.wallpaperId) ?? source.wallpaperId;
     case 'playlist':
       return `Playlist: ${lookup.playlistName(source.playlistId) ?? source.playlistId}`;
+    case 'none':
+      return 'No wallpaper';
   }
 }
 
@@ -73,6 +75,7 @@ export const MonitorsView: React.FC = () => {
     ['photo_api', 'Photos'] as const,
     ...wallpapers.filter((w) => w.type !== 'photo').map((w) => [`w:${w.wallpaperId}`, w.title] as const),
     ...playlists.map((p) => [`p:${p.playlistId}`, `Playlist: ${p.name}`] as const),
+    ['none', 'No wallpaper (system wallpaper)'] as const,
   ], [wallpapers, playlists]);
   const setShows = (monitor: MonitorInfo, key: string) => {
     const source = sourceFromKey(key);

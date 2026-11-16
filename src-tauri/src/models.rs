@@ -229,6 +229,8 @@ pub enum WallpaperSource {
         #[serde(rename = "playlistId")]
         playlist_id: String,
     },
+    /// No TruongPaper wallpaper: the display shows the operating system's own wallpaper.
+    None,
 }
 
 impl WallpaperSource {
@@ -444,6 +446,14 @@ mod tests {
         assert_eq!(
             WallpaperSource::from_stored_json("garbage"),
             WallpaperSource::PhotoApi
+        );
+        assert_eq!(
+            serde_json::to_value(WallpaperSource::None).unwrap(),
+            json!({"kind": "none"})
+        );
+        assert_eq!(
+            WallpaperSource::from_stored_json("{\"kind\":\"none\"}"),
+            WallpaperSource::None
         );
     }
 

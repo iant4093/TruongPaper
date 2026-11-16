@@ -363,3 +363,45 @@ pub fn spawn_desktop_lifecycle_watcher(tx: Sender<DesktopLifecycleEvent>) -> std
         })?;
     Ok(())
 }
+
+/// Names of the GPUs that have displays connected (DXGI adapters with outputs), the one with
+/// the most displays first; ties keep DXGI's order, which lists the primary display's GPU
+/// first. Drawing on another GPU costs a copy across the PCIe bus every frame.
+pub fn display_gpu_names() -> Vec<String> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    // SAFETY: plain DXGI enumeration; every interface is released when dropped.
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, u32)> = Vec::new();
+        let mut i = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            i += 1;
+            let mut outputs = 0;
+            while adapter.EnumOutputs(outputs).is_ok() {
+                outputs += 1;
+            }
+            if outputs == 0 {
+                continue;
+            }
+            let Ok(desc) = adapter.GetDesc1() else {
+                continue;
+            };
+            let len = desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len());
+            let name = String::from_utf16_lossy(&desc.Description[..len])
+                .trim()
+                .to_string();
+            if !name.is_empty() && !found.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                found.push((name, outputs));
+            }
+        }
+        // Stable: equal counts keep DXGI's order.
+        found.sort_by(|a, b| b.1.cmp(&a.1));
+        found.into_iter().map(|(name, _)| name).collect()
+    }
+}

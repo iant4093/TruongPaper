@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pause, Play, SkipForward } from 'lucide-react';
+import { MonitorOff, Pause, Play, SkipForward } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import { toast } from '../store/feedback';
@@ -25,7 +25,8 @@ function usePlaybackInfo() {
       playlistName: monitor?.activeSource.kind === 'playlist'
         ? s.playlists.find((p) => monitor.activeSource.kind === 'playlist' && p.playlistId === monitor.activeSource.playlistId)?.name
         : undefined,
-      title: wallpaper?.title ?? photo?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected',
+      title: monitor?.activeSource.kind === 'none' ? 'No wallpaper'
+        : wallpaper?.title ?? photo?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected',
       preview: wallpaperPreviewSrc(wallpaper) ?? photoPreviewSrc(photo),
     };
   }));
@@ -58,7 +59,16 @@ export const PlaybackBar: React.FC = () => {
   const info = usePlaybackInfo();
   const setPlaybackPaused = useAppStore((s) => s.setPlaybackPaused);
   const playbackNext = useAppStore((s) => s.playbackNext);
-  const state = info.paused ? 'Paused' : info.autoPaused ? 'Auto-paused' : 'Playing';
+  const applyMonitorSource = useAppStore((s) => s.applyMonitorSource);
+  const none = info.kind === 'none';
+  const state = none ? 'System wallpaper' : info.paused ? 'Paused' : info.autoPaused ? 'Auto-paused' : 'Playing';
+  const removeWallpaper = () => {
+    if (!info.monitorId) return;
+    applyMonitorSource(info.monitorId, { kind: 'none' }).then(
+      () => toast.success(`${info.monitorName ?? 'This display'} now shows the system wallpaper`),
+      (err) => toast.error(err, 'Could not remove the wallpaper'),
+    );
+  };
   const nextLabel = info.kind === 'playlist' ? 'Next in playlist' : 'Next photo';
   return (
     <>
@@ -72,7 +82,12 @@ export const PlaybackBar: React.FC = () => {
           </div>
         </div>
         {!info.canRotate && <span className="playback-hint" id="next-photo-hint">Next works for photos and playlists.</span>}
-        <button type="button" className="button playback-control" disabled={!info.monitorId}
+        <button type="button" className="button playback-control" disabled={!info.monitorId || none}
+          title="Stop TruongPaper on this display and show the system wallpaper"
+          onClick={removeWallpaper}>
+          <MonitorOff size={14} />No wallpaper
+        </button>
+        <button type="button" className="button playback-control" disabled={!info.monitorId || none}
           title={info.paused ? 'Resume playback on this display' : 'Pause playback on this display'}
           onClick={() => setPlaybackPaused(!info.paused, info.monitorId).catch((err) => toast.error(err, 'Could not change playback'))}>
           {info.paused ? <Play size={14} /> : <Pause size={14} />}{info.paused ? 'Resume' : 'Pause'}

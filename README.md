@@ -106,7 +106,8 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 **Inspector, Audio Reactivity & Desktop Interaction**
 
 - Dynamic `project.json` inspector: automatically generates sliders, switches, color pickers, dropdowns, text inputs and file pickers for every wallpaper property, evaluating visibility `condition` expressions and localization tables in real time
-- Universal per-wallpaper adjustments (Volume, Playback Speed, Fit Mode, Zoom/Offset, Brightness, Contrast, Saturation, Hue Shift) and named user presets
+- Universal per-wallpaper adjustments (Volume, Playback Speed, Fit Mode, Zoom/Offset, Brightness, Contrast, Saturation, Hue Shift) and named user presets. Playback Speed also scales scene time (animations, particles, scripts) and the clocks web wallpapers animate from
+- Windows: the main display's wallpaper sets the Windows accent color from its **Scheme Color** (Wallpaper Engine's "Adjust Windows color"); turn it off in **Settings › Windows color**
 - System audio loopback + 2048-point Hann-windowed FFT (`WASAPI Loopback` on Windows; a virtual loopback device such as BlackHole on macOS) driving 16-, 32- and 64-band logarithmic stereo spectrums at 60 Hz
 - Passive desktop cursor forwarding: tracks cursor movement and clicks over unoccluded desktop regions without stealing clicks from Finder or Windows desktop icons
 
@@ -116,6 +117,8 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 - Smart orientation matching: skips portrait photos on landscape monitors (and vice-versa) by default, or displays mismatched aspect ratios over a dual-pass Kawase GPU-blurred ambient backdrop (`Fit + Blur`)
 - Custom `wgpu` transitions: **Smooth Crossfade**, **Blur-Dissolve**, and **Liquid morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
 - Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`, or manual only), on app launch, on display wake. Each display keeps its own playlist position and timer, and positions persist across restarts
+- **No wallpaper** per display (Playback bar or **Displays › Shows**): TruongPaper steps aside and the system wallpaper shows
+- Wallpapers draw on the GPU the displays are connected to by default (**Settings › Graphics card** lists each GPU once)
 - Per-display volume slider in **Displays**, and **Span one wallpaper across all displays** for photos and scenes (videos, web wallpapers and applications stay on their own display)
 - Lock screen still: on macOS **Prepare Lock Screen Still** saves a JPEG of the selected display's wallpaper and reveals it in Finder, so you can choose it in System Settings; on Windows **Set Lock Screen Still** sets the image once, and **Follow the primary display** keeps it in sync as the wallpaper changes
 - Global keyboard shortcuts for Next wallpaper (`CmdOrCtrl+Alt+Right`; `Ctrl+Alt+Shift+Right` on Windows) and Pause / Resume (`CmdOrCtrl+Alt+P`; `Ctrl+Alt+Shift+P` on Windows, so AltGr typing keeps working), editable in Settings

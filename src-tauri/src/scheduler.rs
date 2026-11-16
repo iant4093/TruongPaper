@@ -120,7 +120,7 @@ pub fn monitor_interval_secs(
     match source {
         WallpaperSource::PhotoApi => settings_interval_secs,
         WallpaperSource::Playlist { .. } => playlist.map_or(0, |p| p.interval_seconds),
-        WallpaperSource::Workshop { .. } => 0,
+        WallpaperSource::Workshop { .. } | WallpaperSource::None => 0,
     }
 }
 
@@ -564,7 +564,7 @@ fn rotation_action(
 ) -> Option<RotationAction> {
     match &m.source {
         WallpaperSource::PhotoApi => Some(RotationAction::NextPhoto),
-        WallpaperSource::Workshop { .. } => None,
+        WallpaperSource::Workshop { .. } | WallpaperSource::None => None,
         WallpaperSource::Playlist { playlist_id } => {
             let playlist = m.playlist.as_ref()?;
             let index = next_playlist_index(playlist, s.playlist_index);

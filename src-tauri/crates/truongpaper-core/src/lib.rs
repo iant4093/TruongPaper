@@ -409,14 +409,22 @@ pub struct AppSettings {
     /// Global shortcut (Tauri accelerator) for "Pause / Resume"; empty = disabled.
     #[serde(default = "default_pause_hotkey")]
     pub pause_hotkey: String,
-    /// GPU that draws photos and scenes: `"integrated"` (default, leaves a dedicated GPU free
-    /// for games), `"dedicated"`, or `"adapter:<name>"` for one specific adapter. A choice
-    /// that is not present falls back to the next best GPU.
+    /// GPU that draws photos and scenes: `"auto"` (default: the GPU the displays are connected
+    /// to), `"integrated"`, `"dedicated"`, or `"adapter:<name>"` for one specific adapter. A
+    /// choice that is not present falls back to the next best GPU.
     #[serde(default = "default_render_gpu")]
     pub render_gpu: String,
+    /// Windows: the primary display's wallpaper sets the Windows accent color from its
+    /// `schemecolor` (Wallpaper Engine's "Adjust Windows color").
+    #[serde(default = "default_adjust_windows_color")]
+    pub adjust_windows_color: bool,
 }
 
-pub const DEFAULT_RENDER_GPU: &str = "integrated";
+fn default_adjust_windows_color() -> bool {
+    true
+}
+
+pub const DEFAULT_RENDER_GPU: &str = "auto";
 
 fn default_render_gpu() -> String {
     DEFAULT_RENDER_GPU.into()
@@ -468,6 +476,7 @@ impl Default for AppSettings {
             next_hotkey: default_next_hotkey(),
             pause_hotkey: default_pause_hotkey(),
             render_gpu: default_render_gpu(),
+            adjust_windows_color: default_adjust_windows_color(),
         }
     }
 }

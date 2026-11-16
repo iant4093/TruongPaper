@@ -93,7 +93,11 @@ const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = (
 
 const GPU_KIND_LABEL: Record<GpuAdapterInfo['kind'], string> = { integrated: 'integrated', dedicated: 'dedicated', other: 'other' };
 
-/** Which GPU draws photos and scenes. Integrated by default, so games keep the dedicated GPU. */
+/**
+ * Which GPU draws photos and scenes: one entry per GPU. The GPU the displays are connected to
+ * is recommended and stored as `auto`, so it follows the monitors; any other GPU is picked by
+ * name. Older `integrated` / `dedicated` values show as the GPU they land on.
+ */
 export const GpuPicker: React.FC<{ value: string; onChange: (next: string) => void }> = ({ value, onChange }) => {
   const [adapters, setAdapters] = useState<GpuAdapterInfo[] | null>(null);
   useEffect(() => {
@@ -107,22 +111,32 @@ export const GpuPicker: React.FC<{ value: string; onChange: (next: string) => vo
     return () => { alive = false; window.clearTimeout(timer); };
   }, [value]);
   const list = adapters ?? [];
-  const has = (kind: GpuAdapterInfo['kind']) => list.some((a) => a.kind === kind);
-  const options: Array<readonly [string, string]> = [
-    ['integrated', has('integrated') || list.length === 0 ? 'Integrated GPU (recommended)' : 'Most power-efficient GPU'],
-    ['dedicated', has('dedicated') || list.length === 0 ? 'Dedicated GPU' : 'Most powerful GPU'],
-    ...list.map((a) => [`adapter:${a.name}`, `${a.name} (${GPU_KIND_LABEL[a.kind]})`] as const),
-  ];
-  if (!options.some(([key]) => key === value)) options.push([value, value.replace(/^adapter:/, '') + ' (not found)']);
+  const recommended = list.find((a) => a.recommended) ?? list.find((a) => a.kind === 'integrated') ?? list[0];
+  const keyOf = (a: GpuAdapterInfo): string => (a === recommended ? 'auto' : `adapter:${a.name}`);
+  const options: Array<readonly [string, string]> = list.length === 0
+    ? [['auto', 'Automatic (recommended)']]
+    : list.map((a) => [keyOf(a), `${a.name} (${GPU_KIND_LABEL[a.kind]}${a === recommended && list.length > 1 ? ', recommended' : ''})`] as const);
+  // Show a saved name or kind as the GPU it lands on.
+  const named = value.startsWith('adapter:')
+    ? list.find((a) => a.name.toLowerCase() === value.slice('adapter:'.length).trim().toLowerCase())
+    : undefined;
+  const ofKind = value === 'integrated' || value === 'dedicated'
+    ? list.find((a) => a.kind === value) ?? list.find((a) => a.kind !== 'other')
+    : undefined;
+  const landed = named ?? ofKind;
+  const selected = landed ? keyOf(landed)
+    : value === 'auto' || value === 'integrated' || value === 'dedicated' ? 'auto'
+      : value;
+  if (!options.some(([key]) => key === selected)) options.push([selected, selected.replace(/^adapter:/, '') + ' (not found)']);
   const inUse = list.find((a) => a.inUse);
   return (
     <>
       <div style={{ fontSize: 13, margin: '14px 0 2px' }}>Graphics card</div>
       <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>
-        Draws photos and scene wallpapers. The integrated GPU leaves your dedicated GPU free for games.
+        Draws photos and scene wallpapers. The recommended GPU is the one your displays are connected to; another GPU has to copy every frame across to it.
         {list.length === 1 && ' This computer has one GPU, so it is always used.'}
       </div>
-      <Dropdown<string> label="Graphics card" value={value} options={options} onChange={onChange} />
+      <Dropdown<string> label="Graphics card" value={selected} options={options} onChange={(next) => { if (next !== selected) onChange(next); }} />
       {inUse && <div className="view-subtitle" role="status" style={{ marginTop: 6 }}>In use: {inUse.name}</div>}
     </>
   );
@@ -280,7 +294,7 @@ export const SettingsView: React.FC = () => {
           options={QUALITY_OPTIONS}
           onChange={(next) => void updateSettings({ qualityPreset: next })}
         />
-        <GpuPicker value={settings.renderGpu ?? 'integrated'} onChange={(next) => void updateSettings({ renderGpu: next })} />
+        <GpuPicker value={settings.renderGpu ?? 'auto'} onChange={(next) => void updateSettings({ renderGpu: next })} />
       </div>
 
       <SectionTitle>Smart pause</SectionTitle>
@@ -303,6 +317,20 @@ export const SettingsView: React.FC = () => {
           onChange={(next) => void updateSettings({ batteryPolicy: next })}
         />
       </div>
+
+      {/Win/.test(navigator.platform) && <>
+        <SectionTitle>Windows color</SectionTitle>
+        <div className="card" style={{ padding: 16 }}>
+          <ToggleRow
+            label="Match the Windows accent color to the wallpaper"
+            checked={settings.adjustWindowsColor ?? true}
+            onChange={(next) => void updateSettings({ adjustWindowsColor: next })}
+          />
+          <div className="view-subtitle" style={{ marginTop: 0 }}>
+            Uses the scheme color of the main display's wallpaper for Start, the taskbar and window accents.
+          </div>
+        </div>
+      </>}
 
       <SectionTitle>Startup</SectionTitle>
       <div className="card" style={{ padding: 16 }}>

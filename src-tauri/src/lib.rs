@@ -1,4 +1,5 @@
 // src-tauri/src/lib.rs
+pub mod accent;
 pub mod audio_bridge;
 pub mod commands;
 pub mod controls;
@@ -125,6 +126,13 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let mut settings = state.settings.lock();
         if state::migrate_legacy_hotkeys(&conn, &mut settings) {
             tracing::info!("default hotkeys now include Shift (AltGr is Ctrl+Alt on Windows)");
+        }
+    }
+    {
+        let conn = state.db.lock();
+        let mut settings = state.settings.lock();
+        if state::migrate_render_gpu_auto(&conn, &mut settings) {
+            tracing::info!("wallpapers now draw on the GPU the displays are connected to");
         }
     }
     // Windows ids used to be GDI names (`\\.\DISPLAY5`); carry their data over to stable ids.

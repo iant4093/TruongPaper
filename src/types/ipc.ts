@@ -245,6 +245,14 @@ export interface AppSettings {
   renderGpu: string;
   /** Windows: the primary display's wallpaper sets the accent color from its scheme color. */
   adjustWindowsColor?: boolean;
+  /** New full-size photos downloaded per day (1-50); rotation reuses photos already on disk. */
+  photoDownloadsPerDay?: number;
+  /** Photo caption: clock and date (bottom left). */
+  photoShowTime?: boolean;
+  /** Photo caption: album name (bottom right). */
+  photoShowAlbum?: boolean;
+  /** Photo caption: camera settings from EXIF (bottom right). */
+  photoShowExif?: boolean;
 }
 
 /** A GPU the desktop renderer can use (`gpu_list_adapters`). */

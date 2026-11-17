@@ -19,8 +19,8 @@ use std::path::Path;
 use std::sync::Arc;
 use truongpaper_core::{
     classify_candidate, count_unused_in_queue, evict_old_cached_files_preserving_history_unlocked,
-    now_ms, parse_album_slug, reset_exhausted_filter_history, upsert_cached_photo, CandidateStatus,
-    NewCachedPhoto, PhotoFilter,
+    local_day, now_ms, parse_album_slug, record_photo_download, reset_exhausted_filter_history,
+    upsert_cached_photo, CandidateStatus, NewCachedPhoto, PhotoFilter,
 };
 
 /// Largest image the refill loop will accept (the API serves originals around 10-30 MB).
@@ -45,6 +45,8 @@ pub enum RefillOutcome {
     Offline,
     /// [`MAX_REFILL_ATTEMPTS`] (or [`MAX_API_REJECTIONS`]) reached without a clear verdict.
     RetryCapReached { unused_count: usize },
+    /// The download budget (new full-size photos per day) is spent.
+    DailyLimitReached { unused_count: usize },
 }
 
 /// True when the unused count is low enough to start a background refill.
@@ -146,6 +148,33 @@ pub async fn refill_queue<T: PhotoTransport>(
     .await
 }
 
+/// [`refill_queue`] that downloads at most `max_downloads` full-size photos (each one is
+/// counted in the per-day budget).
+#[allow(clippy::too_many_arguments)]
+pub async fn refill_queue_with_budget<T: PhotoTransport>(
+    transport: &T,
+    limiter: &SlidingRateLimiter,
+    db: &Arc<Mutex<Connection>>,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    max_cache_bytes: u64,
+    currently_displayed_ids: &[String],
+    max_downloads: usize,
+) -> PhotoApiResult<RefillOutcome> {
+    let client = PhotoApiClient::new(transport);
+    refill_queue_limited(
+        &client,
+        limiter,
+        db,
+        app_data_dir,
+        filter,
+        max_cache_bytes,
+        currently_displayed_ids,
+        max_downloads,
+    )
+    .await
+}
+
 /// Refill loop against an explicit [`PhotoApiClient`] (custom endpoints / tests).
 #[allow(clippy::too_many_arguments)]
 pub async fn refill_queue_with_client<T: PhotoTransport>(
@@ -156,6 +185,30 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
     filter: &PhotoFilter,
     max_cache_bytes: u64,
     currently_displayed_ids: &[String],
+) -> PhotoApiResult<RefillOutcome> {
+    refill_queue_limited(
+        client,
+        limiter,
+        db,
+        app_data_dir,
+        filter,
+        max_cache_bytes,
+        currently_displayed_ids,
+        usize::MAX,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn refill_queue_limited<T: PhotoTransport>(
+    client: &PhotoApiClient<T>,
+    limiter: &SlidingRateLimiter,
+    db: &Arc<Mutex<Connection>>,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    max_cache_bytes: u64,
+    currently_displayed_ids: &[String],
+    max_downloads: usize,
 ) -> PhotoApiResult<RefillOutcome> {
     let slugs: Vec<String> = filter
         .album_slugs
@@ -176,11 +229,18 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
     let mut queue_dups_total = 0_usize;
     let mut history_dups = 0_usize;
     let mut api_rejections = 0_usize;
+    let mut downloads = 0_usize;
 
     loop {
         let unused = unused_count(db, filter)?;
         if unused >= QUEUE_TARGET_UNUSED {
             return Ok(RefillOutcome::TargetReached {
+                unused_count: unused,
+            });
+        }
+        // Checked before any request: a spent budget costs no API call at all.
+        if downloads >= max_downloads {
+            return Ok(RefillOutcome::DailyLimitReached {
                 unused_count: unused,
             });
         }
@@ -299,6 +359,10 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
             let downloaded_bytes = match downloaded {
                 Ok(bytes) => {
                     limiter.note_success();
+                    downloads += 1;
+                    if let Err(err) = record_photo_download(&db.lock(), &local_day()) {
+                        tracing::warn!("could not count the photo download: {err}");
+                    }
                     bytes
                 }
                 Err(e) if e.is_throttle() => {

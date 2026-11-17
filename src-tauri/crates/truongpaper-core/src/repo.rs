@@ -22,6 +22,8 @@ pub const SETTING_FILTER_MODE: &str = "photo_filter_mode";
 pub const SETTING_FEATURED_ONLY: &str = "photo_featured_only";
 pub const SETTING_EXHAUSTION_AUTO_RESET: &str = "exhaustion_auto_reset";
 pub const SETTING_MAX_CACHE_BYTES: &str = "max_photo_cache_bytes";
+/// `{ "day": "YYYY-MM-DD", "count": n }`: full-size photos downloaded on that local day.
+pub const SETTING_PHOTO_DOWNLOADS_TODAY: &str = "photo_downloads_today";
 
 /// Unix epoch milliseconds.
 pub fn now_ms() -> i64 {
@@ -29,6 +31,50 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+/// Today's date on this computer, `YYYY-MM-DD` (the download budget resets at local midnight).
+pub fn local_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct DownloadDay {
+    day: String,
+    count: u32,
+}
+
+/// Full-size photos downloaded on `day`.
+pub fn photo_downloads_on(conn: &Connection, day: &str) -> CoreResult<u32> {
+    Ok(
+        get_setting::<DownloadDay>(conn, SETTING_PHOTO_DOWNLOADS_TODAY)?
+            .filter(|d| d.day == day)
+            .map_or(0, |d| d.count),
+    )
+}
+
+/// Counts one full-size photo download on `day`.
+pub fn record_photo_download(conn: &Connection, day: &str) -> CoreResult<()> {
+    let count = photo_downloads_on(conn, day)? + 1;
+    set_setting(
+        conn,
+        SETTING_PHOTO_DOWNLOADS_TODAY,
+        &DownloadDay {
+            day: day.to_string(),
+            count,
+        },
+    )
+}
+
+/// Photos on disk that match the filter, shown or not (blacklisted ones excluded).
+pub fn count_cached_for_filter(conn: &Connection, filter: &PhotoFilter) -> CoreResult<usize> {
+    let (clause, values) = filter_clause(filter);
+    let sql = format!(
+        "SELECT COUNT(*) FROM photos_cache WHERE file_present = 1
+         AND id NOT IN (SELECT photo_id FROM photos_blacklist){clause}"
+    );
+    let n: i64 = conn.query_row(&sql, params_from_iter(values), |r| r.get(0))?;
+    Ok(n.max(0) as usize)
 }
 
 /// "Unused" means not in the persistent shown history. `last_shown_at` is kept across history
@@ -193,13 +239,15 @@ pub enum RotationPhotoPool {
 fn pool_predicate_and_order(pool: RotationPhotoPool) -> (&'static str, &'static str) {
     match pool {
         RotationPhotoPool::Unused => (UNUSED_PREDICATE, "last_shown_at ASC, downloaded_at ASC, id"),
+        // Photos already shown come back in a random order (the recent-shown window keeps the
+        // last few out), so a small collection does not cycle in the same sequence.
         RotationPhotoPool::Favorites => (
             "file_present = 1 AND is_favorite = 1 AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
-            "last_shown_at ASC, downloaded_at ASC, id",
+            "RANDOM()",
         ),
         RotationPhotoPool::PreviouslyShown => (
             "file_present = 1 AND last_shown_at IS NOT NULL AND id NOT IN (SELECT photo_id FROM photos_blacklist)",
-            "last_shown_at ASC, downloaded_at ASC, id",
+            "RANDOM()",
         ),
     }
 }
@@ -1052,6 +1100,20 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SQLITE_SCHEMA_SQL).unwrap();
         conn
+    }
+
+    #[test]
+    fn photo_downloads_are_counted_per_day() {
+        let conn = db();
+        assert_eq!(photo_downloads_on(&conn, "2026-11-16").unwrap(), 0);
+        record_photo_download(&conn, "2026-11-16").unwrap();
+        record_photo_download(&conn, "2026-11-16").unwrap();
+        assert_eq!(photo_downloads_on(&conn, "2026-11-16").unwrap(), 2);
+        // A new day starts from zero.
+        assert_eq!(photo_downloads_on(&conn, "2026-11-17").unwrap(), 0);
+        record_photo_download(&conn, "2026-11-17").unwrap();
+        assert_eq!(photo_downloads_on(&conn, "2026-11-17").unwrap(), 1);
+        assert_eq!(local_day().len(), 10);
     }
 
     fn photo(id: &str, slug: &str, w: u32, h: u32, bytes: u64, at: i64) -> NewCachedPhoto {

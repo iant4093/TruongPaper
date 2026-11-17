@@ -434,15 +434,15 @@ describe('offline mode', () => {
 });
 
 describe('Photography page', () => {
-  it('puts the current wallpaper first and offers "Use photos on this display" when needed', async () => {
+  it('puts the current wallpaper first and offers "Use photos here" when needed', async () => {
     await openApp();
     await goto('Photography', /^Ian Truong Photography$/);
     const titles = [...document.querySelectorAll('.section-title')].map((e) => e.textContent);
     expect(titles[0]).toBe('Current wallpaper');
-    expect(screen.queryByRole('button', { name: 'Use photos on this display' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Use photos here' })).toBeNull();
     const before = useAppStore.getState().monitors[0].activeSource;
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', { kind: 'workshop', wallpaperId: LOFI }); });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Use photos on this display' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Use photos here' })); });
     await waitFor(() => expect(useAppStore.getState().monitors[0].activeSource.kind).toBe('photo_api'));
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', before); });
   });
@@ -551,7 +551,7 @@ describe('shell', () => {
     useAppStore.setState((s) => ({ photoStatus: { ...s.photoStatus!, currentPhotoByMonitor: { ...s.photoStatus!.currentPhotoByMonitor, 'DISPLAY-1': null } } }));
     const next = await screen.findByRole('button', { name: 'Next photo' });
     expect((next as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Next works for photos and playlists.')).toBeTruthy();
+    expect(screen.getByText('Next is for photos and playlists.')).toBeTruthy();
     await act(async () => { await useAppStore.getState().applyMonitorSource('DISPLAY-1', { kind: 'photo_api' }); });
   });
 

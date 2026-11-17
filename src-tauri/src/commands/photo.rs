@@ -30,6 +30,9 @@ use truongpaper_renderer::{RgbaImageData, MAX_PHOTO_TEXTURE_DIMENSION};
 
 /// How many queued photos `photo_rotate_next` tries per monitor when decoding fails.
 const MAX_DECODE_ATTEMPTS: usize = 3;
+/// Photos kept on disk per filter and display orientation before the daily download budget
+/// applies (a new install or a new album is not stuck on one photo for a day).
+const MIN_CACHED_PHOTOS: usize = 3;
 
 fn e(err: impl std::fmt::Display) -> String {
     err.to_string()
@@ -124,6 +127,7 @@ impl PhotoServiceState {
     ) -> Result<(), String> {
         let source = if let Some(state) = app.try_state::<AppState>() {
             let source = set_photo_host_source(&state, monitor_id)?;
+            set_host_caption(app, &state, item);
             state
                 .host
                 .set_photo(monitor_id, PathBuf::from(&item.file_path), decoded);
@@ -208,45 +212,38 @@ impl PhotoServiceState {
         displayed: &[String],
         prefer_favorite: bool,
     ) -> Result<Option<PhotoItem>, String> {
-        self.rotation_candidate_with(filter, displayed, prefer_favorite, false)
+        self.rotation_candidate_with(filter, displayed, prefer_favorite)
     }
 
-    /// `offline_fallback` serves already-shown cached photos (then favorites) regardless of
-    /// the auto-reset setting, so Next keeps working without a network.
+    /// Full-size downloads a refill for `filter` may make now: what is left of today's budget,
+    /// or enough to have [`MIN_CACHED_PHOTOS`] on disk for this filter.
+    fn download_budget(&self, filter: &PhotoFilter) -> usize {
+        let per_day = self.settings.lock().photo_downloads_per_day as usize;
+        let conn = self.db.lock();
+        let today = photo_downloads_on(&conn, &local_day()).unwrap_or(0) as usize;
+        let cached = count_cached_for_filter(&conn, filter).unwrap_or(0);
+        per_day
+            .saturating_sub(today)
+            .max(MIN_CACHED_PHOTOS.saturating_sub(cached))
+    }
+
+    /// New photos first, then photos already on disk in a shuffled order, so rotation never
+    /// runs dry while anything matching is cached (new downloads are limited per day).
     fn rotation_candidate_with(
         &self,
         filter: &PhotoFilter,
         displayed: &[String],
         prefer_favorite: bool,
-        offline_fallback: bool,
     ) -> Result<Option<PhotoItem>, String> {
         use RotationPhotoPool::{Favorites, PreviouslyShown, Unused};
-        if offline_fallback {
-            for pool in [
-                prefer_favorite.then_some(Favorites),
-                Some(Unused),
-                Some(PreviouslyShown),
-                Some(Favorites),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if let Some(item) = self.pop(filter, displayed, pool)? {
-                    return Ok(Some(item));
-                }
-            }
-            return Ok(None);
-        }
-        let fallback = if filter.auto_reset_history_on_exhaustion {
-            Some(PreviouslyShown)
-        } else if !prefer_favorite {
-            Some(Favorites)
-        } else {
-            None
-        };
-        for pool in [prefer_favorite.then_some(Favorites), Some(Unused), fallback]
-            .into_iter()
-            .flatten()
+        for pool in [
+            prefer_favorite.then_some(Favorites),
+            Some(Unused),
+            Some(PreviouslyShown),
+            Some(Favorites),
+        ]
+        .into_iter()
+        .flatten()
         {
             if let Some(item) = self.pop(filter, displayed, pool)? {
                 return Ok(Some(item));
@@ -261,7 +258,8 @@ impl PhotoServiceState {
         max_cache_bytes: u64,
         displayed: &[String],
     ) -> PhotoApiResult<RefillOutcome> {
-        refill_queue(
+        let budget = self.download_budget(filter);
+        refill_queue_with_budget(
             &self.http,
             &self.limiter,
             &self.db,
@@ -269,6 +267,7 @@ impl PhotoServiceState {
             filter,
             max_cache_bytes,
             displayed,
+            budget,
         )
         .await
     }
@@ -406,12 +405,15 @@ pub async fn photo_get_status(state: State<'_, PhotoServiceState>) -> Result<Pho
 /// 2. `photo_fetch_public_catalog`
 #[tauri::command]
 pub async fn photo_fetch_public_catalog(
+    app: AppHandle,
     state: State<'_, PhotoServiceState>,
 ) -> Result<Vec<PublicCatalogAlbum>, String> {
-    PhotoApiClient::new(&state.http)
+    let albums = PhotoApiClient::new(&state.http)
         .fetch_full_catalog()
         .await
-        .map_err(e)
+        .map_err(e)?;
+    remember_album_titles(&app, &albums);
+    Ok(albums)
 }
 
 fn display_orientation(is_portrait: bool) -> Orientation {
@@ -574,7 +576,7 @@ async fn rotate_photo_targets(
 }
 
 fn no_other_photo_ready() -> String {
-    "No other photo is ready for this display yet. Try a different photo source or refill the queue.".into()
+    "No photo for this display yet. Try another photo source.".into()
 }
 
 async fn photo_for_rotation(
@@ -591,19 +593,63 @@ async fn photo_for_rotation(
     if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
         return Ok(Some(item));
     }
-    let outcome = state.refill(filter, max_cache_bytes, displayed_ids).await;
-    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
-        return Ok(Some(item));
+    // Nothing matching is on disk: download (within the budget) before giving up.
+    if let Err(err) = state.refill(filter, max_cache_bytes, displayed_ids).await {
+        tracing::warn!("photo refill failed: {err}");
     }
-    // A network failure (this refill, or one still cooling down) must not strand the user on
-    // one photo: fall back to anything cached, whatever the auto-reset setting says.
-    let offline = matches!(outcome, Ok(RefillOutcome::Offline))
-        || outcome.as_ref().err().is_some_and(|err| err.is_network())
-        || state.limiter.is_offline();
-    if offline {
-        return state.rotation_candidate_with(filter, displayed_ids, prefer_favorite, true);
+    state.rotation_candidate(filter, displayed_ids, prefer_favorite)
+}
+
+/// Gives the host the caption of the photo about to be shown. Album titles that are not known
+/// yet come from the public catalog, fetched once per run in the background.
+pub(crate) fn set_host_caption(app: &AppHandle, state: &AppState, item: &PhotoItem) {
+    let path = PathBuf::from(&item.file_path);
+    let (caption, title_known) = {
+        let conn = state.db.lock();
+        (
+            crate::photo_caption::caption_for(&conn, &item.album_slug, &path),
+            crate::photo_caption::known_album_title(&conn, &item.album_slug).is_some(),
+        )
+    };
+    state.host.set_photo_caption(path, caption);
+    static CATALOG_FETCHED: AtomicBool = AtomicBool::new(false);
+    if !title_known
+        && !item.album_slug.is_empty()
+        && state.settings.lock().photo_show_album
+        && !CATALOG_FETCHED.swap(true, Ordering::AcqRel)
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(photo) = app.try_state::<PhotoServiceState>() else {
+                return;
+            };
+            match PhotoApiClient::new(&photo.http).fetch_full_catalog().await {
+                Ok(albums) => remember_album_titles(&app, &albums),
+                Err(err) => {
+                    tracing::debug!("album titles unavailable: {err}");
+                    CATALOG_FETCHED.store(false, Ordering::Release);
+                }
+            }
+        });
     }
-    Ok(None)
+}
+
+/// Stores catalog titles and updates the captions already on screen.
+fn remember_album_titles(app: &AppHandle, albums: &[PublicCatalogAlbum]) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    {
+        let conn = state.db.lock();
+        crate::photo_caption::store_album_titles(
+            &conn,
+            albums.iter().map(|a| (a.slug.as_str(), a.title.as_str())),
+        );
+    }
+    let db = Arc::clone(&state.db);
+    state
+        .host
+        .refresh_album_titles(|slug| crate::photo_caption::known_album_title(&db.lock(), slug));
 }
 
 /// 4. `photo_trigger_refill`
@@ -1171,8 +1217,9 @@ mod tests {
         assert_eq!(pick(&filter, &displayed, true).as_deref(), Some("favorite"));
         displayed.extend(["fresh".into(), "favorite".into()]);
         assert_eq!(pick(&filter, &displayed, false).as_deref(), Some("cached"));
+        // Without "repeat", photos already on disk still rotate (only new downloads stop).
         filter.auto_reset_history_on_exhaustion = false;
-        assert_eq!(pick(&filter, &displayed, false), None);
+        assert_eq!(pick(&filter, &displayed, false).as_deref(), Some("cached"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1274,22 +1321,21 @@ mod tests {
     }
 
     #[test]
-    fn offline_next_falls_back_to_cached_photos_even_without_auto_reset() {
-        let (state, dir) = temp_state("offline-fallback");
+    fn next_reuses_cached_photos_once_every_photo_was_shown() {
+        // Every photo was shown and "repeat" is off: Next still shuffles what is on disk
+        // instead of leaving the display empty (new downloads are limited per day).
+        let (state, dir) = temp_state("reuse-cached");
         seed_shown_favorites(&state, &dir, 3, false);
         let filter = PhotoFilter {
             auto_reset_history_on_exhaustion: false,
             ..Default::default()
         };
         let displayed = vec!["f02".to_string()];
-        assert!(state
+        let item = state
             .rotation_candidate(&filter, &displayed, false)
             .unwrap()
-            .is_none());
-        let item = state
-            .rotation_candidate_with(&filter, &displayed, false, true)
-            .unwrap()
-            .expect("offline fallback serves a previously shown photo");
+            .expect("a previously shown photo is reused");
+        // The two most recent (f01, f02) are held back.
         assert_eq!(item.id, "f00");
 
         // Status reports offline + cached-only once a network error was recorded.

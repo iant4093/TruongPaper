@@ -79,9 +79,10 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 - Direct integration with `https://photos-api.iantruongphotography.com/v1/photos/random`: pull from all public photos, featured photos only (`?featured=true`), or any combination of saved albums (`?album=<slug>`)
 - Browse the public album catalog in **Photography**, or paste an `https://iantruongphotography.com/album/...` URL or slug under **Saved albums**
-- The offline queue targets five unused full-resolution photos and refills in the background at two or fewer. The displayed count shows how many photos are currently queued on disk.
-- Persistent SQLite history (`photos_history`): checks every random pick against both the unused queue and shown history *before* downloading `imageUrl`, guaranteeing no photo repeats even after older image files are evicted to free disk space
-- Smart exhaustion handling: when every photo in an album or filter has been shown, TruongPaper automatically resets the history for that filter and re-queues any photos still cached on disk (or holds on the last photo if preferred)
+- Rotation runs from photos on disk: new photos first, then the ones already shown in a shuffled order, so a display never goes blank. New full-resolution downloads are limited per day (one by default, up to 25 in **Photography**) to keep bandwidth low; a new install or album downloads its first three right away.
+- Persistent SQLite history (`photos_history`): checks every random pick against both the unused queue and shown history *before* downloading `imageUrl`, so a photo you have seen is not downloaded again (unless repeats are on), even after older image files are evicted to free disk space
+- Smart exhaustion handling: when every photo in an album or filter has been shown, TruongPaper can reset the history for that filter so new downloads may repeat photos (**Repeat photos after all are shown**)
+- Optional caption on photo wallpapers: time and date, album name, and camera settings read from the photo's EXIF (camera, focal length, aperture, shutter, ISO)
 - Per-photo actions: Favorite / Pin on disk (exempts from cache cleanup), Hide / Never show again (blacklists ID and advances), and View Album on `iantruongphotography.com`
 - Configurable disk cache limit (250 MB default, 100 MB – 10 GB slider) plus sliding-window rate limiting (respecting the 100 requests / 5 min API limit with automatic exponential backoff on `403`/`503`)
 

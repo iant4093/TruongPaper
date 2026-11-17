@@ -34,6 +34,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 image.workspace = true
+chrono.workspace = true
 truongpaper-core = { path = "crates/truongpaper-core" }
 truongpaper-photo-api = { path = "crates/truongpaper-photo-api" }
 truongpaper-steam = { path = "crates/truongpaper-steam" }

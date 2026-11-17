@@ -9,6 +9,7 @@ pub mod desktop_host;
 pub mod gpu_select;
 pub mod host;
 pub mod models;
+pub mod photo_caption;
 mod photo_preview;
 pub mod power;
 pub mod protocol;

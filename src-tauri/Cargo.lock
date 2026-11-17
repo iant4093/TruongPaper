@@ -6310,6 +6310,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "block2",
+ "chrono",
  "image",
  "keyring",
  "objc2",
@@ -6369,6 +6370,7 @@ name = "truongpaper-core"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "parking_lot",
  "rusqlite",
  "serde",

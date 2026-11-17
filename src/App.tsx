@@ -1,6 +1,7 @@
 import { Dropdown } from './components/Dropdown';
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Gamepad2, Images, LayoutGrid, ListMusic, Monitor, Settings as SettingsIcon } from 'lucide-react';
+import { ContextMenu } from './components/ContextMenu';
 import { DetailsDrawer } from './components/DetailsDrawer';
 import { FeedbackHost, StatusBanner } from './components/Feedback';
 import { PlaybackBar } from './components/PlaybackBar';
@@ -148,6 +149,7 @@ export const App: React.FC = () => {
 
   const activeId = monitors.find(([id]) => id === selectedMonitorId)?.[0] ?? monitors[0]?.[0] ?? '';
   const navigate = (tab: StudioTab) => { setActiveTab(tab); };
+  const openSettings = useCallback(() => setActiveTab('settings'), []);
 
   const view = (() => {
     switch (activeTab) {
@@ -174,6 +176,7 @@ export const App: React.FC = () => {
         {previewOpen && <WorkshopPreviewModal />}
       </Suspense>
       <FeedbackHost floatingToasts={false} />
+      <ContextMenu onOpenSettings={openSettings} />
       <aside className="app-sidebar">
         {/* Windows keeps its window buttons top-right, so the sidebar needs no title bar row. */}
         {!windowsCaption && <div className="sidebar-titlebar" data-tauri-drag-region>{!nativeMacTitlebar && <WindowControls />}</div>}

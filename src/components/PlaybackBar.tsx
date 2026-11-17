@@ -81,7 +81,7 @@ export const PlaybackBar: React.FC = () => {
             {state}{info.monitorName ? ` on ${info.monitorName}` : ''}{info.playlistName ? ` · Playlist: ${info.playlistName}` : ''}
           </div>
         </div>
-        {!info.canRotate && <span className="playback-hint" id="next-photo-hint">Next works for photos and playlists.</span>}
+        {!info.canRotate && <span className="playback-hint" id="next-photo-hint">Next is for photos and playlists.</span>}
         <button type="button" className="button playback-control" disabled={!info.monitorId || none}
           title="Stop TruongPaper on this display and show the system wallpaper"
           onClick={removeWallpaper}>

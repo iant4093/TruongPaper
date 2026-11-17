@@ -80,7 +80,7 @@ const GlobalShortcuts: React.FC<{ nextHotkey: string; pauseHotkey: string }> = (
           <input type="text" className="button" placeholder={`CmdOrCtrl+Alt+${HOTKEY_SHIFT}P`} value={pause} onChange={(e) => { editedRef.current = true; setPause(e.target.value); }} />
         </label>
         <div className="view-subtitle" style={{ marginBottom: 10 }}>
-          Type a combination such as CmdOrCtrl+Alt+{HOTKEY_SHIFT}Right. Work anywhere, even when TruongPaper is in the background. Leave empty to turn off.
+          For example CmdOrCtrl+Alt+{HOTKEY_SHIFT}Right. Leave empty to turn off.
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button type="submit" className="button" disabled={!dirty}>Save shortcuts</button>
@@ -133,8 +133,8 @@ export const GpuPicker: React.FC<{ value: string; onChange: (next: string) => vo
     <>
       <div style={{ fontSize: 13, margin: '14px 0 2px' }}>Graphics card</div>
       <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>
-        Draws photos and scene wallpapers. The recommended GPU is the one your displays are connected to; another GPU has to copy every frame across to it.
-        {list.length === 1 && ' This computer has one GPU, so it is always used.'}
+        The recommended GPU drives your displays.
+        {list.length === 1 && ' This computer has one GPU.'}
       </div>
       <Dropdown<string> label="Graphics card" value={selected} options={options} onChange={(next) => { if (next !== selected) onChange(next); }} />
       {inUse && <div className="view-subtitle" role="status" style={{ marginTop: 6 }}>In use: {inUse.name}</div>}
@@ -190,7 +190,7 @@ const BackupSection: React.FC = () => {
       <SectionTitle>Backup & restore</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
         <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 12 }}>
-          One file with your settings, playlists and favorites. Wallpaper files are not included; missing Workshop items can be downloaded again.
+          Settings, playlists and favorites in one file. Wallpaper files are not included.
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button type="button" className="button" disabled={busy} onClick={() => void doExport()}><Download size={14} /> Save backup…</button>
@@ -281,7 +281,7 @@ export const SettingsView: React.FC = () => {
       <SectionTitle>Performance</SectionTitle>
       <div className="card" style={{ padding: 16 }}>
         <div style={{ fontSize: 13, marginBottom: 2 }}>Animation smoothness</div>
-        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>Higher looks smoother but uses more power.</div>
+        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>Higher uses more power.</div>
         <SegmentedControl
           value={String(settings.fpsCap)}
           options={FPS_OPTIONS}
@@ -310,7 +310,7 @@ export const SettingsView: React.FC = () => {
           onChange={(next) => void updateSettings({ pauseOnMaximized: next })}
         />
         <div style={{ fontSize: 13, marginBottom: 2 }}>When on battery or in Low Power Mode</div>
-        <div className="view-subtitle" style={{ marginTop: 0, marginBottom: 8 }}>“Freeze the picture” stops animation but keeps the wallpaper visible.</div>
+
         <SegmentedControl
           value={settings.batteryPolicy}
           options={BATTERY_OPTIONS}
@@ -322,13 +322,10 @@ export const SettingsView: React.FC = () => {
         <SectionTitle>Windows color</SectionTitle>
         <div className="card" style={{ padding: 16 }}>
           <ToggleRow
-            label="Match the Windows accent color to the wallpaper"
+            label="Match the accent color to the wallpaper"
             checked={settings.adjustWindowsColor ?? true}
             onChange={(next) => void updateSettings({ adjustWindowsColor: next })}
           />
-          <div className="view-subtitle" style={{ marginTop: 0 }}>
-            Uses the scheme color of the main display's wallpaper for Start, the taskbar and window accents.
-          </div>
         </div>
       </>}
 

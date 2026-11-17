@@ -417,6 +417,26 @@ pub struct AppSettings {
     /// `schemecolor` (Wallpaper Engine's "Adjust Windows color").
     #[serde(default = "default_adjust_windows_color")]
     pub adjust_windows_color: bool,
+    /// Photos API: new full-size photos downloaded per day at most. Rotation itself only
+    /// shuffles photos already on disk.
+    #[serde(default = "default_photo_downloads_per_day")]
+    pub photo_downloads_per_day: u32,
+    /// Photo caption: clock and date in the bottom-left corner.
+    #[serde(default)]
+    pub photo_show_time: bool,
+    /// Photo caption: album name in the bottom-right corner.
+    #[serde(default)]
+    pub photo_show_album: bool,
+    /// Photo caption: camera settings (EXIF) under the album name.
+    #[serde(default)]
+    pub photo_show_exif: bool,
+}
+
+pub const DEFAULT_PHOTO_DOWNLOADS_PER_DAY: u32 = 1;
+pub const MAX_PHOTO_DOWNLOADS_PER_DAY: u32 = 50;
+
+fn default_photo_downloads_per_day() -> u32 {
+    DEFAULT_PHOTO_DOWNLOADS_PER_DAY
 }
 
 fn default_adjust_windows_color() -> bool {
@@ -476,6 +496,10 @@ impl Default for AppSettings {
             pause_hotkey: default_pause_hotkey(),
             render_gpu: default_render_gpu(),
             adjust_windows_color: default_adjust_windows_color(),
+            photo_downloads_per_day: default_photo_downloads_per_day(),
+            photo_show_time: false,
+            photo_show_album: false,
+            photo_show_exif: false,
         }
     }
 }

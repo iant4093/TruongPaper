@@ -146,7 +146,7 @@ describe('Main studio window', () => {
     expect(screen.queryByRole('combobox', { name: 'Photo fit' })).toBeNull();
     await act(async () => { fireEvent.click(within(nav).getByRole('button', { name: 'Photography' })); });
     expect(await screen.findByRole('combobox', { name: 'Photo fit' })).toBeTruthy();
-    expect(screen.getAllByRole('checkbox', { name: /Match photo orientation/ })).toHaveLength(1);
+    expect(screen.getAllByRole('checkbox', { name: /Match display orientation/ })).toHaveLength(1);
   });
 
   it('shows the offline queue only in Photography and filters Library by installed wallpaper types', async () => {

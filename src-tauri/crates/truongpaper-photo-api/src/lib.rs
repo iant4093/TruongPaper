@@ -32,7 +32,7 @@ pub use error::{PhotoApiError, PhotoApiResult};
 pub use limiter::SlidingRateLimiter;
 pub use queue::{
     classify_candidate_photo, classify_candidate_photo_with_displayed, needs_refill, refill_queue,
-    refill_queue_with_client, RefillOutcome,
+    refill_queue_with_budget, refill_queue_with_client, RefillOutcome,
 };
 
 pub use truongpaper_core::error::{CoreError, CoreResult};

@@ -308,6 +308,11 @@ input.button { cursor: text; }
 .dropdown-menu li { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 30px; padding: 5px 8px; border-radius: 4px; cursor: pointer; }
 .dropdown-menu li:hover, .dropdown-menu .is-highlighted { background: #444; }
 .dropdown-menu li svg { flex-shrink: 0; }
+.context-menu { min-width: 180px; outline: none; }
+.context-menu .context-menu-label { display: flex; align-items: center; gap: 8px; }
+.context-menu li.is-disabled { color: var(--text-muted); cursor: default; }
+.context-menu li.is-disabled:hover { background: transparent; }
+.context-menu li.context-menu-separator { min-height: 0; height: 1px; padding: 0; margin: 4px 2px; background: #444; cursor: default; }
 .rotation-source { display: grid; gap: 12px; padding: 16px; }
 .rotation-source-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .rotation-source > .segmented-control, .rotation-source-apply { justify-self: start; }

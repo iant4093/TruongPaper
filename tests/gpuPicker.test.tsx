@@ -64,7 +64,7 @@ describe('GpuPicker', () => {
   it('says a one-GPU Mac always uses its GPU', async () => {
     invokeMock.mockResolvedValue([{ name: 'Apple M3 Max', kind: 'integrated', inUse: true, recommended: true }]);
     await act(async () => { render(<GpuPicker value="auto" onChange={vi.fn()} />); });
-    expect(screen.getByText(/has one GPU, so it is always used/)).toBeTruthy();
+    expect(screen.getByText(/This computer has one GPU/)).toBeTruthy();
     expect(screen.getByRole('combobox', { name: 'Graphics card' }).textContent).toContain('Apple M3 Max (integrated)');
   });
 });

@@ -291,6 +291,10 @@ export function createMockBackend(
     pauseHotkey: 'CmdOrCtrl+Alt+P',
     renderGpu: 'auto',
     adjustWindowsColor: true,
+    photoDownloadsPerDay: 1,
+    photoShowTime: false,
+    photoShowAlbum: false,
+    photoShowExif: false,
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });

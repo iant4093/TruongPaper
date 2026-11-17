@@ -1,6 +1,6 @@
 //! "Adjust Windows color" (Wallpaper Engine parity): the wallpaper on the primary display
 //! sets the Windows accent color from its `schemecolor` property, on apply and whenever the
-//! user changes that property. Settings > Display > "Match Windows accent color" turns it off.
+//! user changes that property. Settings > Windows color turns it off.
 //! Other platforms have no settable accent color, so this does nothing there.
 
 use crate::models::WallpaperItem;

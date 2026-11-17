@@ -27,6 +27,13 @@ import { PhotoTransitionControls } from '../SourceDetails';
 const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
 
+const DOWNLOADS_PER_DAY = [
+  [1, '1 a day'],
+  [3, '3 a day'],
+  [10, '10 a day'],
+  [25, '25 a day'],
+] as const;
+
 const photoDims = (p: PhotoItem) =>
   p.width && p.height ? `${p.width} × ${p.height}` : 'Full resolution';
 
@@ -197,14 +204,14 @@ export const PhotosApiView: React.FC = () => {
     <div>
       <ViewHeader
         title="Ian Truong Photography"
-        subtitle="Photo wallpapers from the Ian Truong Photography API."
+        subtitle="Photo wallpapers from iantruongphotography.com"
         actions={
           <>
             <button type="button" className="button" onClick={() => favoritesSection.current?.scrollIntoView({ block: 'start' })}>
-              <Heart size={14} /> Jump to favorites
+              <Heart size={14} /> Favorites
             </button>
             <button type="button" className="button" onClick={() => void openCatalog()}>
-              <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Add albums from catalog'}
+              <BookOpen size={14} /> {catalogOpen ? 'Close catalog' : 'Album catalog'}
             </button>
           </>
         }
@@ -221,8 +228,8 @@ export const PhotosApiView: React.FC = () => {
       {!onPhotos && activeMonitorId && (
         <div className="card photo-use-here">
           <MonitorIcon size={16} aria-hidden="true" />
-          <span>{activeMonitor?.name} is not showing photos right now.</span>
-          <button type="button" className="button button-primary" disabled={photoActionPending} onClick={useHere}>Use photos on this display</button>
+          <span>{activeMonitor?.name} is not showing photos.</span>
+          <button type="button" className="button button-primary" disabled={photoActionPending} onClick={useHere}>Use photos here</button>
         </div>
       )}
       {currentPhoto ? (
@@ -250,7 +257,7 @@ export const PhotosApiView: React.FC = () => {
               </button>
               <button type="button" className="button" disabled={photoActionPending}
                 onClick={() => void hide(currentPhoto)}>
-                <EyeOff size={14} /> Hide photo
+                <EyeOff size={14} /> Hide
               </button>
               <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
                 <ExternalLink size={14} /> View album
@@ -259,7 +266,7 @@ export const PhotosApiView: React.FC = () => {
           </div>
         </div>
       ) : (
-        <div className="view-subtitle">No photo is displayed on this display yet.</div>
+        <div className="view-subtitle">No photo on this display yet.</div>
       )}
 
 
@@ -274,8 +281,7 @@ export const PhotosApiView: React.FC = () => {
         {mode === 'albums' && (
           <div style={{ marginTop: 12 }}>
             <ToggleRow
-              label="Featured Only"
-              description="Only draw featured photos from the enabled albums"
+              label="Featured only"
               checked={featuredOnly}
               onChange={(next) => void runPhotoAction(() => setPhotoFilter('albums', next))}
             />
@@ -286,7 +292,7 @@ export const PhotosApiView: React.FC = () => {
           <Dropdown<number> label="Change photo every" value={settings?.rotationIntervalSeconds ?? 1800}
             options={ROTATION_INTERVALS.map((r) => [r.seconds, r.label] as const)}
             onChange={(rotationIntervalSeconds) => void runPhotoAction(() => updateSettings({ rotationIntervalSeconds }), 'Saved')} />
-          <span className="view-subtitle">For displays showing photos. Playlists keep their own timer.</span>
+          <span className="view-subtitle">Playlists keep their own timer.</span>
         </div>
         <PhotoTransitionControls />
         <div className="settings-field" style={{ marginTop: 12 }}>
@@ -298,12 +304,28 @@ export const PhotosApiView: React.FC = () => {
         </div>
         <div style={{ marginTop: 12 }}>
           <ToggleRow
-            label="Match photo orientation to display"
-            description="Offline photos and automatic rotation match the selected display."
+            label="Match display orientation"
             checked={settings?.skipMismatchedOrientation ?? true}
             onChange={(next) => void runPhotoAction(() => updateSettings({ skipMismatchedOrientation: next }))}
           />
         </div>
+        <div style={{ fontSize: 13, fontWeight: 600, margin: '14px 0 4px' }}>On the wallpaper</div>
+        <ToggleRow
+          label="Time and date"
+          checked={settings?.photoShowTime ?? false}
+          onChange={(next) => void runPhotoAction(() => updateSettings({ photoShowTime: next }))}
+        />
+        <ToggleRow
+          label="Album name"
+          checked={settings?.photoShowAlbum ?? false}
+          onChange={(next) => void runPhotoAction(() => updateSettings({ photoShowAlbum: next }))}
+        />
+        <ToggleRow
+          label="Camera settings"
+          description="Camera, lens, aperture, shutter and ISO from the photo's EXIF."
+          checked={settings?.photoShowExif ?? false}
+          onChange={(next) => void runPhotoAction(() => updateSettings({ photoShowExif: next }))}
+        />
       </div>
 
       {/* Browse Official Album Catalog Drawer */}
@@ -335,7 +357,7 @@ export const PhotosApiView: React.FC = () => {
                     disabled={savedSlugs.has(album.slug)}
                     onClick={() => void runPhotoAction(async () => { await addAlbum(album.slug, album.title); }, 'Saved')}
                   >
-                    {savedSlugs.has(album.slug) ? 'Saved' : 'Save & Enable Album'}
+                    {savedSlugs.has(album.slug) ? 'Saved' : 'Add album'}
                   </button>
                 </div>
               ))}
@@ -359,7 +381,7 @@ export const PhotosApiView: React.FC = () => {
           className="button"
         />
         <button type="submit" className="button">
-          <Plus size={14} /> Add Album
+          <Plus size={14} /> Add
         </button>
       </form>
       {albumMsg && <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{albumMsg}</div>}
@@ -386,11 +408,11 @@ export const PhotosApiView: React.FC = () => {
             </div>
           </div>
         ))}
-      </div> : <p className="saved-album-hint">No saved albums yet. Add a link above or browse the catalog.</p>}
+      </div> : <p className="saved-album-hint">No saved albums yet.</p>}
 
       <section ref={favoritesSection} className="photo-favorites" aria-labelledby="photo-favorites-title">
         <h3 className="section-title" id="photo-favorites-title">Favorites{favorites.length ? ` · ${favorites.length}` : ''}</h3>
-        <p className="photo-section-description">Favorites stay on disk and can come up again when they match your photo filters.</p>
+        <p className="photo-section-description">Kept on disk and mixed into rotation.</p>
         {favorites.length ? (
           <div style={cardGrid}>
             {favorites.slice(0, favoritesShown).map((photo) => (
@@ -410,7 +432,7 @@ export const PhotosApiView: React.FC = () => {
               </PhotoTile>
             ))}
           </div>
-        ) : <div className="view-subtitle">Add a wallpaper to favorites to find it here later.</div>}
+        ) : <div className="view-subtitle">No favorites yet.</div>}
         <ShowMore shown={favoritesShown} total={favorites.length} onMore={() => setFavoritesShown((n) => n + TILE_PAGE)} />
       </section>
 
@@ -435,15 +457,15 @@ export const PhotosApiView: React.FC = () => {
                 disabled={photoActionPending}
                 onClick={() => void hide(photo)}
               >
-                <EyeOff size={12} /> Hide photo
+                <EyeOff size={12} /> Hide
               </button>
           </PhotoTile>
         ))}
         {queue.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
             {settings?.skipMismatchedOrientation ?? true
-              ? 'No offline photos match this display yet.'
-              : 'No photos are ready offline yet.'}
+              ? 'No new photos for this display yet.'
+              : 'No new photos yet.'}
           </div>
         )}
       </div>
@@ -492,10 +514,18 @@ export const PhotosApiView: React.FC = () => {
           />
         </label>
 
+        <div className="settings-field" style={{ marginTop: 14 }}>
+          <span>New photos</span>
+          <Dropdown<number> label="New photos" value={settings?.photoDownloadsPerDay ?? 1}
+            options={DOWNLOADS_PER_DAY}
+            onChange={(photoDownloadsPerDay) => void runPhotoAction(() => updateSettings({ photoDownloadsPerDay }), 'Saved')} />
+          <span className="view-subtitle">Full-size downloads. Rotation shuffles the photos already saved.</span>
+        </div>
+
         <div style={{ marginTop: 14 }}>
           <ToggleRow
-            label="Start over when every photo has been shown"
-            description="Recommended. When off, only new photos and matching favorites rotate."
+            label="Repeat photos after all are shown"
+            description="New downloads can include photos you have seen."
             checked={settings?.exhaustionAutoReset ?? true}
             onChange={(next) => void runPhotoAction(() => updateSettings({ exhaustionAutoReset: next }))}
           />
@@ -507,7 +537,7 @@ export const PhotosApiView: React.FC = () => {
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button type="button" className="button button-primary" disabled={photoStatus?.isRefilling} onClick={() => void runPhotoAction(triggerPhotoRefill)}>
-            <RefreshCw size={14} /> {photoStatus?.isRefilling ? 'Refilling queue…' : 'Refill queue'}
+            <RefreshCw size={14} /> {photoStatus?.isRefilling ? 'Downloading…' : 'Get new photos'}
           </button>
           <button type="button" className="button" onClick={() => void clearCache()}>
             <Trash2 size={14} /> Clear cache

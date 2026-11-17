@@ -8,6 +8,7 @@ pub mod json;
 pub mod model3d;
 pub mod particle_tree;
 pub mod particles;
+pub mod photo_overlay;
 pub mod puppet;
 pub mod scene_assets;
 pub mod scene_attachment;
@@ -41,6 +42,7 @@ pub use particles::{
     ParticleRendererSpec, ParticleSpecError, ParticleSystemInstance, RopeParticleVertex,
     SingleParticle, SpriteParticleVertex,
 };
+pub use photo_overlay::{OverlayText, PhotoOverlay};
 pub use puppet::{
     parse_mdl_skeleton, parse_mdl_skeleton_or_rest, puppet_combos, PuppetAnimation,
     PuppetAnimationMode, PuppetAnimator, PuppetBone, PuppetDeformer, PuppetError, PuppetFrame,

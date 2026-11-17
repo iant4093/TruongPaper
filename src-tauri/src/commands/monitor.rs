@@ -643,6 +643,9 @@ pub(crate) async fn show_photo(
             .flatten()
     };
     let match_orientation = state.settings.lock().skip_mismatched_orientation;
+    // Last resort when nothing else can be drawn: a photo in the other orientation beats an
+    // empty display.
+    let current_any = current.clone();
     let current = current.filter(|item| {
         !match_orientation || crate::commands::photo::photo_matches_display(app, monitor_id, item)
     });
@@ -661,6 +664,7 @@ pub(crate) async fn show_photo(
                 crate::commands::photo::decode_for_desktop(&state.host, &path).await
             };
             let source = set_photo_host_source(state, monitor_id)?;
+            crate::commands::photo::set_host_caption(app, state, &item);
             if !on_screen {
                 state.host.set_photo(monitor_id, path, decoded);
             }
@@ -680,6 +684,15 @@ pub(crate) async fn show_photo(
                 rotate_photo_for_locked_monitor(app, photo, monitor_id, draw_new).await
             {
                 tracing::warn!("no photo available for {monitor_id} yet: {err}");
+                if let Some(item) = current_any.filter(|item| Path::new(&item.file_path).exists()) {
+                    let path = PathBuf::from(&item.file_path);
+                    let decoded =
+                        crate::commands::photo::decode_for_desktop(&state.host, &path).await;
+                    set_photo_host_source(state, monitor_id)?;
+                    crate::commands::photo::set_host_caption(app, state, &item);
+                    state.host.set_photo(monitor_id, path, decoded);
+                    return Ok(());
+                }
                 if let Some(previous) = state.host.monitor(monitor_id).filter(|rt| {
                     !matches!(rt.active, ActiveRuntime::None | ActiveRuntime::Photo { .. })
                 }) {

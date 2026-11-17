@@ -10,7 +10,7 @@
 use crate::models::{UniversalAdjustments, WallpaperSource};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -217,6 +217,10 @@ pub struct WallpaperHost {
     wake_cv: Condvar,
     /// Span mode source monitor while the renderer spans (`None` otherwise); see [`span_route`].
     span_source: Mutex<Option<String>>,
+    /// Album name and camera settings of photos that were shown, by file.
+    photo_captions: Mutex<HashMap<PathBuf, crate::photo_caption::PhotoCaption>>,
+    /// Which parts of the photo caption are drawn.
+    overlay_prefs: Mutex<crate::photo_caption::OverlayPrefs>,
     #[cfg(target_os = "windows")]
     applications:
         Mutex<HashMap<String, truongpaper_platform::application::ApplicationWallpaperProcess>>,
@@ -270,6 +274,55 @@ impl WallpaperHost {
             let _ = self.wake_cv.wait_for(&mut guard, timeout);
         }
         self.epoch()
+    }
+
+    /// Remembers the caption of a photo file (drawn while that photo is on screen).
+    pub fn set_photo_caption(&self, path: PathBuf, caption: crate::photo_caption::PhotoCaption) {
+        {
+            let mut captions = self.photo_captions.lock();
+            if captions.get(&path) == Some(&caption) {
+                return;
+            }
+            // Only photos on screen matter; drop old entries instead of growing forever.
+            if captions.len() >= 64 {
+                captions.clear();
+            }
+            captions.insert(path, caption);
+        }
+        self.bump();
+    }
+
+    pub fn photo_caption(&self, path: &Path) -> Option<crate::photo_caption::PhotoCaption> {
+        self.photo_captions.lock().get(path).cloned()
+    }
+
+    /// Replaces album names made from a slug once the real titles are known.
+    pub fn refresh_album_titles(&self, title: impl Fn(&str) -> Option<String>) {
+        let changed = {
+            let mut captions = self.photo_captions.lock();
+            let mut changed = false;
+            for caption in captions.values_mut() {
+                if let Some(t) = title(&caption.album_slug) {
+                    if caption.album.as_deref() != Some(t.as_str()) {
+                        caption.album = Some(t);
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        };
+        if changed {
+            self.bump();
+        }
+    }
+
+    pub fn set_overlay_prefs(&self, prefs: crate::photo_caption::OverlayPrefs) {
+        *self.overlay_prefs.lock() = prefs;
+        self.bump();
+    }
+
+    pub fn overlay_prefs(&self) -> crate::photo_caption::OverlayPrefs {
+        *self.overlay_prefs.lock()
     }
 
     /// Called by the renderer each loop: the span source monitor while span mode is active.

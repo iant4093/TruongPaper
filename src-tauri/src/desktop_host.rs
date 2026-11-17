@@ -2057,6 +2057,10 @@ struct MonitorRenderer {
     diag_clear: Option<Option<String>>,
     /// The display is set to "No wallpaper": its surface window is hidden.
     hidden: bool,
+    /// Clock / album / EXIF caption over photos (built on first use).
+    overlay: Option<truongpaper_renderer::PhotoOverlay>,
+    /// Caption text wanted for the next photo frame.
+    overlay_text: Option<truongpaper_renderer::OverlayText>,
 }
 
 /// Renderer state that survives a surface rebuild of an unchanged display.
@@ -2138,6 +2142,8 @@ impl MonitorRenderer {
             stalled: false,
             diag_clear: None,
             hidden: false,
+            overlay: None,
+            overlay_text: None,
         })
     }
 
@@ -2524,6 +2530,7 @@ impl MonitorRenderer {
         geoms: &[MonitorGeometry],
         span: Option<SpanTransform>,
         cursor: &mut CursorPoller,
+        overlay: Option<&truongpaper_renderer::OverlayText>,
     ) -> bool {
         // WindowServer can discard a drawable while hidden/asleep. Static photos must
         // repaint once on resume even though their compositor settings did not change.
@@ -2572,6 +2579,10 @@ impl MonitorRenderer {
             return false;
         }
         // Photo.
+        if self.overlay_text.as_ref() != overlay {
+            self.overlay_text = overlay.cloned();
+            self.dirty = true;
+        }
         let progress = match (should_render, self.transition_started) {
             (true, Some(t)) => transition_progress(
                 t.elapsed().as_secs_f32(),
@@ -2701,6 +2712,14 @@ impl MonitorRenderer {
             &view,
             uniforms,
         );
+        let (width, height) = (self.config.width, self.config.height);
+        if self.overlay.is_some() || self.overlay_text.is_some() {
+            let overlay = self.overlay.get_or_insert_with(|| {
+                truongpaper_renderer::PhotoOverlay::new(device, self.config.format)
+            });
+            overlay.update(device, queue, self.overlay_text.as_ref(), width, height);
+            overlay.draw(&mut encoder, &view, width, height);
+        }
         queue.submit(Some(encoder.finish()));
         frame.present();
         self.dirty = false;
@@ -2810,7 +2829,29 @@ impl MonitorRenderer {
 
 /// "No wallpaper" on this display: hide the surface so the system wallpaper shows.
 pub fn shows_system_wallpaper(rt: Option<&MonitorRuntime>) -> bool {
-    rt.is_some_and(|rt| rt.source == WallpaperSource::None && rt.active == ActiveRuntime::None)
+    rt.is_some_and(|rt| {
+        (rt.source == WallpaperSource::None && rt.active == ActiveRuntime::None)
+            // Photos with no photo ready yet: the system wallpaper instead of a black screen.
+            || rt.active == ActiveRuntime::Photo { path: None }
+    })
+}
+
+/// Caption over the photo `rt` shows, when the settings turn one on.
+fn photo_overlay_text(
+    host: &WallpaperHost,
+    rt: Option<&MonitorRuntime>,
+    prefs: crate::photo_caption::OverlayPrefs,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<truongpaper_renderer::OverlayText> {
+    if !prefs.any() {
+        return None;
+    }
+    let ActiveRuntime::Photo { path: Some(path) } = &rt?.active else {
+        return None;
+    };
+    let caption = host.photo_caption(path);
+    let text = crate::photo_caption::overlay_text(prefs, caption.as_ref(), now);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Scene time for one frame: the wall-clock gap (capped at 100 ms so a stall does not jump the
@@ -3431,6 +3472,8 @@ fn run_renderer(
                 animating |= scene.flush_pending_reload(&gpu.device, &gpu.queue);
             }
         }
+        let overlay_prefs = host.overlay_prefs();
+        let overlay_now = chrono::Local::now();
         // One monitor per scene plays its sounds.
         let owners = sound_owners(
             &monitors
@@ -3457,6 +3500,7 @@ fn run_renderer(
                 .then(|| span_transform(&geoms, &m.monitor_id))
                 .flatten();
             m.mark_current();
+            let overlay = photo_overlay_text(host, rt, overlay_prefs, overlay_now);
             animating |= m.frame(
                 &gpu.device,
                 &gpu.queue,
@@ -3468,6 +3512,7 @@ fn run_renderer(
                 &geoms,
                 span,
                 &mut cursor,
+                overlay.as_ref(),
             );
             if let Some(rt) = rt {
                 if m.generation == Some(rt.generation)
@@ -3781,9 +3826,17 @@ mod tests {
         // A failed load also has no runtime, but keeps its (black) surface.
         assert!(!shows_system_wallpaper(Some(&MonitorRuntime::default())));
         assert!(!shows_system_wallpaper(None));
-        let photo = MonitorRuntime {
-            source: WallpaperSource::None,
+        // Photos with no photo ready yet show the system wallpaper, not black.
+        let waiting = MonitorRuntime {
+            source: WallpaperSource::PhotoApi,
             active: ActiveRuntime::Photo { path: None },
+            ..MonitorRuntime::default()
+        };
+        assert!(shows_system_wallpaper(Some(&waiting)));
+        let photo = MonitorRuntime {
+            active: ActiveRuntime::Photo {
+                path: Some("/p.jpg".into()),
+            },
             ..MonitorRuntime::default()
         };
         assert!(!shows_system_wallpaper(Some(&photo)));

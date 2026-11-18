@@ -122,8 +122,23 @@ fn is_generated_still(path: &Path) -> bool {
 #[cfg(target_os = "windows")]
 pub(crate) use sync::{request as request_sync, start as start_sync};
 
+/// Longest edge of the lock screen still.
+const STILL_MAX_EDGE: u32 = 3840;
+
 fn prepare_still(source: &Path, output: &Path) -> anyhow::Result<()> {
-    let decoded = truongpaper_photo_api::decode_photo_for_wgpu(source, 3840)?;
+    // Shrunk while decoding, so a large photo is never held at full size in several copies.
+    let decoded =
+        truongpaper_photo_api::decode_photo_for_wgpu_fitted(source, STILL_MAX_EDGE, |(w, h)| {
+            let longest = w.max(h).max(1);
+            if longest <= STILL_MAX_EDGE {
+                return (w, h);
+            }
+            let scale = STILL_MAX_EDGE as f64 / longest as f64;
+            (
+                ((w as f64 * scale).round() as u32).max(1),
+                ((h as f64 * scale).round() as u32).max(1),
+            )
+        })?;
     let image = image::DynamicImage::ImageRgba8(decoded.rgba).into_rgb8();
     let mut writer = BufWriter::new(fs::File::create_new(output)?);
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 90).encode_image(&image)?;

@@ -2850,10 +2850,10 @@ fn photo_overlay_text(
     if !prefs.any() {
         return None;
     }
-    let clock_24h = prefs.time && truongpaper_platform::clock::uses_24_hour_clock();
     let ActiveRuntime::Photo { path: Some(path) } = &rt?.active else {
         return None;
     };
+    let clock_24h = prefs.time && truongpaper_platform::clock::uses_24_hour_clock();
     let caption = host.photo_caption(path);
     let text = crate::photo_caption::overlay_text(prefs, caption.as_ref(), now, clock_24h);
     (!text.is_empty()).then_some(text)

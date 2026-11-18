@@ -1,23 +1,35 @@
 //! Whether the user's clock shows 24-hour time (Windows region format, macOS "24-hour time").
-//! The answer is cached for a few minutes, so a change in system settings is picked up soon.
+//!
+//! Callers (the render thread) never wait for the system: the answer is cached and refreshed
+//! every few minutes on a background thread (reading it on macOS starts a `defaults` process).
 
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const CACHE_FOR: Duration = Duration::from_secs(300);
 
-/// `true` when the system clock is set to 24-hour time.
+static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+
+/// `true` when the system clock is set to 24-hour time. Returns the cached answer at once
+/// (`false` until the first read finishes) and starts a background refresh when it is stale.
 pub fn uses_24_hour_clock() -> bool {
-    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
-    let mut cache = CACHE.lock();
-    if let Some((at, value)) = *cache {
-        if at.elapsed() < CACHE_FOR {
-            return value;
+    let cached = *CACHE.lock();
+    let stale = cached.is_none_or(|(at, _)| at.elapsed() >= CACHE_FOR);
+    if stale && !REFRESHING.swap(true, Ordering::AcqRel) {
+        let spawned = std::thread::Builder::new()
+            .name("clock-format".into())
+            .spawn(|| {
+                let value = read_system_setting();
+                *CACHE.lock() = Some((Instant::now(), value));
+                REFRESHING.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            REFRESHING.store(false, Ordering::Release);
         }
     }
-    let value = read_system_setting();
-    *cache = Some((Instant::now(), value));
-    value
+    cached.is_some_and(|(_, value)| value)
 }
 
 /// A Windows short-time pattern uses 24-hour time when its hours are `H` / `HH`.
@@ -112,7 +124,13 @@ mod tests {
 
     #[test]
     fn the_system_setting_can_be_read() {
-        // Either answer is fine; this only checks that reading does not fail or hang.
+        // Either answer is fine; the first call returns at once and the background read
+        // fills the cache soon after.
         let _ = uses_24_hour_clock();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while CACHE.lock().is_none() {
+            assert!(Instant::now() < deadline, "clock format was never read");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

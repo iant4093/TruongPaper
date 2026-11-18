@@ -38,6 +38,8 @@ impl AppState {
         let steam = Arc::new(SteamSession::new(app_data_dir.join("steam-downloader")));
         let host = Arc::new(WallpaperHost::new());
         host.set_overlay_prefs(crate::photo_caption::OverlayPrefs::from_settings(&settings));
+        // Starts the first (background) read, so the caption clock is right from the start.
+        truongpaper_platform::clock::uses_24_hour_clock();
         Self {
             settings: Arc::new(Mutex::new(settings)),
             db: Arc::new(Mutex::new(conn)),

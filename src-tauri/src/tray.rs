@@ -1,10 +1,19 @@
 // src-tauri/src/tray.rs
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Listener, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WindowEvent,
+    AppHandle, Listener, Manager, PhysicalPosition, PhysicalSize, Position, Rect, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+
+const POPOVER_LABEL: &str = "tray-popover";
+/// A hidden popover is closed after this long, so its web view does not hold memory while
+/// nobody uses it. The next tray click builds it again.
+const POPOVER_IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(60);
+/// Bumped every time the popover is shown; a pending close only runs if it did not change.
+static POPOVER_SHOWN: AtomicU64 = AtomicU64::new(0);
 
 /// When the popover last hid because it lost focus (see `toggle_tray_popover`).
 static LAST_BLUR_HIDE: parking_lot::Mutex<Option<std::time::Instant>> =
@@ -70,18 +79,6 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
         &[&open_studio, &next_wallpaper, &toggle_pause, &sep, &quit],
     )?;
 
-    if let Some(popover) = app.get_webview_window("tray-popover") {
-        let pop_clone = popover.clone();
-        popover.on_window_event(move |event| {
-            if let WindowEvent::Focused(false) = event {
-                if pop_clone.is_visible().unwrap_or(false) {
-                    *LAST_BLUR_HIDE.lock() = Some(std::time::Instant::now());
-                }
-                let _ = pop_clone.hide();
-            }
-        });
-    }
-
     let icon = if cfg!(target_os = "macos") {
         // Template images need a transparent mark, not an opaque application-icon tile.
         tauri::include_image!("icons/tray-icon.png").clone()
@@ -130,13 +127,57 @@ pub fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
-    let Some(popover) = app.get_webview_window("tray-popover") else {
-        return;
-    };
+/// The popover window, built on first use (it is not created at launch).
+fn popover_window(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(window) = app.get_webview_window(POPOVER_LABEL) {
+        return Some(window);
+    }
+    let window = WebviewWindowBuilder::new(app, POPOVER_LABEL, WebviewUrl::App("tray.html".into()))
+        .title("TruongPaper Quick Controls")
+        .inner_size(POPOVER_WIDTH, POPOVER_HEIGHT)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .theme(Some(tauri::Theme::Dark))
+        .build()
+        .map_err(|err| tracing::warn!("tray popover: {err}"))
+        .ok()?;
+    let handle = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Focused(false) = event {
+            if handle.is_visible().unwrap_or(false) {
+                *LAST_BLUR_HIDE.lock() = Some(std::time::Instant::now());
+            }
+            hide_popover(&handle);
+        }
+    });
+    Some(window)
+}
 
-    if popover.is_visible().unwrap_or(false) {
-        let _ = popover.hide();
+/// Hides the popover and closes it once it has stayed hidden for [`POPOVER_IDLE_CLOSE`].
+fn hide_popover(popover: &WebviewWindow) {
+    let _ = popover.hide();
+    let shown = POPOVER_SHOWN.load(Ordering::Acquire);
+    let popover = popover.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(POPOVER_IDLE_CLOSE).await;
+        if POPOVER_SHOWN.load(Ordering::Acquire) == shown && !popover.is_visible().unwrap_or(true) {
+            let _ = popover.close();
+        }
+    });
+}
+
+fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
+    if app
+        .get_webview_window(POPOVER_LABEL)
+        .is_some_and(|p| p.is_visible().unwrap_or(false))
+    {
+        if let Some(popover) = app.get_webview_window(POPOVER_LABEL) {
+            hide_popover(&popover);
+        }
         return;
     }
     // On Windows a click on the tray icon first blurs the popover (which hides it), then
@@ -147,6 +188,9 @@ fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
     {
         return;
     }
+    let Some(popover) = popover_window(app) else {
+        return;
+    };
 
     // The hidden popover's own monitor and scale say nothing about where the tray is: use the
     // monitor under the icon (its DPI, bounds and work area).
@@ -199,11 +243,12 @@ fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
     let _ = popover.set_position(Position::Physical(PhysicalPosition::new(
         target_x, target_y,
     )));
+    POPOVER_SHOWN.fetch_add(1, Ordering::AcqRel);
     let _ = popover.show();
     let _ = popover.set_focus();
 }
 
-/// Popover size in logical points (matches `tauri.conf.json`).
+/// Popover size in logical points.
 const POPOVER_WIDTH: f64 = 360.0;
 const POPOVER_HEIGHT: f64 = 480.0;
 

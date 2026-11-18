@@ -18,7 +18,7 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import { confirmAction, toast } from '../../store/feedback';
 import { parseImportLink } from '../../lib/importLinks';
-import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoPreviewSrc, plural } from '../../lib/format';
+import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoAlbumTitle, photoPreviewSrc, plural, safeAlbumUrl } from '../../lib/format';
 import type { FitMode, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 import { Dropdown } from '../Dropdown';
@@ -37,7 +37,8 @@ const DOWNLOADS_PER_DAY = [
 const photoDims = (p: PhotoItem) =>
   p.width && p.height ? `${p.width} × ${p.height}` : 'Full resolution';
 
-const photoAlbumName = (photo: PhotoItem) => photo.albumSlug.replace(/-/g, ' ');
+/** Album titles from the latest photo status (read where a tile renders). */
+const photoAlbumName = (photo: PhotoItem) => photoAlbumTitle(photo, useAppStore.getState().photoStatus?.albumTitles);
 
 const PhotoBadges: React.FC<{ photo: PhotoItem }> = ({ photo }) => (
   <div className="photo-badges" title={photoAlbumName(photo)}>
@@ -259,7 +260,7 @@ export const PhotosApiView: React.FC = () => {
                 onClick={() => void hide(currentPhoto)}>
                 <EyeOff size={14} /> Hide
               </button>
-              <button type="button" className="button" onClick={() => void openExternal(currentPhoto.albumUrl)}>
+              <button type="button" className="button" onClick={() => void openExternal(safeAlbumUrl(currentPhoto))}>
                 <ExternalLink size={14} /> View album
               </button>
             </div>
@@ -519,7 +520,10 @@ export const PhotosApiView: React.FC = () => {
           <Dropdown<number> label="New photos" value={settings?.photoDownloadsPerDay ?? 1}
             options={DOWNLOADS_PER_DAY}
             onChange={(photoDownloadsPerDay) => void runPhotoAction(() => updateSettings({ photoDownloadsPerDay }), 'Saved')} />
-          <span className="view-subtitle">Full-size downloads. Rotation shuffles the photos already saved.</span>
+          <span className="view-subtitle">
+            Full-size downloads. Rotation shuffles the photos already saved.
+            {photoStatus?.downloadsPerDay ? ` ${photoStatus.downloadsToday ?? 0} of ${photoStatus.downloadsPerDay} today.` : ''}
+          </span>
         </div>
 
         <div style={{ marginTop: 14 }}>
@@ -536,7 +540,15 @@ export const PhotosApiView: React.FC = () => {
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="button button-primary" disabled={photoStatus?.isRefilling} onClick={() => void runPhotoAction(triggerPhotoRefill)}>
+          <button type="button" className="button button-primary" disabled={photoStatus?.isRefilling} onClick={() => void runPhotoAction(async () => {
+            const before = useAppStore.getState().photoStatus?.downloadsToday ?? 0;
+            await triggerPhotoRefill();
+            const after = useAppStore.getState().photoStatus;
+            if ((after?.downloadsToday ?? 0) > before) return;
+            toast.info(after?.downloadsPerDay && (after.downloadsToday ?? 0) >= after.downloadsPerDay
+              ? 'Today’s new photos are downloaded. More tomorrow, or raise “New photos”.'
+              : 'No new photos right now.');
+          })}>
             <RefreshCw size={14} /> {photoStatus?.isRefilling ? 'Downloading…' : 'Get new photos'}
           </button>
           <button type="button" className="button" onClick={() => void clearCache()}>

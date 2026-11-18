@@ -25,8 +25,9 @@ pub use client::{
     HttpResponse, PhotoApiClient, PhotoTransport, RandomPhotoQuery,
 };
 pub use decoder::{
-    decode_photo_bytes_for_wgpu, decode_photo_for_wgpu, effective_max_dimension,
-    inspect_display_dimensions, inspect_display_dimensions_from_bytes, DecodedGpuPhoto,
+    decode_photo_bytes_for_wgpu, decode_photo_for_wgpu, decode_photo_for_wgpu_fitted,
+    effective_max_dimension, inspect_display_dimensions, inspect_display_dimensions_from_bytes,
+    DecodedGpuPhoto,
 };
 pub use error::{PhotoApiError, PhotoApiResult};
 pub use limiter::SlidingRateLimiter;

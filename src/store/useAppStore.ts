@@ -25,7 +25,7 @@ import type {
   WorkshopPreview,
   WorkshopDownloadSource,
 } from '../types/ipc';
-import { toast } from './feedback';
+import { CancelledError, confirmAction, toast } from './feedback';
 import { adjustmentWriteKey, propertyWriteKey, wallpaperWrites } from '../lib/writeQueue';
 
 export interface SteamDownloadProgress {
@@ -176,6 +176,16 @@ export interface AppState {
 }
 
 // Albums and presets live in the backend (`photo_list_albums`, `wallpaper_list_presets`).
+/** Application wallpapers the user agreed to run (asked once per wallpaper). */
+const TRUSTED_APPS_KEY = 'truongpaper.trustedApplications';
+const trustedApplications = (): string[] => {
+  try { return JSON.parse(localStorage.getItem(TRUSTED_APPS_KEY) ?? '[]') as string[]; } catch { return []; }
+};
+const isTrustedApplication = (id: string) => trustedApplications().includes(id);
+const trustApplication = (id: string) => {
+  try { localStorage.setItem(TRUSTED_APPS_KEY, JSON.stringify([...new Set([...trustedApplications(), id])])); } catch { /* asked again next time */ }
+};
+
 // These localStorage keys are older mirrors, read once to move albums the backend lacks.
 const LEGACY_ALBUMS_KEY = 'truongpaper.savedAlbums';
 const LEGACY_PRESETS_KEY = 'truongpaper.presets';
@@ -841,6 +851,20 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     applyMonitorSource: async (monitorId, source) => {
+      if (source.kind === 'workshop') {
+        const wallpaper = get().wallpapers.find((w) => w.wallpaperId === source.wallpaperId);
+        const monitor = get().monitors.find((m) => m.monitorId === monitorId);
+        const alreadyHere = monitor?.activeSource.kind === 'workshop' && monitor.activeSource.wallpaperId === source.wallpaperId;
+        if (wallpaper?.type === 'application' && !alreadyHere && !isTrustedApplication(wallpaper.wallpaperId)) {
+          const ok = await confirmAction(
+            `Run “${wallpaper.title}”?`,
+            'Run program',
+            'This wallpaper is a program from the Workshop and runs with your account’s access to files. Only run wallpapers you trust.',
+          );
+          if (!ok) throw new CancelledError();
+          trustApplication(wallpaper.wallpaperId);
+        }
+      }
       const seq = ++applySeq;
       const showList = async () => {
         const monitors = await invoke<MonitorInfo[]>('monitors_list');

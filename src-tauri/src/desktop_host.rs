@@ -1520,8 +1520,12 @@ fn run_photo_job(job: PhotoJob) -> PhotoDone {
     } = job;
     let result = match input {
         PhotoInput::Image(img) => Ok(img),
-        PhotoInput::Path(path) => crate::commands::photo::decode_photo_for_display(true, &path)
-            .and_then(|img| img.ok_or_else(|| format!("photo {} was not decoded", path.display()))),
+        PhotoInput::Path(path) => {
+            crate::commands::photo::decode_photo_for_display(true, &path, Some(max_display))
+                .and_then(|img| {
+                    img.ok_or_else(|| format!("photo {} was not decoded", path.display()))
+                })
+        }
     }
     .map(|img| downscale_for_display(img, max_display));
     PhotoDone {
@@ -2846,11 +2850,12 @@ fn photo_overlay_text(
     if !prefs.any() {
         return None;
     }
+    let clock_24h = prefs.time && truongpaper_platform::clock::uses_24_hour_clock();
     let ActiveRuntime::Photo { path: Some(path) } = &rt?.active else {
         return None;
     };
     let caption = host.photo_caption(path);
-    let text = crate::photo_caption::overlay_text(prefs, caption.as_ref(), now);
+    let text = crate::photo_caption::overlay_text(prefs, caption.as_ref(), now, clock_24h);
     (!text.is_empty()).then_some(text)
 }
 
@@ -3428,6 +3433,7 @@ fn run_renderer(
             span_notified.clear();
         }
         let max_display = photo_display_cap(&geoms, span_on);
+        host.set_photo_decode_cap(max_display);
         let span_rt = span_on
             .then(|| span_source_monitor(&geoms))
             .flatten()
@@ -3473,6 +3479,9 @@ fn run_renderer(
             }
         }
         let overlay_prefs = host.overlay_prefs();
+        let span_source_id = span_on
+            .then(|| span_source_monitor(&geoms).map(str::to_string))
+            .flatten();
         let overlay_now = chrono::Local::now();
         // One monitor per scene plays its sounds.
         let owners = sound_owners(
@@ -3500,7 +3509,11 @@ fn run_renderer(
                 .then(|| span_transform(&geoms, &m.monitor_id))
                 .flatten();
             m.mark_current();
-            let overlay = photo_overlay_text(host, rt, overlay_prefs, overlay_now);
+            // A spanned photo gets one caption, on the display the span is drawn from.
+            let caption_here = !span_on || span_source_id.as_deref() == Some(m.monitor_id.as_str());
+            let overlay = caption_here
+                .then(|| photo_overlay_text(host, rt, overlay_prefs, overlay_now))
+                .flatten();
             animating |= m.frame(
                 &gpu.device,
                 &gpu.queue,

@@ -3,7 +3,7 @@ import { MonitorOff, Pause, Play, SkipForward } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import { toast } from '../store/feedback';
-import { photoPreviewSrc, wallpaperPreviewSrc } from '../lib/format';
+import { photoAlbumTitle, photoPreviewSrc, wallpaperPreviewSrc } from '../lib/format';
 import type { WallpaperSource } from '../types/ipc';
 import { LoadErrorCard } from './LoadErrorCard';
 import { Thumb } from './ui';
@@ -26,7 +26,7 @@ function usePlaybackInfo() {
         ? s.playlists.find((p) => monitor.activeSource.kind === 'playlist' && p.playlistId === monitor.activeSource.playlistId)?.name
         : undefined,
       title: monitor?.activeSource.kind === 'none' ? 'No wallpaper'
-        : wallpaper?.title ?? photo?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected',
+        : wallpaper?.title ?? (photo ? photoAlbumTitle(photo, s.photoStatus?.albumTitles) : 'No wallpaper selected'),
       preview: wallpaperPreviewSrc(wallpaper) ?? photoPreviewSrc(photo),
     };
   }));

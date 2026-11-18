@@ -48,9 +48,11 @@ pub fn overlay_text(
     prefs: OverlayPrefs,
     caption: Option<&PhotoCaption>,
     now: DateTime<Local>,
+    clock_24h: bool,
 ) -> OverlayText {
+    let time_format = if clock_24h { "%-H:%M" } else { "%-I:%M %p" };
     OverlayText {
-        time: prefs.time.then(|| now.format("%-I:%M %p").to_string()),
+        time: prefs.time.then(|| now.format(time_format).to_string()),
         date: prefs.time.then(|| now.format("%A, %B %-d").to_string()),
         album: caption
             .filter(|_| prefs.album)
@@ -113,15 +115,35 @@ pub fn store_album_titles<'a>(
 }
 
 /// Caption for a cached photo. `album` falls back to a title made from the slug.
-pub fn caption_for(conn: &Connection, album_slug: &str, file: &Path) -> PhotoCaption {
-    let album = (!album_slug.is_empty()).then(|| {
-        known_album_title(conn, album_slug).unwrap_or_else(|| title_from_slug(album_slug))
-    });
+/// Caption for a cached photo. `known_title` is [`known_album_title`] (looked up under the
+/// database lock); the file is read here, outside it. Without a known title the album name is
+/// made from the slug.
+pub fn caption_for(album_slug: &str, known_title: Option<String>, file: &Path) -> PhotoCaption {
+    let album = (!album_slug.is_empty())
+        .then(|| known_title.unwrap_or_else(|| title_from_slug(album_slug)));
     PhotoCaption {
         album_slug: album_slug.to_string(),
         album,
         exif: read_exif_line(file),
     }
+}
+
+/// Every known album title (saved albums win over catalog titles), `slug -> title`.
+pub fn all_album_titles(conn: &Connection) -> HashMap<String, String> {
+    let mut titles: HashMap<String, String> = get_setting(conn, SETTING_ALBUM_TITLES)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT album_slug, title FROM saved_albums WHERE title <> ''")
+    {
+        if let Ok(rows) =
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        {
+            titles.extend(rows.flatten());
+        }
+    }
+    titles
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -495,11 +517,16 @@ mod tests {
             album: true,
             exif: true,
         };
-        let text = overlay_text(all, Some(&caption), now);
+        let text = overlay_text(all, Some(&caption), now, false);
         assert_eq!(text.time.as_deref(), Some("1:07 PM"));
+        let late = Local.with_ymd_and_hms(2026, 11, 16, 21, 5, 0).unwrap();
+        assert_eq!(
+            overlay_text(all, None, late, true).time.as_deref(),
+            Some("21:05")
+        );
         assert_eq!(text.date.as_deref(), Some("Monday, November 16"));
         assert_eq!(text.album.as_deref(), Some("Day 6 - Dresden"));
-        let none = overlay_text(OverlayPrefs::default(), Some(&caption), now);
+        let none = overlay_text(OverlayPrefs::default(), Some(&caption), now, false);
         assert!(none.is_empty());
     }
 }

@@ -60,12 +60,22 @@ export const useFeedback = create<FeedbackState>((set, get) => ({
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+/** Thrown when the user declines a confirmation; callers' error toasts ignore it. */
+export class CancelledError extends Error {
+  constructor() {
+    super('Cancelled');
+    this.name = 'CancelledError';
+  }
+}
+
 /** Imperative helpers usable from event handlers and store actions. */
 export const toast = {
   info: (message: string, undo?: Toast['undo']) => useFeedback.getState().push({ message, tone: 'info', undo }),
   success: (message: string, undo?: Toast['undo']) => useFeedback.getState().push({ message, tone: 'success', undo }),
   error: (err: unknown, prefix?: string) =>
-    useFeedback.getState().push({ message: prefix ? `${prefix}: ${errorText(err)}` : errorText(err), tone: 'error' }),
+    err instanceof CancelledError
+      ? undefined
+      : useFeedback.getState().push({ message: prefix ? `${prefix}: ${errorText(err)}` : errorText(err), tone: 'error' }),
 };
 
 /** Ask before a destructive action. Resolves false when the user cancels. */

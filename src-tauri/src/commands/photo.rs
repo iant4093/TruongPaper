@@ -33,6 +33,18 @@ const MAX_DECODE_ATTEMPTS: usize = 3;
 /// Photos kept on disk per filter and display orientation before the daily download budget
 /// applies (a new install or a new album is not stuck on one photo for a day).
 const MIN_CACHED_PHOTOS: usize = 3;
+/// How long automatic refills leave a filter alone after it had nothing new.
+const QUIET_REFILL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Refill outcomes after which asking again soon would only repeat the same API calls.
+fn found_nothing_new(outcome: &RefillOutcome) -> bool {
+    matches!(
+        outcome,
+        RefillOutcome::FilterExhaustedHoldingLast
+            | RefillOutcome::SmallPoolFullyQueued { .. }
+            | RefillOutcome::RetryCapReached { .. }
+    )
+}
 
 fn e(err: impl std::fmt::Display) -> String {
     err.to_string()
@@ -46,6 +58,9 @@ pub struct PhotoServiceState {
     pub limiter: Arc<SlidingRateLimiter>,
     pub is_refilling: Arc<AtomicBool>,
     pub refill_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Filters whose last refill found nothing new to download, with when. Automatic refills
+    /// skip them for [`QUIET_REFILL`] instead of asking the API again after every photo.
+    pub quiet_filters: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     /// Shared with `AppState` (for `transitionUsed` and the cache budget mirror).
     pub settings: Arc<Mutex<AppSettings>>,
 }
@@ -63,6 +78,7 @@ impl PhotoServiceState {
             http,
             limiter: Arc::new(SlidingRateLimiter::new()),
             is_refilling: Arc::new(AtomicBool::new(false)),
+            quiet_filters: Arc::default(),
             refill_mutex: Arc::new(tokio::sync::Mutex::new(())),
             settings,
         }
@@ -105,6 +121,9 @@ impl PhotoServiceState {
             blacklist_count: blacklist_count(&conn).map_err(e)?,
             is_refilling: self.is_refilling.load(Ordering::Relaxed),
             rate_limit_remaining: self.limiter.remaining(),
+            downloads_today: photo_downloads_on(&conn, &local_day()).unwrap_or(0),
+            downloads_per_day: self.settings.lock().photo_downloads_per_day,
+            album_titles: crate::photo_caption::all_album_titles(&conn),
         })
     }
 
@@ -258,8 +277,17 @@ impl PhotoServiceState {
         max_cache_bytes: u64,
         displayed: &[String],
     ) -> PhotoApiResult<RefillOutcome> {
+        let key = format!("{filter:?}");
+        let quiet = self
+            .quiet_filters
+            .lock()
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < QUIET_REFILL);
+        if quiet {
+            return Ok(RefillOutcome::FilterExhaustedHoldingLast);
+        }
         let budget = self.download_budget(filter);
-        refill_queue_with_budget(
+        let outcome = refill_queue_with_budget(
             &self.http,
             &self.limiter,
             &self.db,
@@ -269,7 +297,13 @@ impl PhotoServiceState {
             displayed,
             budget,
         )
-        .await
+        .await;
+        if outcome.as_ref().is_ok_and(found_nothing_new) {
+            self.quiet_filters
+                .lock()
+                .insert(key, std::time::Instant::now());
+        }
+        outcome
     }
 }
 
@@ -317,19 +351,25 @@ pub fn select_rotation_targets(
 pub(crate) fn decode_photo_for_display(
     renderer_attached: bool,
     path: &Path,
+    max_display: Option<(u32, u32)>,
 ) -> Result<Option<Arc<RgbaImageData>>, String> {
     if !renderer_attached {
         return Ok(None);
     }
-    decode_photo_for_wgpu(path, MAX_PHOTO_TEXTURE_DIMENSION)
-        .map(|image| {
-            Some(Arc::new(RgbaImageData {
-                width: image.width,
-                height: image.height,
-                pixels: image.rgba.into_raw(),
-            }))
-        })
-        .map_err(|err| format!("photo {} could not be decoded: {err}", path.display()))
+    // Shrunk to the display size before it is rotated and converted, so the full-size picture
+    // exists only once, briefly.
+    decode_photo_for_wgpu_fitted(path, MAX_PHOTO_TEXTURE_DIMENSION, |src| match max_display {
+        Some(cap) => truongpaper_renderer::photo_display_target(src, cap),
+        None => src,
+    })
+    .map(|image| {
+        Some(Arc::new(RgbaImageData {
+            width: image.width,
+            height: image.height,
+            pixels: image.rgba.into_raw(),
+        }))
+    })
+    .map_err(|err| format!("photo {} could not be decoded: {err}", path.display()))
 }
 
 /// Takes a cached photo that failed to decode out of the unused queue (`file_present = 0`, the
@@ -367,7 +407,8 @@ async fn prepare_photo(
         return Ok(None);
     }
     let path = PathBuf::from(&item.file_path);
-    tokio::task::spawn_blocking(move || decode_photo_for_display(true, &path))
+    let cap = host.and_then(|h| h.photo_decode_cap());
+    tokio::task::spawn_blocking(move || decode_photo_for_display(true, &path, cap))
         .await
         .map_err(e)?
 }
@@ -383,7 +424,8 @@ pub(crate) async fn decode_for_desktop(
         return None;
     }
     let path = path.to_path_buf();
-    match tokio::task::spawn_blocking(move || decode_photo_for_display(true, &path)).await {
+    let cap = host.photo_decode_cap();
+    match tokio::task::spawn_blocking(move || decode_photo_for_display(true, &path, cap)).await {
         Ok(Ok(decoded)) => decoded,
         Ok(Err(err)) => {
             tracing::warn!("{err}");
@@ -603,14 +645,15 @@ async fn photo_for_rotation(
 /// Gives the host the caption of the photo about to be shown. Album titles that are not known
 /// yet come from the public catalog, fetched once per run in the background.
 pub(crate) fn set_host_caption(app: &AppHandle, state: &AppState, item: &PhotoItem) {
+    // Nothing is drawn: skip the file read. Turning a caption on refreshes the photos on screen
+    // ([`refresh_photo_captions`]).
+    if !state.host.overlay_prefs().any() {
+        return;
+    }
     let path = PathBuf::from(&item.file_path);
-    let (caption, title_known) = {
-        let conn = state.db.lock();
-        (
-            crate::photo_caption::caption_for(&conn, &item.album_slug, &path),
-            crate::photo_caption::known_album_title(&conn, &item.album_slug).is_some(),
-        )
-    };
+    let known = crate::photo_caption::known_album_title(&state.db.lock(), &item.album_slug);
+    let title_known = known.is_some();
+    let caption = crate::photo_caption::caption_for(&item.album_slug, known, &path);
     state.host.set_photo_caption(path, caption);
     static CATALOG_FETCHED: AtomicBool = AtomicBool::new(false);
     if !title_known
@@ -631,6 +674,20 @@ pub(crate) fn set_host_caption(app: &AppHandle, state: &AppState, item: &PhotoIt
                 }
             }
         });
+    }
+}
+
+/// Builds the captions of the photos on screen (after a caption setting was turned on).
+pub(crate) fn refresh_photo_captions(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let current = {
+        let conn = state.db.lock();
+        current_photo_by_monitor(&conn, &state.app_data_dir).unwrap_or_default()
+    };
+    for item in current.into_values().flatten() {
+        set_host_caption(app, &state, &item);
     }
 }
 
@@ -658,6 +715,8 @@ pub async fn photo_trigger_refill(
     app: AppHandle,
     state: State<'_, PhotoServiceState>,
 ) -> Result<(), String> {
+    // Asked for by the user: try again even where the last refill found nothing new.
+    state.quiet_filters.lock().clear();
     trigger_refill(&app, &state).await
 }
 
@@ -668,6 +727,7 @@ pub async fn photo_retry_now(
     state: State<'_, PhotoServiceState>,
 ) -> Result<(), String> {
     state.limiter.clear_backoff();
+    state.quiet_filters.lock().clear();
     trigger_refill(&app, &state).await
 }
 
@@ -1015,6 +1075,25 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_with_nothing_new_is_left_alone_by_automatic_refills() {
+        let svc = service();
+        let filter = PhotoFilter::default();
+        svc.quiet_filters
+            .lock()
+            .insert(format!("{filter:?}"), std::time::Instant::now());
+        // Answered without touching the network.
+        let outcome = tauri::async_runtime::block_on(svc.refill(&filter, 0, &[])).unwrap();
+        assert_eq!(outcome, RefillOutcome::FilterExhaustedHoldingLast);
+        assert!(found_nothing_new(&RefillOutcome::RetryCapReached {
+            unused_count: 0
+        }));
+        assert!(!found_nothing_new(&RefillOutcome::Offline));
+        assert!(!found_nothing_new(&RefillOutcome::DailyLimitReached {
+            unused_count: 0
+        }));
+    }
+
+    #[test]
     fn photo_rotation_does_not_replace_workshop_or_playlist_scene() {
         let workshop = WallpaperSource::Workshop {
             wallpaper_id: "w".into(),
@@ -1359,17 +1438,23 @@ mod tests {
         std::fs::write(&bad, b"not a jpeg").unwrap();
 
         // No renderer: nothing is decoded, history is recorded as before.
-        assert!(decode_photo_for_display(false, &bad).unwrap().is_none());
-        assert!(decode_photo_for_display(false, &dir.join("missing.jpg"))
+        assert!(decode_photo_for_display(false, &bad, None)
             .unwrap()
             .is_none());
+        assert!(
+            decode_photo_for_display(false, &dir.join("missing.jpg"), None)
+                .unwrap()
+                .is_none()
+        );
 
         // Renderer attached: decode first; a failure means "do not mark shown".
-        let img = decode_photo_for_display(true, &good).unwrap().unwrap();
+        let img = decode_photo_for_display(true, &good, None)
+            .unwrap()
+            .unwrap();
         assert_eq!((img.width, img.height), (1, 1));
         assert_eq!(img.pixels.len(), 4);
-        assert!(decode_photo_for_display(true, &bad).is_err());
-        assert!(decode_photo_for_display(true, &dir.join("missing.jpg")).is_err());
+        assert!(decode_photo_for_display(true, &bad, None).is_err());
+        assert!(decode_photo_for_display(true, &dir.join("missing.jpg"), None).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

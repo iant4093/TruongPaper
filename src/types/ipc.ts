@@ -60,6 +60,11 @@ export interface PhotoStatus {
   rateLimitRemaining: number;
   offline: boolean;
   showingCachedOnly: boolean;
+  /** New full-size photos downloaded today, and the daily limit. */
+  downloadsToday?: number;
+  downloadsPerDay?: number;
+  /** Known album titles, `slug -> title`. */
+  albumTitles?: Record<string, string>;
 }
 
 export interface ProjectJsonComboOption {

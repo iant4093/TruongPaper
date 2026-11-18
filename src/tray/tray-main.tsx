@@ -4,6 +4,9 @@ import ReactDOM from 'react-dom/client';
 import { TrayApp } from './TrayApp';
 import '../styles/theme.css';
 
+// The popover has no use for the web view's Reload / Inspect menu.
+document.addEventListener('contextmenu', (event) => event.preventDefault());
+
 async function boot() {
   // The browser-preview mock is dev-only; production builds do not carry it.
   if (import.meta.env.DEV) (await import('../dev/mockTauri')).installBrowserPreviewMocksIfNeeded();

@@ -26,20 +26,6 @@
         "shadow": true,
         "center": true,
         "theme": "Dark"
-      },
-      {
-        "label": "tray-popover",
-        "title": "TruongPaper Quick Controls",
-        "url": "tray.html",
-        "width": 360,
-        "height": 480,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": false,
-        "theme": "Dark"
       }
     ],
     "security": {

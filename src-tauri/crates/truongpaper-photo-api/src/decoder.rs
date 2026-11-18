@@ -100,14 +100,64 @@ fn decode_from_reader<R: BufRead + Seek>(
     })
 }
 
+/// Decodes `path`, shrinks it to `target((width, height))` (sizes as shown, after EXIF
+/// orientation; never above `device_max_texture_dim_2d`) and only then rotates it and converts
+/// it to RGBA. The full-size picture exists once, as decoded, instead of in three copies.
+pub fn decode_photo_for_wgpu_fitted(
+    path: &Path,
+    device_max_texture_dim_2d: u32,
+    target: impl FnOnce((u32, u32)) -> (u32, u32),
+) -> PhotoApiResult<DecodedGpuPhoto> {
+    let reader = ImageReader::new(BufReader::new(File::open(path)?))
+        .with_guessed_format()
+        .map_err(PhotoApiError::Io)?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| PhotoApiError::Decode(e.to_string()))?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut img =
+        DynamicImage::from_decoder(decoder).map_err(|e| PhotoApiError::Decode(e.to_string()))?;
+    let swap = swaps_axes(orientation);
+    let (w, h) = (img.width(), img.height());
+    let shown = if swap { (h, w) } else { (w, h) };
+    let (mut tw, mut th) = target(shown);
+    let max_dim = effective_max_dimension(device_max_texture_dim_2d) as f64;
+    let longest = tw.max(th) as f64;
+    if longest > max_dim {
+        tw = ((tw as f64 * max_dim / longest).round() as u32).max(1);
+        th = ((th as f64 * max_dim / longest).round() as u32).max(1);
+    }
+    if (tw, th) != shown && tw <= shown.0 && th <= shown.1 {
+        let (rw, rh) = if swap { (th, tw) } else { (tw, th) };
+        img = img.resize_exact(rw, rh, image::imageops::FilterType::Triangle);
+    }
+    img.apply_orientation(orientation);
+    let rgba = img.into_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    Ok(DecodedGpuPhoto {
+        rgba,
+        width,
+        height,
+    })
+}
+
 /// Encodes a display-oriented JPEG for the app UI, capped at 800 pixels on either edge.
 pub fn encode_photo_preview(path: &Path) -> PhotoApiResult<Vec<u8>> {
-    let image = decode_oriented(BufReader::new(File::open(path)?))?;
-    let image = if image.width().max(image.height()) > 800 {
-        image.thumbnail(800, 800)
-    } else {
-        image
-    };
+    let reader = ImageReader::new(BufReader::new(File::open(path)?))
+        .with_guessed_format()
+        .map_err(PhotoApiError::Io)?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| PhotoApiError::Decode(e.to_string()))?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image =
+        DynamicImage::from_decoder(decoder).map_err(|e| PhotoApiError::Decode(e.to_string()))?;
+    // Shrunk first, rotated after: the 800 px box is square, so the order does not change the
+    // result, only how much memory the rotation needs.
+    if image.width().max(image.height()) > 800 {
+        image = image.thumbnail(800, 800);
+    }
+    image.apply_orientation(orientation);
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85)
         .encode_image(&image.into_rgb8())
@@ -173,6 +223,28 @@ pub(crate) mod test_util {
 mod tests {
     use super::test_util::*;
     use super::*;
+
+    #[test]
+    fn fitted_decode_shrinks_in_display_orientation() {
+        let dir = std::env::temp_dir().join(format!("tp-fitted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 400x200 stored, orientation 6: shown as 200x400.
+        let path = dir.join("rotated.jpg");
+        std::fs::write(&path, with_exif_orientation(&make_jpeg(400, 200), 6)).unwrap();
+        let mut seen = None;
+        let photo = decode_photo_for_wgpu_fitted(&path, 8192, |shown| {
+            seen = Some(shown);
+            (shown.0 / 2, shown.1 / 2)
+        })
+        .unwrap();
+        assert_eq!(seen, Some((200, 400)));
+        assert_eq!((photo.width, photo.height), (100, 200));
+        assert_eq!(photo.rgba.len(), 100 * 200 * 4);
+        // A target larger than the photo never upscales.
+        let same = decode_photo_for_wgpu_fitted(&path, 8192, |_| (1000, 2000)).unwrap();
+        assert_eq!((same.width, same.height), (200, 400));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn plain_jpeg_reports_raw_dimensions() {

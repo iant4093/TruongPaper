@@ -325,6 +325,14 @@ pub struct PhotoStatus {
     pub offline: bool,
     /// Offline with no unused photo left: rotation is serving already-shown cached photos.
     pub showing_cached_only: bool,
+    /// New full-size photos downloaded today, and the daily limit.
+    #[serde(default)]
+    pub downloads_today: u32,
+    #[serde(default)]
+    pub downloads_per_day: u32,
+    /// Known album titles, `slug -> title`.
+    #[serde(default)]
+    pub album_titles: HashMap<String, String>,
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 
 pub mod accent;
 pub mod application;
+pub mod clock;
 pub mod cursor;
 pub mod display_identity;
 pub mod geometry;

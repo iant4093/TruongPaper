@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open } from '@tauri-apps/plugin-shell';
 import { Thumb } from '../components/ui';
-import { OFFLINE_NOTICE, formatBytes, photoPreviewSrc, WALLPAPER_TYPE_LABEL, wallpaperPreviewSrc } from '../lib/format';
+import { OFFLINE_NOTICE, formatBytes, photoAlbumTitle, photoPreviewSrc, safeAlbumUrl, WALLPAPER_TYPE_LABEL, wallpaperPreviewSrc } from '../lib/format';
 import { currentWallpaperForMonitor, useAppStore } from '../store/useAppStore';
 import type { WallpaperSource } from '../types/ipc';
 import { LoadErrorCard } from '../components/LoadErrorCard';
@@ -89,7 +89,8 @@ export const TrayApp: React.FC = () => {
     currentWallpaperForMonitor(activeMonitor, wallpapers, photoStatus);
   const isPlaylist = activeMonitor?.activeSource.kind === 'playlist';
   const canRotate = isPlaylist || activeMonitor?.activeSource.kind === 'photo_api';
-  const currentTitle = currentWallpaper?.title ?? currentPhoto?.albumSlug.replace(/-/g, ' ') ?? 'No wallpaper selected';
+  const albumTitles = useAppStore((s) => s.photoStatus?.albumTitles);
+  const currentTitle = currentWallpaper?.title ?? (currentPhoto ? photoAlbumTitle(currentPhoto, albumTitles) : 'No wallpaper selected');
   const currentPreview = wallpaperPreviewSrc(currentWallpaper) || photoPreviewSrc(currentPhoto);
   const currentDetails = currentWallpaper
     ? `${WALLPAPER_TYPE_LABEL[currentWallpaper.type]} · ${formatBytes(currentWallpaper.bytes)}`
@@ -221,7 +222,7 @@ export const TrayApp: React.FC = () => {
                 type="button"
                 className="button"
                 style={{ flex: 1 }}
-                onClick={() => run(() => open(currentPhoto.albumUrl))}
+                onClick={() => run(() => open(safeAlbumUrl(currentPhoto)))}
               >
                 Open album
               </button>

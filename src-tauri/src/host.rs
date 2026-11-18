@@ -221,6 +221,9 @@ pub struct WallpaperHost {
     photo_captions: Mutex<HashMap<PathBuf, crate::photo_caption::PhotoCaption>>,
     /// Which parts of the photo caption are drawn.
     overlay_prefs: Mutex<crate::photo_caption::OverlayPrefs>,
+    /// Largest display size a photo is shown at (set by the renderer); photos are decoded
+    /// straight to it instead of at full resolution.
+    photo_decode_cap: Mutex<Option<(u32, u32)>>,
     #[cfg(target_os = "windows")]
     applications:
         Mutex<HashMap<String, truongpaper_platform::application::ApplicationWallpaperProcess>>,
@@ -314,6 +317,14 @@ impl WallpaperHost {
         if changed {
             self.bump();
         }
+    }
+
+    pub fn set_photo_decode_cap(&self, cap: (u32, u32)) {
+        *self.photo_decode_cap.lock() = Some(cap);
+    }
+
+    pub fn photo_decode_cap(&self) -> Option<(u32, u32)> {
+        *self.photo_decode_cap.lock()
     }
 
     pub fn set_overlay_prefs(&self, prefs: crate::photo_caption::OverlayPrefs) {

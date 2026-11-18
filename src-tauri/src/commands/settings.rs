@@ -81,6 +81,7 @@ pub async fn settings_update(
     let overlay = crate::photo_caption::OverlayPrefs::from_settings(&after);
     if crate::photo_caption::OverlayPrefs::from_settings(&before) != overlay {
         state.host.set_overlay_prefs(overlay);
+        crate::commands::photo::refresh_photo_captions(&app);
     }
 
     if before.adjust_windows_color != after.adjust_windows_color {

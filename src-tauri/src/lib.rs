@@ -455,7 +455,8 @@ mod tests {
             .iter()
             .map(|w| w["label"].as_str().unwrap())
             .collect();
-        assert_eq!(labels, ["main", "tray-popover"]);
+        // The tray popover is built on first use (`tray.rs`), not at launch.
+        assert_eq!(labels, ["main"]);
 
         assert_eq!(
             capability(include_str!("../capabilities/main.json"))["windows"],

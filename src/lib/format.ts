@@ -5,6 +5,21 @@ import type { FilterMode, MonitorInfo, PhotoItem, PhotoStatus, WallpaperItem, Wa
 export const MB = 1024 * 1024;
 export const GB = 1024 * MB;
 
+/** Album name for a photo: the real title when known, else the slug made readable. */
+export const photoAlbumTitle = (photo: { albumSlug: string }, titles?: Record<string, string>) =>
+  titles?.[photo.albumSlug] ?? photo.albumSlug.replace(/-/g, ' ');
+
+const SITE = 'iantruongphotography.com';
+
+/** The album page to open: the API's link only when it points at the photography site. */
+export const safeAlbumUrl = (photo: { albumSlug: string; albumUrl: string }): string => {
+  try {
+    const url = new URL(photo.albumUrl);
+    if (url.protocol === 'https:' && (url.hostname === SITE || url.hostname.endsWith(`.${SITE}`))) return url.href;
+  } catch { /* fall through */ }
+  return `https://${SITE}/album/${encodeURIComponent(photo.albumSlug)}`;
+};
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
   if (bytes >= GB) return `${(bytes / GB).toFixed(2)} GB`;

@@ -33,7 +33,8 @@ pub use error::{PhotoApiError, PhotoApiResult};
 pub use limiter::SlidingRateLimiter;
 pub use queue::{
     classify_candidate_photo, classify_candidate_photo_with_displayed, needs_refill, refill_queue,
-    refill_queue_with_budget, refill_queue_with_client, RefillOutcome,
+    refill_queue_with_budget, refill_queue_with_client, refill_queue_with_deck,
+    refill_queue_with_deck_client, RefillOutcome,
 };
 
 pub use truongpaper_core::error::{CoreError, CoreResult};
@@ -41,8 +42,14 @@ pub use truongpaper_core::models::*;
 pub use truongpaper_core::repo::*;
 
 pub const API_RANDOM_URL: &str = "https://photos-api.iantruongphotography.com/v1/photos/random";
+pub const API_PHOTOS_URL: &str = "https://photos-api.iantruongphotography.com/v1/photos";
 pub const PUBLIC_CATALOG_URL: &str =
     "https://iantruongphotography.com/api/public/albums?type=photo&limit=100";
+
+/// Safety cap on `/v1/photos` pagination (200 photos per page -> up to 10,000 photos).
+pub const MAX_PHOTO_LIST_PAGES: usize = 50;
+/// How long a synced `photo_deck` is reused before checking `/v1/photos` for newly uploaded photos.
+pub const DECK_REFRESH_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 
 /// Unused photos kept on disk per active filter.
 pub const QUEUE_TARGET_UNUSED: usize = 5;
@@ -70,6 +77,16 @@ pub struct ApiPhotoResponse {
     pub bytes: u64,
     pub featured: bool,
     pub fallback_used: bool,
+}
+
+/// One page returned by `GET /v1/photos`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoListPage {
+    pub items: Vec<ApiPhotoResponse>,
+    #[serde(default)]
+    pub fallback_used: bool,
+    pub next_cursor: Option<String>,
 }
 
 #[cfg(test)]

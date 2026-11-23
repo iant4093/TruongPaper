@@ -24,6 +24,9 @@ pub enum PhotoApiError {
     /// HTTP 404 `{"error":"no_photos"}`: unknown album slug or empty pool.
     #[error("no photos available for this request (HTTP 404)")]
     NoPhotos,
+    /// HTTP 404 `{"error":"not_found"}`: route does not exist on the server yet.
+    #[error("endpoint not found (HTTP 404)")]
+    EndpointNotFound,
     /// Any other non-success HTTP status.
     #[error("unexpected HTTP status {0}")]
     UnexpectedStatus(u16),

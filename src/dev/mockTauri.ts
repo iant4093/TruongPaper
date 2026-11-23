@@ -291,7 +291,7 @@ export function createMockBackend(
     pauseHotkey: 'CmdOrCtrl+Alt+P',
     renderGpu: 'auto',
     adjustWindowsColor: true,
-    photoDownloadsPerDay: 1,
+    photoDownloadsPerDay: 0,
     photoShowTime: false,
     photoShowAlbum: false,
     photoShowExif: false,

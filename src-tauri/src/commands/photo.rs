@@ -234,10 +234,13 @@ impl PhotoServiceState {
         self.rotation_candidate_with(filter, displayed, prefer_favorite)
     }
 
-    /// Full-size downloads a refill for `filter` may make now: what is left of today's budget,
-    /// or enough to have [`MIN_CACHED_PHOTOS`] on disk for this filter.
+    /// Full-size downloads a refill for `filter` may make now: `usize::MAX` when unlimited (`0`),
+    /// otherwise what is left of today's budget or enough to have [`MIN_CACHED_PHOTOS`] on disk.
     fn download_budget(&self, filter: &PhotoFilter) -> usize {
         let per_day = self.settings.lock().photo_downloads_per_day as usize;
+        if per_day == 0 {
+            return usize::MAX;
+        }
         let conn = self.db.lock();
         let today = photo_downloads_on(&conn, &local_day()).unwrap_or(0) as usize;
         let cached = count_cached_for_filter(&conn, filter).unwrap_or(0);
@@ -246,8 +249,28 @@ impl PhotoServiceState {
             .max(MIN_CACHED_PHOTOS.saturating_sub(cached))
     }
 
+    /// Unseen photos first (or a favorite when `prefer_favorite` is set), without falling back
+    /// to already-shown cache entries so rotation can refill unseen photos from the API first.
+    fn fresh_rotation_candidate(
+        &self,
+        filter: &PhotoFilter,
+        displayed: &[String],
+        prefer_favorite: bool,
+    ) -> Result<Option<PhotoItem>, String> {
+        use RotationPhotoPool::{Favorites, Unused};
+        for pool in [prefer_favorite.then_some(Favorites), Some(Unused)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(item) = self.pop(filter, displayed, pool)? {
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
+    }
+
     /// New photos first, then photos already on disk in a shuffled order, so rotation never
-    /// runs dry while anything matching is cached (new downloads are limited per day).
+    /// runs dry while anything matching is cached.
     fn rotation_candidate_with(
         &self,
         filter: &PhotoFilter,
@@ -276,18 +299,21 @@ impl PhotoServiceState {
         filter: &PhotoFilter,
         max_cache_bytes: u64,
         displayed: &[String],
+        force_deck_refresh: bool,
     ) -> PhotoApiResult<RefillOutcome> {
         let key = format!("{filter:?}");
-        let quiet = self
-            .quiet_filters
-            .lock()
-            .get(&key)
-            .is_some_and(|at| at.elapsed() < QUIET_REFILL);
-        if quiet {
-            return Ok(RefillOutcome::FilterExhaustedHoldingLast);
+        if !force_deck_refresh {
+            let quiet = self
+                .quiet_filters
+                .lock()
+                .get(&key)
+                .is_some_and(|at| at.elapsed() < QUIET_REFILL);
+            if quiet {
+                return Ok(RefillOutcome::FilterExhaustedHoldingLast);
+            }
         }
         let budget = self.download_budget(filter);
-        let outcome = refill_queue_with_budget(
+        let outcome = refill_queue_with_deck(
             &self.http,
             &self.limiter,
             &self.db,
@@ -296,12 +322,15 @@ impl PhotoServiceState {
             max_cache_bytes,
             displayed,
             budget,
+            force_deck_refresh,
         )
         .await;
         if outcome.as_ref().is_ok_and(found_nothing_new) {
             self.quiet_filters
                 .lock()
                 .insert(key, std::time::Instant::now());
+        } else if outcome.is_ok() {
+            self.quiet_filters.lock().remove(&key);
         }
         outcome
     }
@@ -600,8 +629,15 @@ async fn rotate_photo_targets(
             state.show_prepared(app, mid, &chosen, decoded)?;
             last_applied_item = Some(chosen);
         }
-        refill_needed |=
-            needs_refill(count_unused_in_queue(&state.db.lock(), &base_filter).unwrap_or(0));
+        refill_needed |= needs_deck_refill(
+            &state.db.lock(),
+            &state.app_data_dir,
+            &base_filter,
+            &displayed_ids,
+            QUEUE_REFILL_THRESHOLD,
+            QUEUE_TARGET_UNUSED,
+        )
+        .unwrap_or(false);
     }
 
     state.emit_status(app);
@@ -609,7 +645,7 @@ async fn rotate_photo_targets(
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Some(state) = app.try_state::<PhotoServiceState>() {
-                let _ = trigger_refill(&app, &state).await;
+                let _ = trigger_refill(&app, &state, false).await;
             }
         });
     }
@@ -628,16 +664,28 @@ async fn photo_for_rotation(
     displayed_ids: &[String],
     prefer_favorite: bool,
 ) -> Result<Option<PhotoItem>, String> {
-    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
+    // Serve unseen photos first; only fall back to PreviouslyShown after a refill attempt
+    // confirms no unseen photo can be fetched (offline, daily limit reached, or auto-reset off).
+    if let Some(item) = state.fresh_rotation_candidate(filter, displayed_ids, prefer_favorite)? {
         return Ok(Some(item));
     }
-    let _refill = state.refill_mutex.lock().await;
-    if let Some(item) = state.rotation_candidate(filter, displayed_ids, prefer_favorite)? {
-        return Ok(Some(item));
-    }
-    // Nothing matching is on disk: download (within the budget) before giving up.
-    if let Err(err) = state.refill(filter, max_cache_bytes, displayed_ids).await {
-        tracing::warn!("photo refill failed: {err}");
+    let can_refill = !state.limiter.is_offline()
+        && (state.download_budget(filter) > 0 || filter.auto_reset_history_on_exhaustion);
+    if can_refill {
+        let _refill = state.refill_mutex.lock().await;
+        if let Some(item) =
+            state.fresh_rotation_candidate(filter, displayed_ids, prefer_favorite)?
+        {
+            return Ok(Some(item));
+        }
+        if let Err(err) = state.refill(filter, max_cache_bytes, displayed_ids, false).await {
+            tracing::warn!("photo refill failed: {err}");
+        }
+        if let Some(item) =
+            state.fresh_rotation_candidate(filter, displayed_ids, prefer_favorite)?
+        {
+            return Ok(Some(item));
+        }
     }
     state.rotation_candidate(filter, displayed_ids, prefer_favorite)
 }
@@ -717,7 +765,7 @@ pub async fn photo_trigger_refill(
 ) -> Result<(), String> {
     // Asked for by the user: try again even where the last refill found nothing new.
     state.quiet_filters.lock().clear();
-    trigger_refill(&app, &state).await
+    trigger_refill(&app, &state, true).await
 }
 
 /// `photo_retry_now`: ends the offline / throttling backoff and refills right away.
@@ -728,13 +776,14 @@ pub async fn photo_retry_now(
 ) -> Result<(), String> {
     state.limiter.clear_backoff();
     state.quiet_filters.lock().clear();
-    trigger_refill(&app, &state).await
+    trigger_refill(&app, &state, true).await
 }
 
 /// Body of [`photo_trigger_refill`] (callable without a `State` guard).
 pub(crate) async fn trigger_refill(
     app: &AppHandle,
     state: &PhotoServiceState,
+    force_deck_refresh: bool,
 ) -> Result<(), String> {
     let Ok(_guard) = state.refill_mutex.try_lock() else {
         return Ok(());
@@ -756,12 +805,15 @@ pub(crate) async fn trigger_refill(
         } else {
             vec![None]
         };
+        let mut first = true;
         for orientation in orientations {
             filter.required_orientation = orientation;
+            // Refresh the shared filter deck at most once across portrait/landscape passes.
             state
-                .refill(&filter, max_cache_bytes, &displayed_ids)
+                .refill(&filter, max_cache_bytes, &displayed_ids, force_deck_refresh && first)
                 .await
                 .map_err(e)?;
+            first = false;
         }
         Ok(())
     }
@@ -1082,7 +1134,7 @@ mod tests {
             .lock()
             .insert(format!("{filter:?}"), std::time::Instant::now());
         // Answered without touching the network.
-        let outcome = tauri::async_runtime::block_on(svc.refill(&filter, 0, &[])).unwrap();
+        let outcome = tauri::async_runtime::block_on(svc.refill(&filter, 0, &[], false)).unwrap();
         assert_eq!(outcome, RefillOutcome::FilterExhaustedHoldingLast);
         assert!(found_nothing_new(&RefillOutcome::RetryCapReached {
             unused_count: 0

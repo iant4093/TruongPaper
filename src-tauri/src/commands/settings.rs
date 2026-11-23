@@ -1,9 +1,10 @@
 //! `settings_get` / `settings_update`. Settings are persisted in the SQLite
 //! `settings` table; the photo pipeline keys are mirrored so `photo_*` commands see them.
 
+use crate::commands::photo::PhotoServiceState;
 use crate::state::AppState;
 use crate::state::{merge_settings_patch, overlay_photo_keys, persist_settings, sanitize_settings};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use truongpaper_core::AppSettings;
 
 #[tauri::command]
@@ -86,6 +87,14 @@ pub async fn settings_update(
 
     if before.adjust_windows_color != after.adjust_windows_color {
         crate::accent::refresh(&app);
+    }
+
+    if before.photo_downloads_per_day != after.photo_downloads_per_day
+        || before.exhaustion_auto_reset != after.exhaustion_auto_reset
+    {
+        if let Some(photo) = app.try_state::<PhotoServiceState>() {
+            photo.quiet_filters.lock().clear();
+        }
     }
 
     #[cfg(target_os = "windows")]

@@ -10,17 +10,21 @@ use crate::decoder::inspect_display_dimensions;
 use crate::error::{PhotoApiError, PhotoApiResult};
 use crate::limiter::SlidingRateLimiter;
 use crate::{
-    ApiPhotoResponse, MAX_REFILL_ATTEMPTS, QUEUE_REFILL_THRESHOLD, QUEUE_TARGET_UNUSED,
-    SMALL_ALBUM_EXIT_CONSECUTIVE_DUPS,
+    ApiPhotoResponse, DECK_REFRESH_INTERVAL_MS, MAX_PHOTO_LIST_PAGES, MAX_REFILL_ATTEMPTS,
+    QUEUE_REFILL_THRESHOLD, QUEUE_TARGET_UNUSED, SMALL_ALBUM_EXIT_CONSECUTIVE_DUPS,
 };
 use parking_lot::Mutex;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use truongpaper_core::{
-    classify_candidate, count_unused_in_queue, evict_old_cached_files_preserving_history_unlocked,
-    local_day, now_ms, parse_album_slug, record_photo_download, reset_exhausted_filter_history,
-    upsert_cached_photo, CandidateStatus, NewCachedPhoto, PhotoFilter,
+    classify_candidate, count_eligible_in_deck, count_unused_in_queue,
+    evict_old_cached_files_preserving_history_unlocked, invalidate_photo_deck, local_day,
+    next_deck_candidates, now_ms, parse_album_slug, photo_deck_count, photo_deck_refreshed_at,
+    record_photo_download, reset_exhausted_filter_history, set_cached_photo_shuffle_order,
+    sync_photo_deck, update_deck_photo_dimensions, upsert_cached_photo, CandidateStatus,
+    DeckPhotoEntry, NewCachedPhoto, Orientation, PhotoFilter,
 };
 
 /// Largest image the refill loop will accept (the API serves originals around 10-30 MB).
@@ -199,6 +203,473 @@ pub async fn refill_queue_with_client<T: PhotoTransport>(
     .await
 }
 
+/// Refill using the full-pool `GET /v1/photos` deck for exact shuffle-without-replacement loops,
+/// falling back seamlessly to `GET /v1/photos/random` if the server does not expose `/v1/photos`.
+#[allow(clippy::too_many_arguments)]
+pub async fn refill_queue_with_deck<T: PhotoTransport>(
+    transport: &T,
+    limiter: &SlidingRateLimiter,
+    db: &Arc<Mutex<Connection>>,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    max_cache_bytes: u64,
+    currently_displayed_ids: &[String],
+    max_downloads: usize,
+    force_deck_refresh: bool,
+) -> PhotoApiResult<RefillOutcome> {
+    let client = PhotoApiClient::new(transport);
+    refill_queue_with_deck_client(
+        &client,
+        limiter,
+        db,
+        app_data_dir,
+        filter,
+        max_cache_bytes,
+        currently_displayed_ids,
+        max_downloads,
+        force_deck_refresh,
+    )
+    .await
+}
+
+/// [`refill_queue_with_deck`] against an explicit [`PhotoApiClient`] (custom endpoints / tests).
+#[allow(clippy::too_many_arguments)]
+pub async fn refill_queue_with_deck_client<T: PhotoTransport>(
+    client: &PhotoApiClient<T>,
+    limiter: &SlidingRateLimiter,
+    db: &Arc<Mutex<Connection>>,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    max_cache_bytes: u64,
+    currently_displayed_ids: &[String],
+    max_downloads: usize,
+    force_deck_refresh: bool,
+) -> PhotoApiResult<RefillOutcome> {
+    let slugs: Vec<String> = filter
+        .album_slugs
+        .iter()
+        .filter_map(|s| parse_album_slug(s))
+        .collect();
+    if !filter.album_slugs.is_empty() && slugs.is_empty() {
+        return Err(PhotoApiError::InvalidFilter(
+            "no valid album slug in filter".into(),
+        ));
+    }
+
+    let photos_dir = app_data_dir.join("wallpapers").join("photos");
+    tokio::fs::create_dir_all(&photos_dir).await?;
+
+    let deck_key = filter.deck_key();
+    let needs_refresh = {
+        let conn = db.lock();
+        let count = photo_deck_count(&conn, &deck_key)?;
+        let refreshed_at = photo_deck_refreshed_at(&conn, &deck_key)?;
+        force_deck_refresh
+            || count == 0
+            || refreshed_at.is_none_or(|ts| now_ms().saturating_sub(ts) >= DECK_REFRESH_INTERVAL_MS)
+    };
+
+    if needs_refresh {
+        match fetch_deck_entries(client, limiter, &slugs, filter.featured_only).await? {
+            DeckFetch::Unsupported => {
+                return refill_queue_limited(
+                    client,
+                    limiter,
+                    db,
+                    app_data_dir,
+                    filter,
+                    max_cache_bytes,
+                    currently_displayed_ids,
+                    max_downloads,
+                )
+                .await;
+            }
+            DeckFetch::RateLimited => return Ok(RefillOutcome::RateLimitedOrBackedOff),
+            DeckFetch::Offline => return Ok(RefillOutcome::Offline),
+            DeckFetch::Entries(entries) => {
+                let mut conn = db.lock();
+                sync_photo_deck(&mut conn, &deck_key, &entries, now_ms())?;
+            }
+        }
+    }
+
+    let mut downloads = 0_usize;
+    let mut api_rejections = 0_usize;
+    let mut did_reset = false;
+    let mut skipped_ids: HashSet<String> = HashSet::new();
+
+    for _round in 0..(MAX_REFILL_ATTEMPTS * 2) {
+        let mut excluded = currently_displayed_ids.to_vec();
+        excluded.extend(skipped_ids.iter().cloned());
+
+        let candidates = {
+            let conn = db.lock();
+            next_deck_candidates(
+                &conn,
+                app_data_dir,
+                filter,
+                &excluded,
+                QUEUE_TARGET_UNUSED,
+            )?
+        };
+
+        if candidates.is_empty() {
+            let unused = unused_count(db, filter)?;
+            if unused > 0 {
+                return Ok(if did_reset {
+                    RefillOutcome::FilterExhaustedAndReset {
+                        unused_count: unused,
+                    }
+                } else {
+                    RefillOutcome::SmallPoolFullyQueued {
+                        unused_count: unused,
+                    }
+                });
+            }
+            let eligible = {
+                let conn = db.lock();
+                count_eligible_in_deck(&conn, filter, currently_displayed_ids)?
+            };
+            if eligible == 0 {
+                return Ok(RefillOutcome::SmallPoolFullyQueued { unused_count: 0 });
+            }
+            if !filter.auto_reset_history_on_exhaustion {
+                return Ok(RefillOutcome::FilterExhaustedHoldingLast);
+            }
+            if did_reset {
+                return Ok(RefillOutcome::FilterExhaustedAndReset {
+                    unused_count: unused,
+                });
+            }
+            reset_history(db, filter, currently_displayed_ids)?;
+            skipped_ids.clear();
+            did_reset = true;
+            continue;
+        }
+
+        let mut progressed = false;
+        let mut all_ready = true;
+        for cand in &candidates {
+            if cand.already_on_disk {
+                continue;
+            }
+            if downloads >= max_downloads {
+                let unused = unused_count(db, filter)?;
+                return Ok(if did_reset {
+                    RefillOutcome::FilterExhaustedAndReset {
+                        unused_count: unused,
+                    }
+                } else {
+                    RefillOutcome::DailyLimitReached {
+                        unused_count: unused,
+                    }
+                });
+            }
+            if api_rejections >= MAX_API_REJECTIONS {
+                let unused = unused_count(db, filter)?;
+                return Ok(RefillOutcome::RetryCapReached {
+                    unused_count: unused,
+                });
+            }
+
+            let meta = ApiPhotoResponse {
+                id: cand.entry.id.clone(),
+                album_slug: cand.entry.album_slug.clone(),
+                album_url: cand.entry.album_url.clone(),
+                image_url: cand.entry.image_url.clone(),
+                width: cand.entry.width,
+                height: cand.entry.height,
+                bytes: cand.entry.bytes,
+                featured: cand.entry.featured,
+                fallback_used: cand.entry.fallback_used,
+            };
+
+            match download_and_cache_photo(
+                client,
+                limiter,
+                db,
+                app_data_dir,
+                &photos_dir,
+                &meta,
+                max_cache_bytes,
+                currently_displayed_ids,
+                &mut downloads,
+            )
+            .await?
+            {
+                DownloadStep::Cached { width, height } => {
+                    {
+                        let conn = db.lock();
+                        set_cached_photo_shuffle_order(&conn, &meta.id, cand.sort_order)?;
+                        update_deck_photo_dimensions(&conn, &meta.id, width, height)?;
+                    }
+                    progressed = true;
+                    if filter
+                        .orientation()
+                        .is_some_and(|req| Orientation::from_dimensions(width, height) != req)
+                    {
+                        // EXIF rotation flipped orientation; re-query for a matching photo.
+                        all_ready = false;
+                        break;
+                    }
+                }
+                DownloadStep::RateLimited => return Ok(RefillOutcome::RateLimitedOrBackedOff),
+                DownloadStep::Offline => return Ok(RefillOutcome::Offline),
+                DownloadStep::Rejected { stale_url } => {
+                    if stale_url {
+                        let _ = invalidate_photo_deck(&db.lock(), &deck_key);
+                    }
+                    skipped_ids.insert(meta.id.clone());
+                    api_rejections += 1;
+                    all_ready = false;
+                    progressed = true;
+                    break;
+                }
+            }
+        }
+
+        if all_ready {
+            let unused = unused_count(db, filter)?;
+            return Ok(if did_reset {
+                RefillOutcome::FilterExhaustedAndReset {
+                    unused_count: unused,
+                }
+            } else if candidates.len() < QUEUE_TARGET_UNUSED {
+                RefillOutcome::SmallPoolFullyQueued {
+                    unused_count: unused,
+                }
+            } else {
+                RefillOutcome::TargetReached {
+                    unused_count: unused,
+                }
+            });
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    let unused = unused_count(db, filter)?;
+    Ok(if did_reset {
+        RefillOutcome::FilterExhaustedAndReset {
+            unused_count: unused,
+        }
+    } else {
+        RefillOutcome::RetryCapReached {
+            unused_count: unused,
+        }
+    })
+}
+
+enum DeckFetch {
+    Entries(Vec<DeckPhotoEntry>),
+    Unsupported,
+    RateLimited,
+    Offline,
+}
+
+async fn fetch_deck_entries<T: PhotoTransport>(
+    client: &PhotoApiClient<T>,
+    limiter: &SlidingRateLimiter,
+    slugs: &[String],
+    featured_only: bool,
+) -> PhotoApiResult<DeckFetch> {
+    let queries: Vec<RandomPhotoQuery> = if slugs.is_empty() {
+        vec![RandomPhotoQuery {
+            album: None,
+            featured: featured_only,
+        }]
+    } else {
+        slugs
+            .iter()
+            .map(|slug| RandomPhotoQuery {
+                album: Some(slug.clone()),
+                featured: featured_only,
+            })
+            .collect()
+    };
+
+    let mut entries = Vec::new();
+    for query in &queries {
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PHOTO_LIST_PAGES {
+            if !limiter.try_acquire() {
+                return Ok(DeckFetch::RateLimited);
+            }
+            match client.fetch_photo_list_page(query, cursor.as_deref()).await {
+                Ok(page) => {
+                    limiter.note_success();
+                    for item in page.items {
+                        if !is_safe_photo_id(&item.id) || !is_allowed_image_url(&item.image_url) {
+                            continue;
+                        }
+                        entries.push(DeckPhotoEntry {
+                            id: item.id,
+                            album_slug: item.album_slug,
+                            album_url: item.album_url,
+                            image_url: item.image_url,
+                            width: item.width,
+                            height: item.height,
+                            bytes: item.bytes,
+                            featured: item.featured,
+                            fallback_used: item.fallback_used,
+                        });
+                    }
+                    match page.next_cursor {
+                        Some(next) if !next.is_empty() => cursor = Some(next),
+                        _ => break,
+                    }
+                }
+                Err(PhotoApiError::EndpointNotFound) => return Ok(DeckFetch::Unsupported),
+                Err(PhotoApiError::NoPhotos) => break,
+                Err(e) if e.is_throttle() => {
+                    limiter.note_throttled_with(e.retry_after());
+                    return Ok(DeckFetch::RateLimited);
+                }
+                Err(e) if e.is_network() => {
+                    tracing::warn!("photo API unreachable: {e}");
+                    limiter.note_network_error();
+                    return Ok(DeckFetch::Offline);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(DeckFetch::Entries(entries))
+}
+
+enum DownloadStep {
+    Cached { width: u32, height: u32 },
+    RateLimited,
+    Offline,
+    Rejected { stale_url: bool },
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_and_cache_photo<T: PhotoTransport>(
+    client: &PhotoApiClient<T>,
+    limiter: &SlidingRateLimiter,
+    db: &Arc<Mutex<Connection>>,
+    app_data_dir: &Path,
+    photos_dir: &Path,
+    meta: &ApiPhotoResponse,
+    max_cache_bytes: u64,
+    currently_displayed_ids: &[String],
+    downloads: &mut usize,
+) -> PhotoApiResult<DownloadStep> {
+    let rel_path = format!("wallpapers/photos/{}.jpg", meta.id);
+    let final_path = app_data_dir.join(&rel_path);
+    let part_path = photos_dir.join(format!("{}.jpg.part", meta.id));
+
+    if !final_path.exists() {
+        // Take the token right before the request.
+        if !limiter.try_acquire() {
+            return Ok(DownloadStep::RateLimited);
+        }
+        let downloaded = client
+            .download_image_to(&meta.image_url, &part_path, MAX_IMAGE_BYTES as u64)
+            .await;
+        let downloaded_bytes = match downloaded {
+            Ok(bytes) => {
+                limiter.note_success();
+                *downloads += 1;
+                if let Err(err) = record_photo_download(&db.lock(), &local_day()) {
+                    tracing::warn!("could not count the photo download: {err}");
+                }
+                bytes
+            }
+            Err(e) if e.is_throttle() => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                limiter.note_throttled_with(e.retry_after());
+                return Ok(DownloadStep::RateLimited);
+            }
+            Err(e) if e.is_network() => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                tracing::warn!("photo download failed: {e}");
+                limiter.note_network_error();
+                return Ok(DownloadStep::Offline);
+            }
+            // 403 / 404 / oversized / empty: this photo is unusable, the API is fine.
+            Err(PhotoApiError::UnexpectedStatus(status)) => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                tracing::warn!(id = %meta.id, status, "rejecting image download");
+                return Ok(DownloadStep::Rejected {
+                    stale_url: matches!(status, 403 | 404),
+                });
+            }
+            Err(PhotoApiError::NoPhotos | PhotoApiError::Rejected(_)) => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                tracing::warn!(id = %meta.id, "rejecting image download");
+                return Ok(DownloadStep::Rejected { stale_url: false });
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                return Err(e);
+            }
+        };
+
+        // Evict only now that the download succeeded, so a failed download never costs
+        // the user cached photos.
+        if let Err(e) = evict_old_cached_files_preserving_history_unlocked(
+            db,
+            app_data_dir,
+            downloaded_bytes,
+            max_cache_bytes,
+            currently_displayed_ids,
+        ) {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(e.into());
+        }
+        if let Err(e) = tokio::fs::rename(&part_path, &final_path).await {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(e.into());
+        }
+    }
+
+    // EXIF-aware display size (axes swap for orientations 5-8), then API metadata, then
+    // raw header size, then a 4K default.
+    let inspect_path = final_path.clone();
+    let inspected =
+        tokio::task::spawn_blocking(move || inspect_display_dimensions(&inspect_path))
+            .await
+            .ok()
+            .flatten();
+    let (width, height) = inspected
+        .or(match (meta.width, meta.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+            _ => None,
+        })
+        .or_else(|| {
+            imagesize::size(&final_path)
+                .ok()
+                .map(|d| (d.width as u32, d.height as u32))
+        })
+        .unwrap_or((3840, 2160));
+
+    let on_disk_bytes = tokio::fs::metadata(&final_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(meta.bytes);
+
+    insert_cached(
+        db,
+        &NewCachedPhoto {
+            id: meta.id.clone(),
+            rel_path,
+            album_slug: meta.album_slug.clone(),
+            album_url: meta.album_url.clone(),
+            featured: meta.featured,
+            fallback_used: meta.fallback_used,
+            width,
+            height,
+            bytes: on_disk_bytes,
+            downloaded_at: now_ms(),
+        },
+    )?;
+
+    Ok(DownloadStep::Cached { width, height })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn refill_queue_limited<T: PhotoTransport>(
     client: &PhotoApiClient<T>,
@@ -344,113 +815,27 @@ async fn refill_queue_limited<T: PhotoTransport>(
             }
         }
 
-        let rel_path = format!("wallpapers/photos/{}.jpg", meta.id);
-        let final_path = app_data_dir.join(&rel_path);
-        let part_path = photos_dir.join(format!("{}.jpg.part", meta.id));
-
-        if !final_path.exists() {
-            // Take the token right before the request.
-            if !limiter.try_acquire() {
-                return Ok(RefillOutcome::RateLimitedOrBackedOff);
-            }
-            let downloaded = client
-                .download_image_to(&meta.image_url, &part_path, MAX_IMAGE_BYTES as u64)
-                .await;
-            let downloaded_bytes = match downloaded {
-                Ok(bytes) => {
-                    limiter.note_success();
-                    downloads += 1;
-                    if let Err(err) = record_photo_download(&db.lock(), &local_day()) {
-                        tracing::warn!("could not count the photo download: {err}");
-                    }
-                    bytes
-                }
-                Err(e) if e.is_throttle() => {
-                    let _ = tokio::fs::remove_file(&part_path).await;
-                    limiter.note_throttled_with(e.retry_after());
-                    return Ok(RefillOutcome::RateLimitedOrBackedOff);
-                }
-                Err(e) if e.is_network() => {
-                    let _ = tokio::fs::remove_file(&part_path).await;
-                    tracing::warn!("photo download failed: {e}");
-                    limiter.note_network_error();
-                    return Ok(RefillOutcome::Offline);
-                }
-                // 403 / 404 / oversized / empty: this photo is unusable, the API is fine.
-                Err(
-                    PhotoApiError::UnexpectedStatus(_)
-                    | PhotoApiError::NoPhotos
-                    | PhotoApiError::Rejected(_),
-                ) => {
-                    let _ = tokio::fs::remove_file(&part_path).await;
-                    tracing::warn!(id = %meta.id, "rejecting image download");
-                    api_rejections += 1;
-                    continue;
-                }
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&part_path).await;
-                    return Err(e);
-                }
-            };
-
-            // Evict only now that the download succeeded, so a failed download never costs
-            // the user cached photos.
-            if let Err(e) = evict_old_cached_files_preserving_history_unlocked(
-                db,
-                app_data_dir,
-                downloaded_bytes,
-                max_cache_bytes,
-                currently_displayed_ids,
-            ) {
-                let _ = tokio::fs::remove_file(&part_path).await;
-                return Err(e.into());
-            }
-            if let Err(e) = tokio::fs::rename(&part_path, &final_path).await {
-                let _ = tokio::fs::remove_file(&part_path).await;
-                return Err(e.into());
+        match download_and_cache_photo(
+            client,
+            limiter,
+            db,
+            app_data_dir,
+            &photos_dir,
+            &meta,
+            max_cache_bytes,
+            currently_displayed_ids,
+            &mut downloads,
+        )
+        .await?
+        {
+            DownloadStep::Cached { .. } => {}
+            DownloadStep::RateLimited => return Ok(RefillOutcome::RateLimitedOrBackedOff),
+            DownloadStep::Offline => return Ok(RefillOutcome::Offline),
+            DownloadStep::Rejected { .. } => {
+                api_rejections += 1;
+                continue;
             }
         }
-
-        // EXIF-aware display size (axes swap for orientations 5-8), then API metadata, then
-        // raw header size, then a 4K default.
-        let inspect_path = final_path.clone();
-        let inspected =
-            tokio::task::spawn_blocking(move || inspect_display_dimensions(&inspect_path))
-                .await
-                .ok()
-                .flatten();
-        let (width, height) = inspected
-            .or(match (meta.width, meta.height) {
-                (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
-                _ => None,
-            })
-            .or_else(|| {
-                imagesize::size(&final_path)
-                    .ok()
-                    .map(|d| (d.width as u32, d.height as u32))
-            })
-            .unwrap_or((3840, 2160));
-
-        let on_disk_bytes = tokio::fs::metadata(&final_path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(meta.bytes);
-
-        insert_cached(
-            db,
-            &NewCachedPhoto {
-                id: meta.id.clone(),
-                rel_path,
-                album_slug: meta.album_slug.clone(),
-                album_url: meta.album_url.clone(),
-                featured: meta.featured,
-                fallback_used: meta.fallback_used,
-                width,
-                height,
-                bytes: on_disk_bytes,
-                downloaded_at: now_ms(),
-            },
-        )?;
     }
 }
 
@@ -1250,5 +1635,155 @@ mod tests {
             classify_candidate_photo(&conn, &resp("fresh"), Some("landscape")).unwrap(),
             CandidateStatus::UniqueAndUnseen
         );
+    }
+
+    #[tokio::test]
+    async fn deck_refill_walks_every_featured_photo_once_then_reshuffles() {
+        let dir = TempDir::new();
+        let db = new_db();
+        let img = make_jpeg(64, 48);
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let image_calls = Arc::new(AtomicUsize::new(0));
+        let lc = list_calls.clone();
+        let ic = image_calls.clone();
+        let items_json: Vec<String> = (0..7)
+            .map(|i| {
+                format!(
+                    r#"{{"albumSlug":"a","albumUrl":"https://iantruongphotography.com/album/a",
+                    "bytes":100,"fallbackUsed":false,"featured":true,"height":48,"id":"f{i}",
+                    "imageUrl":"https://photos-api.iantruongphotography.com/v1/images/f{i}","width":64}}"#
+                )
+            })
+            .collect();
+        let page0 = format!(
+            r#"{{"items":[{}],"fallbackUsed":false,"nextCursor":"1"}}"#,
+            items_json[..4].join(",")
+        );
+        let page1 = format!(
+            r#"{{"items":[{}],"fallbackUsed":false,"nextCursor":null}}"#,
+            items_json[4..].join(",")
+        );
+        let transport = FnTransport(move |url: &str, q: &[(&str, &str)]| {
+            if url == crate::API_PHOTOS_URL {
+                lc.fetch_add(1, Ordering::SeqCst);
+                let has_cursor = q.iter().any(|(k, _)| *k == "cursor");
+                Ok(HttpResponse::json(200, if has_cursor { &page1 } else { &page0 }))
+            } else {
+                ic.fetch_add(1, Ordering::SeqCst);
+                Ok(HttpResponse {
+                    status: 200,
+                    body: img.clone(),
+                    retry_after: None,
+                })
+            }
+        });
+        let limiter = SlidingRateLimiter::new();
+        let mut f = filter(&[]);
+        f.featured_only = true;
+        f.required_orientation = Some("landscape".into());
+
+        // Pass 1: see all 7 featured photos with zero repeats.
+        let mut pass1 = Vec::new();
+        let mut displayed = Vec::new();
+        for _ in 0..7 {
+            let next = truongpaper_core::pop_next_queued_photo(&db.lock(), &dir.0, &f).unwrap();
+            let id = match next {
+                Some((id, _)) => id,
+                None => {
+                    refill_queue_with_deck(
+                        &transport,
+                        &limiter,
+                        &db,
+                        &dir.0,
+                        &f,
+                        1 << 30,
+                        &displayed,
+                        usize::MAX,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                    truongpaper_core::pop_next_queued_photo(&db.lock(), &dir.0, &f)
+                        .unwrap()
+                        .expect("photo queued from deck")
+                        .0
+                }
+            };
+            mark_photo_shown(&mut db.lock(), &id).unwrap();
+            displayed = vec![id.clone()];
+            pass1.push(id);
+        }
+        let mut sorted1 = pass1.clone();
+        sorted1.sort();
+        assert_eq!(sorted1, ["f0", "f1", "f2", "f3", "f4", "f5", "f6"]);
+        assert_eq!(list_calls.load(Ordering::SeqCst), 2, "only 2 paginated list calls");
+        assert_eq!(image_calls.load(Ordering::SeqCst), 7, "each photo downloaded once");
+
+        // Next refill sees exact exhaustion, resets history preserving displayed, zero downloads!
+        let out = refill_queue_with_deck(
+            &transport,
+            &limiter,
+            &db,
+            &dir.0,
+            &f,
+            1 << 30,
+            &displayed,
+            usize::MAX,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, RefillOutcome::FilterExhaustedAndReset { unused_count: 6 });
+        assert_eq!(image_calls.load(Ordering::SeqCst), 7, "reuses cached files with zero downloads");
+
+        // Pass 2: walks the remaining 6 without repeating the currently displayed photo.
+        let mut pass2 = Vec::new();
+        loop {
+            let next = truongpaper_core::pop_next_queued_photo(&db.lock(), &dir.0, &f).unwrap();
+            let Some((id, _)) = next else {
+                break;
+            };
+            mark_photo_shown(&mut db.lock(), &id).unwrap();
+            pass2.push(id);
+        }
+        assert_eq!(pass2.len(), 6);
+        assert!(!pass2.contains(&displayed[0]));
+    }
+
+    #[tokio::test]
+    async fn deck_refill_falls_back_to_random_endpoint_when_list_route_missing() {
+        let dir = TempDir::new();
+        let db = new_db();
+        let img = make_jpeg(64, 48);
+        let n = Arc::new(AtomicUsize::new(0));
+        let n_ref = n.clone();
+        let transport = FnTransport(move |url: &str, _: &[(&str, &str)]| {
+            if url == crate::API_PHOTOS_URL {
+                Ok(HttpResponse::json(404, r#"{"error":"not_found"}"#))
+            } else if url == API_RANDOM_URL {
+                let i = n_ref.fetch_add(1, Ordering::SeqCst);
+                Ok(HttpResponse::json(200, &meta_json(&format!("r{i}"), "a", 64, 48, 100)))
+            } else {
+                Ok(HttpResponse {
+                    status: 200,
+                    body: img.clone(),
+                    retry_after: None,
+                })
+            }
+        });
+        let out = refill_queue_with_deck(
+            &transport,
+            &SlidingRateLimiter::new(),
+            &db,
+            &dir.0,
+            &filter(&[]),
+            1 << 30,
+            &[],
+            usize::MAX,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, RefillOutcome::TargetReached { unused_count: 5 });
     }
 }

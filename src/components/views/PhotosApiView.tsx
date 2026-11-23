@@ -28,6 +28,7 @@ const MIN_CACHE = 100 * MB;
 const MAX_CACHE = 10 * GB;
 
 const DOWNLOADS_PER_DAY = [
+  [0, 'Unlimited'],
   [1, '1 a day'],
   [3, '3 a day'],
   [10, '10 a day'],
@@ -517,12 +518,13 @@ export const PhotosApiView: React.FC = () => {
 
         <div className="settings-field" style={{ marginTop: 14 }}>
           <span>New photos</span>
-          <Dropdown<number> label="New photos" value={settings?.photoDownloadsPerDay ?? 1}
+          <Dropdown<number> label="New photos" value={settings?.photoDownloadsPerDay ?? 0}
             options={DOWNLOADS_PER_DAY}
             onChange={(photoDownloadsPerDay) => void runPhotoAction(() => updateSettings({ photoDownloadsPerDay }), 'Saved')} />
           <span className="view-subtitle">
-            Full-size downloads. Rotation shuffles the photos already saved.
-            {photoStatus?.downloadsPerDay ? ` ${photoStatus.downloadsToday ?? 0} of ${photoStatus.downloadsPerDay} today.` : ''}
+            {photoStatus?.downloadsPerDay
+              ? `Full-size downloads per day. ${photoStatus.downloadsToday ?? 0} of ${photoStatus.downloadsPerDay} today.`
+              : 'Full-size downloads. Walks through every photo once in random order before reshuffling.'}
           </span>
         </div>
 

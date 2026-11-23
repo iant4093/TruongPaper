@@ -8,11 +8,12 @@
 use crate::error::{CoreError, CoreResult};
 use crate::models::*;
 use parking_lot::Mutex;
+use rand::seq::SliceRandom;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -238,7 +239,10 @@ pub enum RotationPhotoPool {
 
 fn pool_predicate_and_order(pool: RotationPhotoPool) -> (&'static str, &'static str) {
     match pool {
-        RotationPhotoPool::Unused => (UNUSED_PREDICATE, "last_shown_at ASC, downloaded_at ASC, id"),
+        RotationPhotoPool::Unused => (
+            UNUSED_PREDICATE,
+            "COALESCE(shuffle_order, 2147483647) ASC, downloaded_at ASC, id",
+        ),
         // Photos already shown come back in a random order (the recent-shown window keeps the
         // last few out), so a small collection does not cycle in the same sequence.
         RotationPhotoPool::Favorites => (
@@ -364,7 +368,8 @@ pub fn pick_cached_rotation_photo(
     }
 }
 
-/// All unused photos matching the filter, oldest download first (for the status panel).
+/// All unused photos matching the filter, in playback order (shuffled deck / reset order first,
+/// then oldest download first).
 pub fn list_unused_queue(
     conn: &Connection,
     app_data_dir: &Path,
@@ -373,7 +378,8 @@ pub fn list_unused_queue(
     let (clause, values) = filter_clause(filter);
     let sql = format!(
         "SELECT {PHOTO_ITEM_COLUMNS} FROM photos_cache
-         WHERE {UNUSED_PREDICATE}{clause} ORDER BY downloaded_at ASC"
+         WHERE {UNUSED_PREDICATE}{clause}
+         ORDER BY COALESCE(shuffle_order, 2147483647) ASC, downloaded_at ASC, id"
     );
     let mut stmt = conn.prepare(&sql)?;
     let items = stmt
@@ -530,9 +536,9 @@ pub fn classify_candidate(
     Ok(CandidateStatus::UniqueAndUnseen)
 }
 
-/// Step 4: resets shown history for an exhausted album/filter (preserving on-screen ids) and
-/// immediately re-queues still-cached files with zero API calls. Returns the number of cache
-/// rows returned to the unused queue.
+/// Step 4: resets shown history for an exhausted album/filter (preserving on-screen ids),
+/// reshuffles the deck and cached files into a fresh random order for the new pass, and returns
+/// the number of cache rows returned to the unused queue.
 pub fn reset_exhausted_filter_history(
     conn: &mut Connection,
     filter: &PhotoFilter,
@@ -549,17 +555,460 @@ pub fn reset_exhausted_filter_history(
         params_from_iter(hist_values),
     )?;
 
-    // `last_shown_at` is kept: it orders rotation, so a photo shown moments ago does not come
-    // straight back. Cached files return to the unused queue because their history is gone.
+    // Reshuffle the photo_deck for this filter (when present) and assign fresh shuffled orders
+    // to re-queued cached photos so the new pass runs in a fresh random order without repeats.
+    let deck_key = filter.deck_key();
+    let mut deck_ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT photo_id FROM photo_deck WHERE filter_key = ?1")?;
+        let rows = stmt
+            .query_map(params![&deck_key], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut rng = rand::thread_rng();
+    let mut assigned_deck_ids = HashSet::with_capacity(deck_ids.len());
+    if !deck_ids.is_empty() {
+        deck_ids.shuffle(&mut rng);
+        for (idx, id) in deck_ids.iter().enumerate() {
+            let order = idx as i64;
+            tx.execute(
+                "UPDATE photo_deck SET sort_order = ?1 WHERE filter_key = ?2 AND photo_id = ?3",
+                params![order, &deck_key, id],
+            )?;
+            tx.execute(
+                "UPDATE photos_cache SET shuffle_order = ?1 WHERE id = ?2",
+                params![order, id],
+            )?;
+            assigned_deck_ids.insert(id.clone());
+        }
+    }
+
     let (unused_sql, unused_values) = filter_clause(filter);
-    let requeued: i64 = tx.query_row(
-        &format!("SELECT COUNT(*) FROM photos_cache WHERE {UNUSED_PREDICATE}{unused_sql}"),
-        params_from_iter(unused_values),
+    let cached_ids: Vec<String> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT id FROM photos_cache WHERE {UNUSED_PREDICATE}{unused_sql}"
+        ))?;
+        let rows = stmt
+            .query_map(params_from_iter(unused_values.iter()), |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut extra_cached: Vec<String> = cached_ids
+        .iter()
+        .filter(|id| !assigned_deck_ids.contains(*id))
+        .cloned()
+        .collect();
+    if !extra_cached.is_empty() {
+        extra_cached.shuffle(&mut rng);
+        let base = deck_ids.len() as i64;
+        for (idx, id) in extra_cached.iter().enumerate() {
+            tx.execute(
+                "UPDATE photos_cache SET shuffle_order = ?1 WHERE id = ?2",
+                params![base + idx as i64, id],
+            )?;
+        }
+    }
+
+    let requeued = cached_ids.len();
+    tx.commit()?;
+    Ok(requeued)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Photo deck (full-pool shuffle-without-replacement from GET /v1/photos)
+// ---------------------------------------------------------------------------------------------
+
+/// When `filter_key`'s deck was last refreshed from `GET /v1/photos` (epoch ms), if ever.
+pub fn photo_deck_refreshed_at(conn: &Connection, filter_key: &str) -> CoreResult<Option<i64>> {
+    let ts: Option<i64> = conn
+        .query_row(
+            "SELECT refreshed_at FROM photo_deck_meta WHERE filter_key = ?1",
+            params![filter_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(ts)
+}
+
+/// Number of entries currently stored in `photo_deck` for `filter_key`.
+pub fn photo_deck_count(conn: &Connection, filter_key: &str) -> CoreResult<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM photo_deck WHERE filter_key = ?1",
+        params![filter_key],
         |r| r.get(0),
     )?;
+    Ok(n.max(0) as usize)
+}
+
+/// Marks `filter_key`'s deck as stale so the next refill refreshes fresh URLs from `GET /v1/photos`.
+pub fn invalidate_photo_deck(conn: &Connection, filter_key: &str) -> CoreResult<()> {
+    conn.execute(
+        "DELETE FROM photo_deck_meta WHERE filter_key = ?1",
+        params![filter_key],
+    )?;
+    Ok(())
+}
+
+/// Sets the playback order of a cached photo (used when downloading a photo from `photo_deck`).
+pub fn set_cached_photo_shuffle_order(
+    conn: &Connection,
+    photo_id: &str,
+    sort_order: i64,
+) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE photos_cache SET shuffle_order = ?1 WHERE id = ?2",
+        params![sort_order, photo_id],
+    )?;
+    Ok(())
+}
+
+/// Persists EXIF-aware display dimensions back to `photo_deck` so mismatched photos are skipped
+/// on future deck scans without re-downloading.
+pub fn update_deck_photo_dimensions(
+    conn: &Connection,
+    photo_id: &str,
+    width: u32,
+    height: u32,
+) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE photo_deck SET width = ?1, height = ?2 WHERE photo_id = ?3",
+        params![width, height, photo_id],
+    )?;
+    Ok(())
+}
+
+/// Synchronizes `photo_deck` for `filter_key` with the full list of entries from `GET /v1/photos`.
+///
+/// - Entries removed from the API are deleted from the deck.
+/// - Existing entries keep their `sort_order` (updating URLs/metadata; preserving cached EXIF dimensions).
+/// - Newly discovered entries are shuffled randomly into the deck (and if the deck was empty,
+///   all entries receive a fresh Fisher-Yates shuffle).
+pub fn sync_photo_deck(
+    conn: &mut Connection,
+    filter_key: &str,
+    entries: &[DeckPhotoEntry],
+    refreshed_at: i64,
+) -> CoreResult<usize> {
+    let tx = conn.transaction()?;
+
+    let existing_orders: HashMap<String, i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT photo_id, sort_order FROM photo_deck WHERE filter_key = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![filter_key], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter().collect()
+    };
+
+    let cached_dims: HashMap<String, (u32, u32)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, width, height FROM photos_cache WHERE width > 0 AND height > 0",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (to_u32(r.get(1)?), to_u32(r.get(2)?)),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter().collect()
+    };
+
+    // Deduplicate incoming entries by id while preserving deterministic first-seen metadata.
+    let mut unique: Vec<&DeckPhotoEntry> = Vec::with_capacity(entries.len());
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if seen_ids.insert(entry.id.as_str()) {
+            unique.push(entry);
+        }
+    }
+
+    // Drop deck entries that are no longer in the API pool.
+    for old_id in existing_orders.keys() {
+        if !seen_ids.contains(old_id.as_str()) {
+            tx.execute(
+                "DELETE FROM photo_deck WHERE filter_key = ?1 AND photo_id = ?2",
+                params![filter_key, old_id],
+            )?;
+        }
+    }
+
+    // Build sort_order map: existing entries keep their order; new entries are shuffled in.
+    let mut new_ids: Vec<&str> = unique
+        .iter()
+        .filter(|e| !existing_orders.contains_key(&e.id))
+        .map(|e| e.id.as_str())
+        .collect();
+    let mut orders: HashMap<&str, i64> = HashMap::with_capacity(unique.len());
+    let mut rng = rand::thread_rng();
+
+    if existing_orders.is_empty() {
+        new_ids.shuffle(&mut rng);
+        for (idx, id) in new_ids.iter().enumerate() {
+            orders.insert(*id, idx as i64);
+        }
+    } else {
+        for entry in &unique {
+            if let Some(&ord) = existing_orders.get(&entry.id) {
+                orders.insert(entry.id.as_str(), ord);
+            }
+        }
+        if !new_ids.is_empty() {
+            // Mix newly added photos randomly among all remaining unshown photos in the deck.
+            let shown: HashSet<String> = {
+                let mut stmt = tx.prepare("SELECT photo_id FROM photos_history")?;
+                let rows: HashSet<String> = stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .collect();
+                rows
+            };
+            let mut unshown_existing: Vec<(&str, i64)> = unique
+                .iter()
+                .filter_map(|e| {
+                    existing_orders
+                        .get(&e.id)
+                        .filter(|_| !shown.contains(&e.id))
+                        .map(|&ord| (e.id.as_str(), ord))
+                })
+                .collect();
+            unshown_existing.sort_by_key(|(_, ord)| *ord);
+            let mut pool_ids: Vec<&str> = unshown_existing
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(new_ids.iter().copied())
+                .collect();
+            pool_ids.shuffle(&mut rng);
+            let max_shown = orders
+                .iter()
+                .filter(|(id, _)| shown.contains(**id))
+                .map(|(_, &ord)| ord)
+                .max()
+                .unwrap_or(-1);
+            let base = max_shown + 1;
+            for (idx, id) in pool_ids.iter().enumerate() {
+                orders.insert(*id, base + idx as i64);
+            }
+        }
+    }
+
+    for entry in &unique {
+        let (width, height) = cached_dims
+            .get(&entry.id)
+            .map(|&(w, h)| (Some(w), Some(h)))
+            .unwrap_or((entry.width, entry.height));
+        let sort_order = orders[entry.id.as_str()];
+        tx.execute(
+            "INSERT INTO photo_deck (
+                filter_key, photo_id, album_slug, album_url, image_url,
+                width, height, bytes, featured, fallback_used, sort_order
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(filter_key, photo_id) DO UPDATE SET
+                album_slug = excluded.album_slug,
+                album_url = excluded.album_url,
+                image_url = excluded.image_url,
+                width = excluded.width,
+                height = excluded.height,
+                bytes = excluded.bytes,
+                featured = excluded.featured,
+                fallback_used = excluded.fallback_used,
+                sort_order = excluded.sort_order",
+            params![
+                filter_key,
+                entry.id,
+                entry.album_slug,
+                entry.album_url,
+                entry.image_url,
+                width,
+                height,
+                entry.bytes as i64,
+                i32::from(entry.featured),
+                i32::from(entry.fallback_used),
+                sort_order,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE photos_cache SET shuffle_order = ?1 WHERE id = ?2",
+            params![sort_order, entry.id],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO photo_deck_meta (filter_key, refreshed_at) VALUES (?1, ?2)
+         ON CONFLICT(filter_key) DO UPDATE SET refreshed_at = excluded.refreshed_at",
+        params![filter_key, refreshed_at],
+    )?;
+
     tx.commit()?;
-    let requeued = requeued.max(0) as usize;
-    Ok(requeued)
+    Ok(unique.len())
+}
+
+fn deck_orientation_clause(filter: &PhotoFilter) -> &'static str {
+    match filter.orientation() {
+        None => "",
+        Some(Orientation::Landscape) => {
+            " AND (
+                CASE
+                    WHEN c.orientation IS NOT NULL THEN c.orientation = 'landscape'
+                    WHEN d.width IS NOT NULL AND d.height IS NOT NULL THEN d.width >= d.height
+                    ELSE 1
+                END
+              )"
+        }
+        Some(Orientation::Portrait) => {
+            " AND (
+                CASE
+                    WHEN c.orientation IS NOT NULL THEN c.orientation = 'portrait'
+                    WHEN d.width IS NOT NULL AND d.height IS NOT NULL THEN d.height > d.width
+                    ELSE 1
+                END
+              )"
+        }
+    }
+}
+
+/// Next `limit` unshown, eligible photos in `photo_deck` for `filter`, ordered by `sort_order`.
+/// Reports whether each photo's file is already present on disk (healing missing files).
+pub fn next_deck_candidates(
+    conn: &Connection,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    currently_displayed_ids: &[String],
+    limit: usize,
+) -> CoreResult<Vec<DeckCandidate>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let deck_key = filter.deck_key();
+    let featured_clause = if filter.featured_only {
+        " AND d.featured = 1"
+    } else {
+        ""
+    };
+    let orient_clause = deck_orientation_clause(filter);
+    let (excl_clause, excl_values) = exclusion_clause("d.photo_id", currently_displayed_ids);
+
+    let mut values = vec![Value::Text(deck_key)];
+    values.extend(excl_values);
+    values.push(Value::Integer(limit as i64));
+
+    let sql = format!(
+        "SELECT d.photo_id, d.album_slug, d.album_url, d.image_url, d.width, d.height,
+                d.bytes, d.featured, d.fallback_used, d.sort_order,
+                COALESCE(c.file_present, 0), c.file_path
+         FROM photo_deck d
+         LEFT JOIN photos_cache c ON c.id = d.photo_id
+         WHERE d.filter_key = ?
+           AND d.photo_id NOT IN (SELECT photo_id FROM photos_history)
+           AND d.photo_id NOT IN (SELECT photo_id FROM photos_blacklist)
+           {featured_clause}{orient_clause}{excl_clause}
+         ORDER BY d.sort_order ASC, d.photo_id ASC
+         LIMIT ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let raw = stmt
+        .query_map(params_from_iter(values), |r| {
+            Ok((
+                DeckPhotoEntry {
+                    id: r.get(0)?,
+                    album_slug: r.get(1)?,
+                    album_url: r.get(2)?,
+                    image_url: r.get(3)?,
+                    width: r.get::<_, Option<i64>>(4)?.map(to_u32),
+                    height: r.get::<_, Option<i64>>(5)?.map(to_u32),
+                    bytes: to_u64(r.get(6)?),
+                    featured: r.get::<_, i64>(7)? != 0,
+                    fallback_used: r.get::<_, i64>(8)? != 0,
+                },
+                r.get::<_, i64>(9)?,
+                r.get::<_, i64>(10)? != 0,
+                r.get::<_, Option<String>>(11)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut out = Vec::with_capacity(raw.len());
+    for (entry, sort_order, file_present, rel_path) in raw {
+        let on_disk = if file_present {
+            if let Some(rel) = rel_path {
+                if app_data_dir.join(&rel).exists() {
+                    true
+                } else {
+                    conn.execute(
+                        "UPDATE photos_cache SET file_present = 0 WHERE id = ?1",
+                        params![&entry.id],
+                    )?;
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        out.push(DeckCandidate {
+            entry,
+            sort_order,
+            already_on_disk: on_disk,
+        });
+    }
+    Ok(out)
+}
+
+/// Total eligible photos in `photo_deck` for `filter` (ignoring `photos_history`), excluding
+/// `exclude_ids` (e.g. currently displayed photos).
+pub fn count_eligible_in_deck(
+    conn: &Connection,
+    filter: &PhotoFilter,
+    exclude_ids: &[String],
+) -> CoreResult<usize> {
+    let deck_key = filter.deck_key();
+    let featured_clause = if filter.featured_only {
+        " AND d.featured = 1"
+    } else {
+        ""
+    };
+    let orient_clause = deck_orientation_clause(filter);
+    let (excl_clause, excl_values) = exclusion_clause("d.photo_id", exclude_ids);
+    let mut values = vec![Value::Text(deck_key)];
+    values.extend(excl_values);
+    let sql = format!(
+        "SELECT COUNT(*)
+         FROM photo_deck d
+         LEFT JOIN photos_cache c ON c.id = d.photo_id
+         WHERE d.filter_key = ?
+           AND d.photo_id NOT IN (SELECT photo_id FROM photos_blacklist)
+           {featured_clause}{orient_clause}{excl_clause}"
+    );
+    let n: i64 = conn.query_row(&sql, params_from_iter(values), |r| r.get(0))?;
+    Ok(n.max(0) as usize)
+}
+
+/// True when the local queue needs a refill: either `unused <= threshold`, or the active
+/// `photo_deck` has upcoming photos among its next `target` entries that are not cached on disk.
+pub fn needs_deck_refill(
+    conn: &Connection,
+    app_data_dir: &Path,
+    filter: &PhotoFilter,
+    currently_displayed_ids: &[String],
+    threshold: usize,
+    target: usize,
+) -> CoreResult<bool> {
+    if count_unused_in_queue(conn, filter)? <= threshold {
+        return Ok(true);
+    }
+    if photo_deck_count(conn, &filter.deck_key())? == 0 {
+        return Ok(false);
+    }
+    let upcoming = next_deck_candidates(conn, app_data_dir, filter, currently_displayed_ids, target)?;
+    Ok(upcoming.iter().any(|c| !c.already_on_disk))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1411,25 +1860,81 @@ mod tests {
     }
 
     #[test]
-    fn after_reset_least_recently_shown_comes_first() {
+    fn after_reset_requeued_photos_run_full_pass_without_repeats() {
         let mut conn = db();
         let dir = TempDir::new();
-        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+        for (i, id) in ["a", "b", "c", "d"].iter().enumerate() {
             add(&conn, &dir, &photo(id, "s", 4000, 3000, 10, i as i64));
         }
-        for id in ["a", "b", "c"] {
+        for id in ["a", "b", "c", "d"] {
             mark_photo_shown(&mut conn, id).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(3));
         }
-        reset_exhausted_filter_history(&mut conn, &filter(), &[]).unwrap();
-        let first = pop_next_queued_photo(&conn, &dir.0, &filter())
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            first.0, "a",
-            "oldest shown first, the latest ('c') comes last"
-        );
+        reset_exhausted_filter_history(&mut conn, &filter(), &["d".to_string()]).unwrap();
         assert_eq!(count_unused_in_queue(&conn, &filter()).unwrap(), 3);
+        let mut seen = Vec::new();
+        while let Some((id, _)) = pop_next_queued_photo(&conn, &dir.0, &filter()).unwrap() {
+            mark_photo_shown(&mut conn, &id).unwrap();
+            seen.push(id);
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["a", "b", "c"],
+            "every non-displayed photo is shown once before repeating"
+        );
+    }
+
+    #[test]
+    fn photo_deck_sync_and_reshuffle_cover_full_pool_without_repeats() {
+        let mut conn = db();
+        let dir = TempDir::new();
+        let mut f = filter();
+        f.featured_only = true;
+        f.required_orientation = Some("landscape".into());
+        let key = f.deck_key();
+
+        let entries: Vec<DeckPhotoEntry> = (0..5)
+            .map(|i| DeckPhotoEntry {
+                id: format!("p{i}"),
+                album_slug: "s".into(),
+                album_url: "https://iantruongphotography.com/album/s".into(),
+                image_url: format!("https://photos-api.iantruongphotography.com/v1/images/{i}"),
+                // Make p4 portrait so orientation filtering skips it.
+                width: Some(if i == 4 { 3000 } else { 4000 }),
+                height: Some(if i == 4 { 4000 } else { 3000 }),
+                bytes: 1000,
+                featured: true,
+                fallback_used: false,
+            })
+            .collect();
+        assert_eq!(sync_photo_deck(&mut conn, &key, &entries, 100).unwrap(), 5);
+        assert_eq!(photo_deck_refreshed_at(&conn, &key).unwrap(), Some(100));
+        assert_eq!(count_eligible_in_deck(&conn, &f, &[]).unwrap(), 4);
+
+        let cands = next_deck_candidates(&conn, &dir.0, &f, &[], 10).unwrap();
+        assert_eq!(cands.len(), 4);
+        assert!(cands.iter().all(|c| c.entry.id != "p4" && !c.already_on_disk));
+
+        // Walk all 4 landscape photos, marking each shown.
+        let mut first_pass = Vec::new();
+        for c in &cands {
+            let mut p = photo(&c.entry.id, "s", 4000, 3000, 10, 1);
+            p.featured = true;
+            add(&conn, &dir, &p);
+            set_cached_photo_shuffle_order(&conn, &c.entry.id, c.sort_order).unwrap();
+            mark_photo_shown(&mut conn, &c.entry.id).unwrap();
+            first_pass.push(c.entry.id.clone());
+        }
+        assert!(next_deck_candidates(&conn, &dir.0, &f, &[], 5)
+            .unwrap()
+            .is_empty());
+
+        // Reset preserving last displayed photo: remaining 3 return as already_on_disk.
+        let last = first_pass.last().unwrap().clone();
+        reset_exhausted_filter_history(&mut conn, &f, &[last.clone()]).unwrap();
+        let next = next_deck_candidates(&conn, &dir.0, &f, &[last.clone()], 10).unwrap();
+        assert_eq!(next.len(), 3);
+        assert!(next.iter().all(|c| c.already_on_disk && c.entry.id != last));
     }
 
     #[test]

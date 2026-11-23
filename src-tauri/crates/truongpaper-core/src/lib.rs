@@ -41,7 +41,28 @@ CREATE TABLE IF NOT EXISTS photos_cache (
     is_favorite     INTEGER NOT NULL DEFAULT 0,
     downloaded_at   INTEGER NOT NULL,
     last_shown_at   INTEGER,
-    shown_count     INTEGER NOT NULL DEFAULT 0
+    shown_count     INTEGER NOT NULL DEFAULT 0,
+    shuffle_order   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS photo_deck (
+    filter_key      TEXT NOT NULL,
+    photo_id        TEXT NOT NULL,
+    album_slug      TEXT NOT NULL,
+    album_url       TEXT NOT NULL,
+    image_url       TEXT NOT NULL,
+    width           INTEGER,
+    height          INTEGER,
+    bytes           INTEGER NOT NULL DEFAULT 0,
+    featured        INTEGER NOT NULL DEFAULT 0,
+    fallback_used   INTEGER NOT NULL DEFAULT 0,
+    sort_order      INTEGER NOT NULL,
+    PRIMARY KEY (filter_key, photo_id)
+);
+
+CREATE TABLE IF NOT EXISTS photo_deck_meta (
+    filter_key      TEXT PRIMARY KEY,
+    refreshed_at    INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS photos_history (
@@ -146,6 +167,9 @@ CREATE INDEX IF NOT EXISTS idx_photos_unused_fifo
 
 CREATE INDEX IF NOT EXISTS idx_photos_history_filter
     ON photos_history (album_slug, featured, orientation);
+
+CREATE INDEX IF NOT EXISTS idx_photo_deck_order
+    ON photo_deck (filter_key, sort_order);
 "#
     };
 }
@@ -161,7 +185,8 @@ const INDEXES_SQL: &str = indexes_sql!();
 /// `wallpaper_favorites` and `playlist_positions`. All tables are `CREATE IF NOT EXISTS`, so
 /// [`migrate`] upgrades a v1 database by re-running the table batch.
 /// 3 adds `playlists.transition_json` (per-playlist transition).
-pub const SCHEMA_VERSION: i64 = 3;
+/// 4 adds `photo_deck`, `photo_deck_meta` and `photos_cache.shuffle_order`.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Every non-primary-key column of every table, with a definition valid for
 /// `ALTER TABLE ... ADD COLUMN` (NOT NULL columns carry a default). Used to upgrade databases
@@ -193,6 +218,17 @@ const EXPECTED_COLUMNS: &[(&str, &str, &str)] = &[
     ),
     ("photos_cache", "last_shown_at", "INTEGER"),
     ("photos_cache", "shown_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("photos_cache", "shuffle_order", "INTEGER"),
+    ("photo_deck", "album_slug", "TEXT NOT NULL DEFAULT ''"),
+    ("photo_deck", "album_url", "TEXT NOT NULL DEFAULT ''"),
+    ("photo_deck", "image_url", "TEXT NOT NULL DEFAULT ''"),
+    ("photo_deck", "width", "INTEGER"),
+    ("photo_deck", "height", "INTEGER"),
+    ("photo_deck", "bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("photo_deck", "featured", "INTEGER NOT NULL DEFAULT 0"),
+    ("photo_deck", "fallback_used", "INTEGER NOT NULL DEFAULT 0"),
+    ("photo_deck", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
+    ("photo_deck_meta", "refreshed_at", "INTEGER NOT NULL DEFAULT 0"),
     ("photos_history", "album_slug", "TEXT NOT NULL DEFAULT ''"),
     ("photos_history", "featured", "INTEGER NOT NULL DEFAULT 0"),
     (
@@ -417,8 +453,7 @@ pub struct AppSettings {
     /// `schemecolor` (Wallpaper Engine's "Adjust Windows color").
     #[serde(default = "default_adjust_windows_color")]
     pub adjust_windows_color: bool,
-    /// Photos API: new full-size photos downloaded per day at most. Rotation itself only
-    /// shuffles photos already on disk.
+    /// Photos API: new full-size photos downloaded per day at most (`0` = unlimited).
     #[serde(default = "default_photo_downloads_per_day")]
     pub photo_downloads_per_day: u32,
     /// Photo caption: clock and date in the bottom-left corner.
@@ -432,7 +467,7 @@ pub struct AppSettings {
     pub photo_show_exif: bool,
 }
 
-pub const DEFAULT_PHOTO_DOWNLOADS_PER_DAY: u32 = 1;
+pub const DEFAULT_PHOTO_DOWNLOADS_PER_DAY: u32 = 0;
 pub const MAX_PHOTO_DOWNLOADS_PER_DAY: u32 = 50;
 
 fn default_photo_downloads_per_day() -> u32 {

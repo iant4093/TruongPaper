@@ -121,9 +121,12 @@ pub fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     }
     s.next_hotkey = s.next_hotkey.trim().chars().take(MAX_HOTKEY_LEN).collect();
     s.pause_hotkey = s.pause_hotkey.trim().chars().take(MAX_HOTKEY_LEN).collect();
-    s.photo_downloads_per_day = s
-        .photo_downloads_per_day
-        .clamp(1, truongpaper_core::MAX_PHOTO_DOWNLOADS_PER_DAY);
+    // 0 means unlimited new photo downloads per day; positive values are capped.
+    if s.photo_downloads_per_day > 0 {
+        s.photo_downloads_per_day = s
+            .photo_downloads_per_day
+            .min(truongpaper_core::MAX_PHOTO_DOWNLOADS_PER_DAY);
+    }
     if !crate::gpu_select::GpuPreference::is_valid_setting(&s.render_gpu) {
         s.render_gpu = truongpaper_core::DEFAULT_RENDER_GPU.into();
     }
@@ -174,6 +177,28 @@ pub fn migrate_render_gpu_auto(conn: &Connection, s: &mut AppSettings) -> bool {
     let changed = s.render_gpu == "integrated";
     if changed {
         s.render_gpu = truongpaper_core::DEFAULT_RENDER_GPU.into();
+        if persist_settings(conn, s).is_err() {
+            return false;
+        }
+    }
+    let _ = truongpaper_core::set_setting(conn, FLAG, &true);
+    changed
+}
+
+/// Once only: `1` was the default daily photo download limit before unlimited (`0`), so earlier
+/// installs stored it. Move `1` to `0`; any other explicit limit (`3`, `10`, `25`, ...) stays.
+pub fn migrate_photo_downloads_unlimited(conn: &Connection, s: &mut AppSettings) -> bool {
+    const FLAG: &str = "photo_downloads_unlimited_migrated";
+    if get_setting::<bool>(conn, FLAG)
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let changed = s.photo_downloads_per_day == 1;
+    if changed {
+        s.photo_downloads_per_day = truongpaper_core::DEFAULT_PHOTO_DOWNLOADS_PER_DAY;
         if persist_settings(conn, s).is_err() {
             return false;
         }

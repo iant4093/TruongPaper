@@ -106,6 +106,41 @@ impl PhotoFilter {
             }
         })
     }
+
+    /// Canonical key identifying the API photo pool for `photo_deck` (independent of
+    /// display orientation and exhaustion auto-reset so one deck serves all monitors).
+    pub fn deck_key(&self) -> String {
+        let mut slugs: Vec<String> = self
+            .album_slugs
+            .iter()
+            .filter_map(|s| parse_album_slug(s))
+            .collect();
+        slugs.sort();
+        slugs.dedup();
+        format!("f={};a={}", u8::from(self.featured_only), slugs.join(","))
+    }
+}
+
+/// One entry in the shuffled local `photo_deck` table returned by `GET /v1/photos`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeckPhotoEntry {
+    pub id: String,
+    pub album_slug: String,
+    pub album_url: String,
+    pub image_url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub bytes: u64,
+    pub featured: bool,
+    pub fallback_used: bool,
+}
+
+/// Next photo to show from `photo_deck`, with whether its file is already cached on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeckCandidate {
+    pub entry: DeckPhotoEntry,
+    pub sort_order: i64,
+    pub already_on_disk: bool,
 }
 
 /// Settings that drive [`PhotoFilter`] construction (`settings` table keys).

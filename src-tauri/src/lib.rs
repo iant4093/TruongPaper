@@ -135,6 +135,9 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         if state::migrate_render_gpu_auto(&conn, &mut settings) {
             tracing::info!("wallpapers now draw on the GPU the displays are connected to");
         }
+        if state::migrate_photo_downloads_unlimited(&conn, &mut settings) {
+            tracing::info!("photo downloads default moved to unlimited");
+        }
     }
     // Windows ids used to be GDI names (`\\.\DISPLAY5`); carry their data over to stable ids.
     // Once only: a later run could otherwise move a disconnected monitor's old row onto a

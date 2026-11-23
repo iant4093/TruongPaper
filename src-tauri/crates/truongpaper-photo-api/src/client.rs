@@ -4,7 +4,10 @@
 //! `reqwest::Client`; tests use [`FnTransport`] so no real request is ever made.
 
 use crate::error::{PhotoApiError, PhotoApiResult};
-use crate::{ApiPhotoResponse, API_RANDOM_URL, PUBLIC_CATALOG_URL};
+use crate::{
+    ApiPhotoResponse, PhotoListPage, API_PHOTOS_URL, API_RANDOM_URL, MAX_PHOTO_LIST_PAGES,
+    PUBLIC_CATALOG_URL,
+};
 use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
@@ -263,30 +266,49 @@ pub fn check_status(status: u16, retry_after: Option<Duration>) -> PhotoApiResul
     }
 }
 
+fn is_route_not_found(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(|s| s == "not_found"))
+        .unwrap_or(false)
+}
+
 /// Client for the Ian Truong Photography public API.
 #[derive(Debug, Clone)]
 pub struct PhotoApiClient<T> {
     transport: T,
     random_url: String,
     catalog_url: String,
+    list_url: String,
 }
 
 impl<T: PhotoTransport> PhotoApiClient<T> {
     /// Client pointed at the production endpoints.
     pub fn new(transport: T) -> Self {
-        Self::with_endpoints(transport, API_RANDOM_URL, PUBLIC_CATALOG_URL)
+        Self::with_all_endpoints(transport, API_RANDOM_URL, PUBLIC_CATALOG_URL, API_PHOTOS_URL)
     }
 
-    /// Client with custom endpoints (staging, tests).
+    /// Client with custom random/catalog endpoints (staging, tests).
     pub fn with_endpoints(
         transport: T,
         random_url: impl Into<String>,
         catalog_url: impl Into<String>,
     ) -> Self {
+        Self::with_all_endpoints(transport, random_url, catalog_url, API_PHOTOS_URL)
+    }
+
+    /// Client with custom random, catalog, and list endpoints.
+    pub fn with_all_endpoints(
+        transport: T,
+        random_url: impl Into<String>,
+        catalog_url: impl Into<String>,
+        list_url: impl Into<String>,
+    ) -> Self {
         Self {
             transport,
             random_url: random_url.into(),
             catalog_url: catalog_url.into(),
+            list_url: list_url.into(),
         }
     }
 
@@ -297,6 +319,43 @@ impl<T: PhotoTransport> PhotoApiClient<T> {
         let resp = self.transport.fetch(&self.random_url, &borrowed).await?;
         check_status(resp.status, resp.retry_after)?;
         Ok(serde_json::from_slice(&resp.body)?)
+    }
+
+    /// One page of `GET /v1/photos` with optional `album`, `featured`, and `cursor` parameters.
+    pub async fn fetch_photo_list_page(
+        &self,
+        query: &RandomPhotoQuery,
+        cursor: Option<&str>,
+    ) -> PhotoApiResult<PhotoListPage> {
+        let mut pairs = query.to_pairs()?;
+        if let Some(c) = cursor {
+            pairs.push(("cursor", c.to_string()));
+        }
+        let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let resp = self.transport.fetch(&self.list_url, &borrowed).await?;
+        if resp.status == 404 && is_route_not_found(&resp.body) {
+            return Err(PhotoApiError::EndpointNotFound);
+        }
+        check_status(resp.status, resp.retry_after)?;
+        Ok(serde_json::from_slice(&resp.body)?)
+    }
+
+    /// Follows `nextCursor` on `GET /v1/photos` until exhausted (at most [`MAX_PHOTO_LIST_PAGES`]).
+    pub async fn fetch_photo_list(
+        &self,
+        query: &RandomPhotoQuery,
+    ) -> PhotoApiResult<Vec<ApiPhotoResponse>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PHOTO_LIST_PAGES {
+            let page = self.fetch_photo_list_page(query, cursor.as_deref()).await?;
+            all.extend(page.items);
+            match page.next_cursor {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => return Ok(all),
+            }
+        }
+        Ok(all)
     }
 
     /// Downloads `imageUrl` bytes into memory. Counts against the same rate limit as
@@ -677,5 +736,56 @@ mod tests {
             Err(PhotoApiError::RateLimited { status: 429, retry_after: Some(d) }) if d == Duration::from_secs(30)
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn photo_list_follows_cursors_and_distinguishes_missing_route() {
+        let p0 = format!(r#"{{"items":[{SAMPLE}],"fallbackUsed":false,"nextCursor":"1"}}"#);
+        let p1 = format!(r#"{{"items":[{SAMPLE}],"fallbackUsed":false,"nextCursor":null}}"#);
+        let calls: Calls = Default::default();
+        let c = calls.clone();
+        let client = PhotoApiClient::new(FnTransport(move |url: &str, q: &[(&str, &str)]| {
+            c.lock().push((
+                url.to_string(),
+                q.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+            let has_cursor = q.iter().any(|(k, _)| *k == "cursor");
+            Ok(HttpResponse::json(200, if has_cursor { &p1 } else { &p0 }))
+        }));
+        let q = RandomPhotoQuery {
+            album: None,
+            featured: true,
+        };
+        let items = client.fetch_photo_list(&q).await.unwrap();
+        assert_eq!(items.len(), 2);
+        let calls = calls.lock();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, API_PHOTOS_URL);
+        assert_eq!(calls[0].1, vec![("featured".into(), "true".into())]);
+        assert_eq!(
+            calls[1].1,
+            vec![
+                ("featured".into(), "true".into()),
+                ("cursor".into(), "1".into())
+            ]
+        );
+
+        let old_server = PhotoApiClient::new(FnTransport(|_: &str, _: &[(&str, &str)]| {
+            Ok(HttpResponse::json(404, r#"{"error":"not_found"}"#))
+        }));
+        assert!(matches!(
+            old_server.fetch_photo_list(&q).await,
+            Err(PhotoApiError::EndpointNotFound)
+        ));
+
+        let empty_pool = PhotoApiClient::new(FnTransport(|_: &str, _: &[(&str, &str)]| {
+            Ok(HttpResponse::json(404, r#"{"error":"no_photos"}"#))
+        }));
+        assert!(matches!(
+            empty_pool.fetch_photo_list(&q).await,
+            Err(PhotoApiError::NoPhotos)
+        ));
     }
 }

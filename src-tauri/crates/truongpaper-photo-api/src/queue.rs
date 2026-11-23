@@ -304,13 +304,7 @@ pub async fn refill_queue_with_deck_client<T: PhotoTransport>(
 
         let candidates = {
             let conn = db.lock();
-            next_deck_candidates(
-                &conn,
-                app_data_dir,
-                filter,
-                &excluded,
-                QUEUE_TARGET_UNUSED,
-            )?
+            next_deck_candidates(&conn, app_data_dir, filter, &excluded, QUEUE_TARGET_UNUSED)?
         };
 
         if candidates.is_empty() {
@@ -629,11 +623,10 @@ async fn download_and_cache_photo<T: PhotoTransport>(
     // EXIF-aware display size (axes swap for orientations 5-8), then API metadata, then
     // raw header size, then a 4K default.
     let inspect_path = final_path.clone();
-    let inspected =
-        tokio::task::spawn_blocking(move || inspect_display_dimensions(&inspect_path))
-            .await
-            .ok()
-            .flatten();
+    let inspected = tokio::task::spawn_blocking(move || inspect_display_dimensions(&inspect_path))
+        .await
+        .ok()
+        .flatten();
     let (width, height) = inspected
         .or(match (meta.width, meta.height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
@@ -1667,7 +1660,10 @@ mod tests {
             if url == crate::API_PHOTOS_URL {
                 lc.fetch_add(1, Ordering::SeqCst);
                 let has_cursor = q.iter().any(|(k, _)| *k == "cursor");
-                Ok(HttpResponse::json(200, if has_cursor { &page1 } else { &page0 }))
+                Ok(HttpResponse::json(
+                    200,
+                    if has_cursor { &page1 } else { &page0 },
+                ))
             } else {
                 ic.fetch_add(1, Ordering::SeqCst);
                 Ok(HttpResponse {
@@ -1716,8 +1712,16 @@ mod tests {
         let mut sorted1 = pass1.clone();
         sorted1.sort();
         assert_eq!(sorted1, ["f0", "f1", "f2", "f3", "f4", "f5", "f6"]);
-        assert_eq!(list_calls.load(Ordering::SeqCst), 2, "only 2 paginated list calls");
-        assert_eq!(image_calls.load(Ordering::SeqCst), 7, "each photo downloaded once");
+        assert_eq!(
+            list_calls.load(Ordering::SeqCst),
+            2,
+            "only 2 paginated list calls"
+        );
+        assert_eq!(
+            image_calls.load(Ordering::SeqCst),
+            7,
+            "each photo downloaded once"
+        );
 
         // Next refill sees exact exhaustion, resets history preserving displayed, zero downloads!
         let out = refill_queue_with_deck(
@@ -1733,8 +1737,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(out, RefillOutcome::FilterExhaustedAndReset { unused_count: 6 });
-        assert_eq!(image_calls.load(Ordering::SeqCst), 7, "reuses cached files with zero downloads");
+        assert_eq!(
+            out,
+            RefillOutcome::FilterExhaustedAndReset { unused_count: 6 }
+        );
+        assert_eq!(
+            image_calls.load(Ordering::SeqCst),
+            7,
+            "reuses cached files with zero downloads"
+        );
 
         // Pass 2: walks the remaining 6 without repeating the currently displayed photo.
         let mut pass2 = Vec::new();
@@ -1762,7 +1773,10 @@ mod tests {
                 Ok(HttpResponse::json(404, r#"{"error":"not_found"}"#))
             } else if url == API_RANDOM_URL {
                 let i = n_ref.fetch_add(1, Ordering::SeqCst);
-                Ok(HttpResponse::json(200, &meta_json(&format!("r{i}"), "a", 64, 48, 100)))
+                Ok(HttpResponse::json(
+                    200,
+                    &meta_json(&format!("r{i}"), "a", 64, 48, 100),
+                ))
             } else {
                 Ok(HttpResponse {
                     status: 200,

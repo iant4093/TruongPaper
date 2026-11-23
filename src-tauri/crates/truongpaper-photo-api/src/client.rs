@@ -285,7 +285,12 @@ pub struct PhotoApiClient<T> {
 impl<T: PhotoTransport> PhotoApiClient<T> {
     /// Client pointed at the production endpoints.
     pub fn new(transport: T) -> Self {
-        Self::with_all_endpoints(transport, API_RANDOM_URL, PUBLIC_CATALOG_URL, API_PHOTOS_URL)
+        Self::with_all_endpoints(
+            transport,
+            API_RANDOM_URL,
+            PUBLIC_CATALOG_URL,
+            API_PHOTOS_URL,
+        )
     }
 
     /// Client with custom random/catalog endpoints (staging, tests).
@@ -760,17 +765,19 @@ mod tests {
         };
         let items = client.fetch_photo_list(&q).await.unwrap();
         assert_eq!(items.len(), 2);
-        let calls = calls.lock();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, API_PHOTOS_URL);
-        assert_eq!(calls[0].1, vec![("featured".into(), "true".into())]);
-        assert_eq!(
-            calls[1].1,
-            vec![
-                ("featured".into(), "true".into()),
-                ("cursor".into(), "1".into())
-            ]
-        );
+        {
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].0, API_PHOTOS_URL);
+            assert_eq!(calls[0].1, vec![("featured".into(), "true".into())]);
+            assert_eq!(
+                calls[1].1,
+                vec![
+                    ("featured".into(), "true".into()),
+                    ("cursor".into(), "1".into())
+                ]
+            );
+        }
 
         let old_server = PhotoApiClient::new(FnTransport(|_: &str, _: &[(&str, &str)]| {
             Ok(HttpResponse::json(404, r#"{"error":"not_found"}"#))

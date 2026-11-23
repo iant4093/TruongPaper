@@ -678,7 +678,10 @@ async fn photo_for_rotation(
         {
             return Ok(Some(item));
         }
-        if let Err(err) = state.refill(filter, max_cache_bytes, displayed_ids, false).await {
+        if let Err(err) = state
+            .refill(filter, max_cache_bytes, displayed_ids, false)
+            .await
+        {
             tracing::warn!("photo refill failed: {err}");
         }
         if let Some(item) =
@@ -810,7 +813,12 @@ pub(crate) async fn trigger_refill(
             filter.required_orientation = orientation;
             // Refresh the shared filter deck at most once across portrait/landscape passes.
             state
-                .refill(&filter, max_cache_bytes, &displayed_ids, force_deck_refresh && first)
+                .refill(
+                    &filter,
+                    max_cache_bytes,
+                    &displayed_ids,
+                    force_deck_refresh && first,
+                )
                 .await
                 .map_err(e)?;
             first = false;

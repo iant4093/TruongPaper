@@ -694,9 +694,8 @@ pub fn sync_photo_deck(
     let tx = conn.transaction()?;
 
     let existing_orders: HashMap<String, i64> = {
-        let mut stmt = tx.prepare(
-            "SELECT photo_id, sort_order FROM photo_deck WHERE filter_key = ?1",
-        )?;
+        let mut stmt =
+            tx.prepare("SELECT photo_id, sort_order FROM photo_deck WHERE filter_key = ?1")?;
         let rows = stmt
             .query_map(params![filter_key], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -706,9 +705,8 @@ pub fn sync_photo_deck(
     };
 
     let cached_dims: HashMap<String, (u32, u32)> = {
-        let mut stmt = tx.prepare(
-            "SELECT id, width, height FROM photos_cache WHERE width > 0 AND height > 0",
-        )?;
+        let mut stmt = tx
+            .prepare("SELECT id, width, height FROM photos_cache WHERE width > 0 AND height > 0")?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
@@ -1007,7 +1005,8 @@ pub fn needs_deck_refill(
     if photo_deck_count(conn, &filter.deck_key())? == 0 {
         return Ok(false);
     }
-    let upcoming = next_deck_candidates(conn, app_data_dir, filter, currently_displayed_ids, target)?;
+    let upcoming =
+        next_deck_candidates(conn, app_data_dir, filter, currently_displayed_ids, target)?;
     Ok(upcoming.iter().any(|c| !c.already_on_disk))
 }
 
@@ -1913,7 +1912,9 @@ mod tests {
 
         let cands = next_deck_candidates(&conn, &dir.0, &f, &[], 10).unwrap();
         assert_eq!(cands.len(), 4);
-        assert!(cands.iter().all(|c| c.entry.id != "p4" && !c.already_on_disk));
+        assert!(cands
+            .iter()
+            .all(|c| c.entry.id != "p4" && !c.already_on_disk));
 
         // Walk all 4 landscape photos, marking each shown.
         let mut first_pass = Vec::new();
@@ -1931,8 +1932,9 @@ mod tests {
 
         // Reset preserving last displayed photo: remaining 3 return as already_on_disk.
         let last = first_pass.last().unwrap().clone();
-        reset_exhausted_filter_history(&mut conn, &f, &[last.clone()]).unwrap();
-        let next = next_deck_candidates(&conn, &dir.0, &f, &[last.clone()], 10).unwrap();
+        reset_exhausted_filter_history(&mut conn, &f, std::slice::from_ref(&last)).unwrap();
+        let next =
+            next_deck_candidates(&conn, &dir.0, &f, std::slice::from_ref(&last), 10).unwrap();
         assert_eq!(next.len(), 3);
         assert!(next.iter().all(|c| c.already_on_disk && c.entry.id != last));
     }

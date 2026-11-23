@@ -228,7 +228,11 @@ const EXPECTED_COLUMNS: &[(&str, &str, &str)] = &[
     ("photo_deck", "featured", "INTEGER NOT NULL DEFAULT 0"),
     ("photo_deck", "fallback_used", "INTEGER NOT NULL DEFAULT 0"),
     ("photo_deck", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
-    ("photo_deck_meta", "refreshed_at", "INTEGER NOT NULL DEFAULT 0"),
+    (
+        "photo_deck_meta",
+        "refreshed_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
     ("photos_history", "album_slug", "TEXT NOT NULL DEFAULT ''"),
     ("photos_history", "featured", "INTEGER NOT NULL DEFAULT 0"),
     (

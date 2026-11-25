@@ -123,6 +123,15 @@ pub fn rasterize_overlay(
     let right = width as f32 - layout.margin;
 
     // Left: clock above the date.
+    let left_column = text
+        .time
+        .as_deref()
+        .map_or(0.0, |t| line_width(&fonts.serif, layout.time_px, t))
+        .max(
+            text.date
+                .as_deref()
+                .map_or(0.0, |d| line_width(&fonts.sans, layout.date_px, d)),
+        );
     let mut y = bottom;
     if let Some(date) = &text.date {
         draw_line(
@@ -168,17 +177,34 @@ pub fn rasterize_overlay(
         y -= layout.exif_px * 1.9;
     }
     if let Some(album) = &text.album {
-        draw_line(
-            &mut cover,
-            w,
-            h,
-            &fonts.serif,
-            layout.album_px,
-            album,
-            right,
-            y,
-            true,
-        );
+        // Long album names wrap onto lines stacked upwards, so they never run into the clock.
+        let exif_width = text
+            .exif
+            .as_deref()
+            .map_or(0.0, |e| line_width(&fonts.sans, layout.exif_px, e));
+        let room = if left_column > 0.0 {
+            right - (left + left_column + layout.margin * 1.5)
+        } else {
+            right - left
+        };
+        let max_width = album_wrap_width(width as f32, exif_width, room);
+        let lines = wrap_words(album, max_width, ALBUM_MAX_LINES, |s| {
+            line_width(&fonts.serif, layout.album_px, s)
+        });
+        for line in lines.iter().rev() {
+            draw_line(
+                &mut cover,
+                w,
+                h,
+                &fonts.serif,
+                layout.album_px,
+                line,
+                right,
+                y,
+                true,
+            );
+            y -= layout.album_px * 1.2;
+        }
     }
 
     let radius = ((layout.date_px * 0.35).round() as usize).max(2);
@@ -207,6 +233,60 @@ pub fn rasterize_overlay(
         }
     }
     Some((width, layout.band_height, rgba))
+}
+
+/// Most lines an album name may take; longer names end with an ellipsis.
+const ALBUM_MAX_LINES: usize = 3;
+
+/// How wide an album line may be: about 40% of the display (at least as wide as the camera
+/// settings line under it), never wider than the `room` beside the clock.
+fn album_wrap_width(display_width: f32, exif_width: f32, room: f32) -> f32 {
+    let preferred = (display_width * 0.4).max(exif_width);
+    // With almost no room beside the clock, keep a readable width rather than one word a line.
+    preferred.min(room).max(display_width * 0.25)
+}
+
+/// Splits `text` at spaces into lines no wider than `max_width` (by `measure`). A single word
+/// wider than that keeps a line of its own. Past `max_lines`, the last line ends with `…`.
+fn wrap_words(
+    text: &str,
+    max_width: f32,
+    max_lines: usize,
+    measure: impl Fn(&str) -> f32,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+            continue;
+        }
+        let candidate = format!("{current} {word}");
+        if measure(&candidate) <= max_width {
+            current = candidate;
+        } else {
+            lines.push(std::mem::replace(&mut current, word.to_string()));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    let max_lines = max_lines.max(1);
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        let last = lines.last_mut().expect("at least one line");
+        loop {
+            let with_ellipsis = format!("{}…", last.trim_end_matches([' ', ',', '-', '&']));
+            if measure(&with_ellipsis) <= max_width || !last.contains(' ') {
+                *last = with_ellipsis;
+                break;
+            }
+            // Drop the last word until the ellipsis fits.
+            let cut = last.rfind(' ').unwrap_or(0);
+            last.truncate(cut);
+        }
+    }
+    lines
 }
 
 /// Width in pixels of `text` at `px`.
@@ -527,6 +607,92 @@ mod tests {
         let out = box_blur(&src, w, h, 2);
         let total: f32 = out.iter().sum();
         assert!((total - 1.0).abs() < 1e-4, "{total}");
+    }
+
+    /// One unit per character.
+    fn chars(s: &str) -> f32 {
+        s.chars().count() as f32
+    }
+
+    #[test]
+    fn short_album_names_stay_on_one_line() {
+        assert_eq!(
+            wrap_words("Day 6 - Dresden", 40.0, 3, chars),
+            vec!["Day 6 - Dresden"]
+        );
+    }
+
+    #[test]
+    fn long_album_names_wrap_at_spaces() {
+        let lines = wrap_words(
+            "Day 2 - Prague Castle, Walkaround, & Sunset",
+            24.0,
+            3,
+            chars,
+        );
+        assert_eq!(
+            lines,
+            vec!["Day 2 - Prague Castle,", "Walkaround, & Sunset"]
+        );
+        assert!(lines.iter().all(|l| chars(l) <= 24.0));
+    }
+
+    #[test]
+    fn too_many_lines_end_with_an_ellipsis() {
+        let lines = wrap_words("one two three four five six seven", 9.0, 2, chars);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "one two");
+        assert!(
+            lines[1].ends_with('…') && chars(&lines[1]) <= 9.0,
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_word_wider_than_the_line_keeps_its_own_line() {
+        assert_eq!(
+            wrap_words("a verylongword b", 5.0, 3, chars),
+            vec!["a", "verylongword", "b"]
+        );
+    }
+
+    #[test]
+    fn album_width_leaves_room_for_the_clock() {
+        // Plenty of room: about 40% of the display.
+        assert_eq!(album_wrap_width(2000.0, 300.0, 1500.0), 800.0);
+        // A wide camera line widens the album column.
+        assert_eq!(album_wrap_width(2000.0, 900.0, 1500.0), 900.0);
+        // Little room beside the clock: the room wins, down to a readable minimum.
+        assert_eq!(album_wrap_width(2000.0, 300.0, 600.0), 600.0);
+        assert_eq!(album_wrap_width(2000.0, 300.0, 100.0), 500.0);
+    }
+
+    #[test]
+    fn long_album_names_do_not_reach_the_clock() {
+        if fonts().is_none() {
+            return; // CI images without fonts.
+        }
+        let text = OverlayText {
+            time: Some("11:34 PM".into()),
+            date: Some("Sunday, November 22".into()),
+            album: Some("Day 2 - Prague Castle, Walkaround, & Sunset, and a Very Long Evening Walk Along the River".into()),
+            exif: Some("Canon EOS R7 · 12mm · f/8 · 1/500s · ISO 100".into()),
+        };
+        let (width, height) = (1600u32, 900u32);
+        let fonts = fonts().unwrap();
+        let layout = OverlayLayout::for_display(width, height);
+        let clock_right = layout.margin + line_width(&fonts.serif, layout.time_px, "11:34 PM");
+        let (w, h, px) = rasterize_overlay(&text, width, height).unwrap();
+        // No lit text pixels just to the right of the clock.
+        let gap_start = clock_right.ceil() as usize + 4;
+        let gap_end = gap_start + (layout.margin as usize);
+        let lit = (0..h as usize).any(|y| {
+            (gap_start..gap_end).any(|x| {
+                let i = (y * w as usize + x) * 4;
+                px[i] > 200 && px[i + 3] > 200
+            })
+        });
+        assert!(!lit, "album text runs into the clock");
     }
 
     #[test]

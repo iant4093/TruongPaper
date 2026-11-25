@@ -19,6 +19,38 @@ static POPOVER_SHOWN: AtomicU64 = AtomicU64::new(0);
 static LAST_BLUR_HIDE: parking_lot::Mutex<Option<std::time::Instant>> =
     parking_lot::Mutex::new(None);
 
+/// When the popover was last shown, and how often it has taken its focus back since.
+static LAST_SHOW: parking_lot::Mutex<Option<(std::time::Instant, u32)>> =
+    parking_lot::Mutex::new(None);
+
+/// On Windows, opening the popover from the hidden-icons flyout hands the focus back to the
+/// taskbar as that flyout closes, a moment after the popover appeared. A focus loss this soon
+/// after showing is that, not the user clicking away, so the popover takes the focus back.
+const SHOW_FOCUS_GRACE: std::time::Duration = std::time::Duration::from_millis(700);
+const SHOW_FOCUS_RETRIES: u32 = 3;
+
+/// Whether a focus loss right now should take the focus back instead of hiding the popover.
+fn reclaim_focus_after_show() -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let mut last = LAST_SHOW.lock();
+    match last.as_mut() {
+        Some((at, retries)) => should_reclaim(at.elapsed(), retries),
+        None => false,
+    }
+}
+
+/// `true` (and counts the retry) while still inside [`SHOW_FOCUS_GRACE`] with retries left.
+fn should_reclaim(since_show: std::time::Duration, retries: &mut u32) -> bool {
+    if since_show < SHOW_FOCUS_GRACE && *retries < SHOW_FOCUS_RETRIES {
+        *retries += 1;
+        true
+    } else {
+        false
+    }
+}
+
 const PAUSE_LABEL: &str = "Pause All Displays";
 const RESUME_LABEL: &str = "Resume All Displays";
 
@@ -148,6 +180,10 @@ fn popover_window(app: &AppHandle) -> Option<WebviewWindow> {
     let handle = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
+            if handle.is_visible().unwrap_or(false) && reclaim_focus_after_show() {
+                let _ = handle.set_focus();
+                return;
+            }
             if handle.is_visible().unwrap_or(false) {
                 *LAST_BLUR_HIDE.lock() = Some(std::time::Instant::now());
             }
@@ -244,6 +280,7 @@ fn toggle_tray_popover(app: &AppHandle, tray_rect: Rect) {
         target_x, target_y,
     )));
     POPOVER_SHOWN.fetch_add(1, Ordering::AcqRel);
+    *LAST_SHOW.lock() = Some((std::time::Instant::now(), 0));
     let _ = popover.show();
     let _ = popover.set_focus();
 }
@@ -383,6 +420,21 @@ mod placement_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_lost_right_after_showing_is_taken_back_a_few_times() {
+        use std::time::Duration;
+        let mut retries = 0;
+        for _ in 0..SHOW_FOCUS_RETRIES {
+            assert!(should_reclaim(Duration::from_millis(50), &mut retries));
+        }
+        // Out of retries: the popover hides as usual.
+        assert!(!should_reclaim(Duration::from_millis(60), &mut retries));
+        // A click away after the grace period always hides it.
+        let mut retries = 0;
+        assert!(!should_reclaim(SHOW_FOCUS_GRACE, &mut retries));
+        assert_eq!(retries, 0);
+    }
 
     #[test]
     fn pause_item_says_all_displays() {

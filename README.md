@@ -24,7 +24,7 @@ A native macOS and Windows desktop wallpaper engine built in Rust and WebGPU tha
 
 TruongPaper renders live, audio-reactive and high-resolution photographic wallpapers directly behind your desktop icons on both macOS and Windows. It pairs an offline-first queue for the public [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api) with a built-in Steam Workshop downloader and native Rust renderer for Wallpaper Engine scenes, videos, web wallpapers and Windows applications, all wrapped in a simple dark interface that looks identical on macOS and Windows. Releases target Apple Silicon Macs and 64-bit Windows.
 
-Workshop includes a native **Discover** gallery with public guest browsing, search, sorting, tag filters, previews, and pagination. **Installed** keeps your downloads and local Steam library. Direct Workshop links and IDs open the download choices. Choose GGNetwork when it has a guest download, or Steam with a Wallpaper Engine license. GGNetwork receives the public Workshop link when you choose it. Discover follows Steam's guest visibility rules. The sidebar reports disk cache and main-process resident RAM as separate readings: Disk cache is the size of cached photos on disk, and RAM is the app's resident memory, refreshed every three seconds (on Windows this includes the WebView2, downloader and Application wallpaper processes TruongPaper starts; on macOS helper-process memory is not included; GPU memory is never included).
+Workshop includes a native **Discover** gallery with public guest browsing, search, sorting, tag filters, previews, and pagination. **Installed** keeps your downloads and local Steam library. Direct Workshop links and IDs open the download choices. Choose GGNetwork when it has a guest download, or Steam with a Wallpaper Engine license. GGNetwork receives the public Workshop link when you choose it. Discover follows Steam's guest visibility rules. The sidebar shows two separate readings: **Photo storage** is the size of cached photos on disk, and **RAM** is the app's resident memory, refreshed every three seconds (on Windows this includes the WebView2, downloader and Application wallpaper processes TruongPaper starts; on macOS helper-process memory is not included; GPU memory is never included).
 
 ## Screenshots
 
@@ -38,7 +38,7 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
     </td>
     <td width="50%" valign="top">
       <img src="docs/screenshots/photos-api.jpg" width="100%" alt="Ian Truong Photography API studio view showing saved albums, featured filter, offline photo queue, cache slider and history controls">
-      <p align="center"><sub><b>Ian's Photos API</b> · offline queue, saved albums and zero-repeat history</sub></p>
+      <p align="center"><sub><b>Photography</b> · Ian's Photos API with an offline queue, saved albums and no-repeat history</sub></p>
     </td>
   </tr>
   <tr>
@@ -77,14 +77,15 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 **Ian Truong Photography API & Offline Queue**
 
-- Direct integration with `https://photos-api.iantruongphotography.com/v1/photos/random`: pull from all public photos, featured photos only (`?featured=true`), or any combination of saved albums (`?album=<slug>`)
+- Direct integration with the [Ian Truong Photography API](https://iantruongphotography.com/apps/photo-api): pull from all public photos, featured photos only (`?featured=true`), or any combination of saved albums (`?album=<slug>`)
+- Shuffled deck without repeats: TruongPaper lists the whole photo pool once with `GET /v1/photos` (checked again every six hours for new uploads), shuffles it into a local deck, and shows every photo once before any repeats
 - Browse the public album catalog in **Photography**, or paste an `https://iantruongphotography.com/album/...` URL or slug under **Saved albums**
-- Rotation runs from photos on disk: new photos first, then the ones already shown in a shuffled order, so a display never goes blank. New full-resolution downloads are limited per day (one by default, up to 25 in **Photography**) to keep bandwidth low; a new install or album downloads its first three right away.
-- Persistent SQLite history (`photos_history`): checks every random pick against both the unused queue and shown history *before* downloading `imageUrl`, so a photo you have seen is not downloaded again (unless repeats are on), even after older image files are evicted to free disk space
+- Rotation runs from photos on disk: new photos first, then the ones already shown in a shuffled order, so a display never goes blank. New full-resolution downloads are unlimited by default; to save bandwidth, limit them to 1, 3, 10 or 25 a day in **Photography** (TruongPaper still keeps at least three photos on disk)
+- Persistent SQLite history (`photos_history`): a photo you have seen is not downloaded again (unless repeats are on), even after older image files are evicted to free disk space
 - Smart exhaustion handling: when every photo in an album or filter has been shown, TruongPaper can reset the history for that filter so new downloads may repeat photos (**Repeat photos after all are shown**)
-- Optional caption on photo wallpapers: time and date, album name, and camera settings read from the photo's EXIF (camera, focal length, aperture, shutter, ISO)
+- Optional caption on photo wallpapers: time and date, album name, and camera settings read from the photo's EXIF (camera, focal length, aperture, shutter, ISO). Each part can be turned on for all displays or per display, long album names wrap, and the clock keeps time while wallpapers are paused
 - Per-photo actions: Favorite / Pin on disk (exempts from cache cleanup), Hide / Never show again (blacklists ID and advances), and View Album on `iantruongphotography.com`
-- Configurable disk cache limit (250 MB default, 100 MB – 10 GB slider) plus sliding-window rate limiting (respecting the 100 requests / 5 min API limit with automatic exponential backoff on `403`/`503`)
+- Configurable disk cache limit (250 MB default, 100 MB – 10 GB slider) plus sliding-window rate limiting that stays under the API's 100 requests / 5 min limit, with automatic exponential backoff on `403`/`503`
 
 **Steam Workshop & Wallpaper Engine**
 
@@ -102,7 +103,7 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 - **Scene report**: warnings the renderer collects while loading a scene (skipped scripts, fallback shaders and similar) appear as a collapsed **Scene report** in the wallpaper's details panel
 - **Video wallpapers**: looping playback through WKWebView / WebView2 (codec support depends on the platform), plus AVFoundation decoding for embedded scene videos on macOS with gapless loop, playback speed (`0.1x`–`3.0x`) and volume control
 - **Web wallpapers**: embedded `wry` desktop WebView with `window.wallpaperPropertyListener` and 60 Hz 128-band stereo `window.wallpaperRegisterAudioListener` injection
-- **Application wallpapers** (Windows): launches Windows application wallpapers with desktop bounds; flagged as `Windows Only` on macOS
+- **Application wallpapers** (Windows): launches Windows application wallpapers with desktop bounds, asking once per wallpaper before running its program; flagged as `Windows Only` on macOS
 
 **Inspector, Audio Reactivity & Desktop Interaction**
 
@@ -116,12 +117,14 @@ The Workshop gallery below is the native macOS app using the public Steam catalo
 
 - Independent per-monitor wallpapers and applying the same source across displays (photo draws remain independent), with platform support for both classic Windows 10/11 `WorkerW` and Windows 11 24H2 (`WS_EX_NOREDIRECTIONBITMAP`) raised layered desktops
 - Smart orientation matching: skips portrait photos on landscape monitors (and vice-versa) by default, or displays mismatched aspect ratios over a dual-pass Kawase GPU-blurred ambient backdrop (`Fit + Blur`)
-- Custom `wgpu` transitions: **Smooth Crossfade**, **Blur-Dissolve**, and **Liquid morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
+- Custom `wgpu` transitions: **Crossfade**, **Blur dissolve**, and **Liquid morph** (refractive chromatic dispersion shader) with adjustable duration (`0.3s`–`3.0s`)
 - Unified playlists: rotate only Ian's Photo API, only Workshop wallpapers, or mix both on a custom timer (`1 min` to `24 hours`, or manual only), on app launch, on display wake. Each display keeps its own playlist position and timer, and positions persist across restarts
 - **No wallpaper** per display (Playback bar or **Displays › Shows**): TruongPaper steps aside and the system wallpaper shows
 - Wallpapers draw on the GPU the displays are connected to by default (**Settings › Graphics card** lists each GPU once)
 - Per-display volume slider in **Displays**, and **Span one wallpaper across all displays** for photos and scenes (videos, web wallpapers and applications stay on their own display)
 - Lock screen still: on macOS **Prepare Lock Screen Still** saves a JPEG of the selected display's wallpaper and reveals it in Finder, so you can choose it in System Settings; on Windows **Set Lock Screen Still** sets the image once, and **Follow the primary display** keeps it in sync as the wallpaper changes
+- Menu Bar (macOS) / System Tray (Windows) popover with pause, next, favorite and display switching; it opens next to the icon wherever the taskbar is, and only runs while it is in use. Right-clicking the icon offers Open Studio, Next wallpaper, Pause / Resume all and Quit
+- The Studio window has its own right-click menu: cut, copy, paste and select all on text, plus Next wallpaper, Pause / Resume all and Settings
 - Global keyboard shortcuts for Next wallpaper (`CmdOrCtrl+Alt+Right`; `Ctrl+Alt+Shift+Right` on Windows) and Pause / Resume (`CmdOrCtrl+Alt+P`; `Ctrl+Alt+Shift+P` on Windows, so AltGr typing keeps working), editable in Settings
 - Backup and restore: **Settings › Backup & restore** exports settings, playlists, favorites and per-wallpaper customization to one JSON file, and imports it again. Wallpaper files, Steam account data and secrets are never included
 - Smart pause & battery saver: suspends animation and FFT work and mutes audio when a fullscreen game or maximized window covers a monitor, when running on laptop battery / Low Power Mode, or when the screen locks or sleeps
@@ -153,7 +156,7 @@ Installed copies check for a new version once a day (or from **Settings › Abou
 | Desktop & GPU Engine | `wgpu` (Metal on macOS, DirectX 12 / Vulkan on Windows), `naga` (GLSL/WGSL shader translation), Win32 `Progman`/`WorkerW` (23H2 & 24H2) and macOS `NSWindow` (`kCGDesktopWindowLevel`) |
 | Wallpaper Engine Formats | Custom Rust `.pkg` memory-mapped VFS, `.tex` decoder (`lz4_flex`, BC1/BC2/BC3, RG88, R8, RGBA8, MP4 streams), `.mdl` puppet mesh deformer, `rquickjs` SceneScript sandbox |
 | Steam Workshop | Bundled checksum-verified `DepotDownloader` v3.4.0 sidecar, Steam Web API metadata client, `notify` local `431960` folder watcher, OS Keychain (`keyring`) |
-| Photo API & Storage | `reqwest` (rustls), `imagesize`, SQLite (`rusqlite` WAL mode) with persistent `photos_history` and LRU disk cache eviction |
+| Photo API & Storage | `reqwest` (rustls), `imagesize`, SQLite (`rusqlite` WAL mode) with a shuffled `photo_deck`, persistent `photos_history` and LRU disk cache eviction; caption text drawn with `ab_glyph` |
 | Audio DSP | `cpal` (WASAPI Loopback / macOS virtual loopback device), `rustfft` 2048-point Hann-windowed logarithmic 16/32/64-band stereo analyzer |
 | Delivery | GitHub Actions, macOS `.dmg`, Windows NSIS installer, signed auto-updates, SHA-256 checksums |
 
@@ -219,10 +222,12 @@ The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository 
 │   ├── components/         Shared components: WallpaperCard, VirtualGrid, WorkshopBrowser,
 │   │                       WorkshopPreviewModal, WorkshopImport, LocalImport, DetailsDrawer,
 │   │                       SceneReport, SourceDetails, PropertyInspector, PresetBar,
-│   │                       PlaylistEditor, ResourceUsage, PlaybackBar, SteamAuthModal
+│   │                       PlaylistEditor, ResourceUsage, PlaybackBar, SteamAuthModal,
+│   │                       ContextMenu, Dropdown, ColorPicker, WindowControls
 │   │   └── views/          Studio views: library, Photography, Workshop, Displays, Playlists, Settings
 │   ├── services/           Signed auto-updater client (updates.ts)
-│   ├── store/              Zustand store (useAppStore.ts): photos, Workshop, playlists, monitors, presets
+│   ├── store/              Zustand store (useAppStore.ts): photos, Workshop, playlists, monitors, presets,
+│   │                       plus toasts and confirmations (feedback.ts)
 │   ├── tray/               Menu Bar (macOS) / System Tray (Windows) quick-control popover
 │   ├── lib/ types/         Formatting helpers, hooks and IPC types (ipc.ts)
 │   ├── styles/             Neutral dark theme (theme.css)
@@ -233,7 +238,8 @@ The updater signing key is stored as the `TAURI_SIGNING_PRIVATE_KEY` repository 
 │   ├── src/                Tauri entrypoints and IPC commands (commands/: library, monitor, photo,
 │   │                       playlist, runtime, settings, steam, backup, lock_screen, updater),
 │   │                       desktop host, scheduler, global controls (hotkeys), Smart Pause,
-│   │                       power/lock watcher, OS keychain vault, wpe:// protocol, tray, SQLite state
+│   │                       power/lock watcher, photo caption (clock, album, EXIF), OS keychain
+│   │                       vault, wpe:// protocol, tray, SQLite state
 │   ├── capabilities/       Tauri permissions
 │   ├── resources/          Bundled clean-room core assets (effects, shaders, textures)
 │   ├── bin/                DepotDownloader sidecar and licenses (populated by the bundler script)

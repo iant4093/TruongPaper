@@ -219,8 +219,8 @@ pub struct WallpaperHost {
     span_source: Mutex<Option<String>>,
     /// Album name and camera settings of photos that were shown, by file.
     photo_captions: Mutex<HashMap<PathBuf, crate::photo_caption::PhotoCaption>>,
-    /// Which parts of the photo caption are drawn.
-    overlay_prefs: Mutex<crate::photo_caption::OverlayPrefs>,
+    /// Which parts of the photo caption each display draws.
+    overlay_prefs: Mutex<crate::photo_caption::CaptionSettings>,
     /// Largest display size a photo is shown at (set by the renderer); photos are decoded
     /// straight to it instead of at full resolution.
     photo_decode_cap: Mutex<Option<(u32, u32)>>,
@@ -327,13 +327,13 @@ impl WallpaperHost {
         *self.photo_decode_cap.lock()
     }
 
-    pub fn set_overlay_prefs(&self, prefs: crate::photo_caption::OverlayPrefs) {
+    pub fn set_overlay_prefs(&self, prefs: crate::photo_caption::CaptionSettings) {
         *self.overlay_prefs.lock() = prefs;
         self.bump();
     }
 
-    pub fn overlay_prefs(&self) -> crate::photo_caption::OverlayPrefs {
-        *self.overlay_prefs.lock()
+    pub fn overlay_prefs(&self) -> crate::photo_caption::CaptionSettings {
+        self.overlay_prefs.lock().clone()
     }
 
     /// Called by the renderer each loop: the span source monitor while span mode is active.

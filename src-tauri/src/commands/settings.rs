@@ -79,8 +79,8 @@ pub async fn settings_update(
         state.host.request_renderer_restart();
     }
 
-    let overlay = crate::photo_caption::OverlayPrefs::from_settings(&after);
-    if crate::photo_caption::OverlayPrefs::from_settings(&before) != overlay {
+    let overlay = crate::photo_caption::CaptionSettings::from_settings(&after);
+    if crate::photo_caption::CaptionSettings::from_settings(&before) != overlay {
         state.host.set_overlay_prefs(overlay);
         crate::commands::photo::refresh_photo_captions(&app);
     }

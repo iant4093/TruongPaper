@@ -258,6 +258,15 @@ export interface AppSettings {
   photoShowAlbum?: boolean;
   /** Photo caption: camera settings from EXIF (bottom right). */
   photoShowExif?: boolean;
+  /** Photo caption per display (`monitorId -> parts`); displays without an entry use the three above. */
+  photoCaptionByMonitor?: Record<string, PhotoCaptionParts>;
+}
+
+/** Which parts of the photo caption one display shows. */
+export interface PhotoCaptionParts {
+  time: boolean;
+  album: boolean;
+  exif: boolean;
 }
 
 /** A GPU the desktop renderer can use (`gpu_list_adapters`). */

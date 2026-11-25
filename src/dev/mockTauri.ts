@@ -295,6 +295,7 @@ export function createMockBackend(
     photoShowTime: false,
     photoShowAlbum: false,
     photoShowExif: false,
+    photoCaptionByMonitor: {},
   };
 
   const current1 = makePhoto({ isFavorite: true, lastShownAt: Date.now() - 300_000 });

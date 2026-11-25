@@ -4,10 +4,10 @@
 
 use chrono::{DateTime, Local};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::Path;
-use truongpaper_core::{get_setting, set_setting, AppSettings};
+use truongpaper_core::{get_setting, set_setting, AppSettings, PhotoCaptionParts};
 use truongpaper_renderer::OverlayText;
 
 /// Album titles from the public catalog, `slug -> title` (settings key).
@@ -21,7 +21,7 @@ pub struct PhotoCaption {
     pub exif: Option<String>,
 }
 
-/// Which parts of the caption the settings turn on.
+/// Which parts of the caption one display shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OverlayPrefs {
     pub time: bool,
@@ -30,16 +30,65 @@ pub struct OverlayPrefs {
 }
 
 impl OverlayPrefs {
+    pub fn any(self) -> bool {
+        self.time || self.album || self.exif
+    }
+}
+
+impl From<PhotoCaptionParts> for OverlayPrefs {
+    fn from(p: PhotoCaptionParts) -> Self {
+        Self {
+            time: p.time,
+            album: p.album,
+            exif: p.exif,
+        }
+    }
+}
+
+/// The caption settings of every display: a default plus displays with their own choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptionSettings {
+    pub default: OverlayPrefs,
+    pub by_monitor: BTreeMap<String, OverlayPrefs>,
+}
+
+impl CaptionSettings {
     pub fn from_settings(s: &AppSettings) -> Self {
         Self {
-            time: s.photo_show_time,
-            album: s.photo_show_album,
-            exif: s.photo_show_exif,
+            default: OverlayPrefs {
+                time: s.photo_show_time,
+                album: s.photo_show_album,
+                exif: s.photo_show_exif,
+            },
+            by_monitor: s
+                .photo_caption_by_monitor
+                .iter()
+                .map(|(id, parts)| (id.clone(), OverlayPrefs::from(*parts)))
+                .collect(),
         }
     }
 
-    pub fn any(self) -> bool {
-        self.time || self.album || self.exif
+    /// What `monitor_id` shows: its own choice, else the default.
+    pub fn for_monitor(&self, monitor_id: &str) -> OverlayPrefs {
+        self.by_monitor
+            .get(monitor_id)
+            .copied()
+            .unwrap_or(self.default)
+    }
+
+    /// Whether any display may show some caption (photo files are only read then).
+    pub fn any(&self) -> bool {
+        self.default.any() || self.by_monitor.values().any(|p| p.any())
+    }
+
+    /// Whether any display may show an album name.
+    pub fn album_anywhere(&self) -> bool {
+        self.default.album || self.by_monitor.values().any(|p| p.album)
+    }
+
+    /// Whether any display may show the clock.
+    pub fn time_anywhere(&self) -> bool {
+        self.default.time || self.by_monitor.values().any(|p| p.time)
     }
 }
 
@@ -502,6 +551,82 @@ mod tests {
     fn slugs_become_readable_titles() {
         assert_eq!(title_from_slug("day-6-dresden"), "Day 6 Dresden");
         assert_eq!(title_from_slug(""), "");
+    }
+
+    #[test]
+    fn displays_can_have_their_own_caption() {
+        let mut s = AppSettings {
+            photo_show_time: true,
+            ..Default::default()
+        };
+        s.photo_caption_by_monitor.insert(
+            "right".into(),
+            PhotoCaptionParts {
+                time: false,
+                album: true,
+                exif: true,
+            },
+        );
+        s.photo_caption_by_monitor
+            .insert("off".into(), PhotoCaptionParts::default());
+        let c = CaptionSettings::from_settings(&s);
+        // No entry: the default.
+        assert_eq!(
+            c.for_monitor("left"),
+            OverlayPrefs {
+                time: true,
+                album: false,
+                exif: false
+            }
+        );
+        assert_eq!(
+            c.for_monitor("right"),
+            OverlayPrefs {
+                time: false,
+                album: true,
+                exif: true
+            }
+        );
+        assert!(!c.for_monitor("off").any());
+        assert!(c.any() && c.album_anywhere() && c.time_anywhere());
+
+        // Everything off by default, one display with only the album.
+        let mut s = AppSettings::default();
+        s.photo_caption_by_monitor.insert(
+            "one".into(),
+            PhotoCaptionParts {
+                album: true,
+                ..Default::default()
+            },
+        );
+        let c = CaptionSettings::from_settings(&s);
+        assert!(c.any() && c.album_anywhere() && !c.time_anywhere());
+        assert!(!CaptionSettings::from_settings(&AppSettings::default()).any());
+    }
+
+    #[test]
+    fn per_display_captions_survive_a_settings_round_trip() {
+        let mut s = AppSettings::default();
+        s.photo_caption_by_monitor.insert(
+            "\\\\.\\DISPLAY2".into(),
+            PhotoCaptionParts {
+                time: true,
+                album: false,
+                exif: true,
+            },
+        );
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json["photoCaptionByMonitor"]["\\\\.\\DISPLAY2"],
+            serde_json::json!({ "time": true, "album": false, "exif": true })
+        );
+        let back: AppSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(back.photo_caption_by_monitor, s.photo_caption_by_monitor);
+        // Settings saved before this field existed still load.
+        let mut old = serde_json::to_value(AppSettings::default()).unwrap();
+        old.as_object_mut().unwrap().remove("photoCaptionByMonitor");
+        let old: AppSettings = serde_json::from_value(old).unwrap();
+        assert!(old.photo_caption_by_monitor.is_empty());
     }
 
     #[test]

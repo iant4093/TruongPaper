@@ -191,6 +191,9 @@ pub struct IdleState {
     /// A display / space / desktop notification arrived.
     pub platform_event: bool,
     pub photo_ready: bool,
+    /// The minute turned while a photo caption shows the clock: it must be redrawn, paused or
+    /// not.
+    pub clock_ticked: bool,
 }
 
 /// `true` when the pass can be skipped entirely (no snapshot clone, no settings lookups).
@@ -201,6 +204,16 @@ pub fn can_skip_idle_pass(s: IdleState) -> bool {
         && !s.span_changed
         && !s.platform_event
         && !s.photo_ready
+        && !s.clock_ticked
+}
+
+/// The current minute while some display's caption shows the clock (`None` otherwise); the
+/// render loop redraws captions when it changes.
+pub fn caption_clock_minute(
+    clock_shown: bool,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<i64> {
+    clock_shown.then(|| now.timestamp().div_euclid(60))
 }
 
 /// How long the render loop sleeps after a pass.
@@ -2561,6 +2574,11 @@ impl MonitorRenderer {
                 .as_ref()
                 .is_none_or(|u| !same_uniforms(u, &base));
         }
+        // The caption (its clock above all) keeps up while paused: a change redraws the still.
+        if matches!(self.content, Content::Photo) && self.overlay_text.as_ref() != overlay {
+            self.overlay_text = overlay.cloned();
+            self.dirty = true;
+        }
         let needs_still = self.dirty
             && !matches!(self.content, Content::None)
             && !crate::power::rendering_suspended();
@@ -2583,10 +2601,6 @@ impl MonitorRenderer {
             return false;
         }
         // Photo.
-        if self.overlay_text.as_ref() != overlay {
-            self.overlay_text = overlay.cloned();
-            self.dirty = true;
-        }
         let progress = match (should_render, self.transition_started) {
             (true, Some(t)) => transition_progress(
                 t.elapsed().as_secs_f32(),
@@ -3250,6 +3264,7 @@ fn run_renderer(
     let mut was_idle = false;
     let mut last_suspended = false;
     let mut last_span = false;
+    let mut last_clock_minute: Option<i64> = None;
     let mut next_frame_at = Instant::now();
     let mut span_notified: HashSet<(String, u64)> = HashSet::new();
 
@@ -3385,6 +3400,8 @@ fn run_renderer(
             )
         };
         let suspended = crate::power::rendering_suspended();
+        let clock_minute =
+            caption_clock_minute(host.overlay_prefs().time_anywhere(), chrono::Local::now());
         if can_skip_idle_pass(IdleState {
             was_idle,
             host_changed: epoch != last_epoch,
@@ -3392,10 +3409,12 @@ fn run_renderer(
             span_changed: span_mode != last_span,
             platform_event,
             photo_ready,
+            clock_ticked: clock_minute != last_clock_minute,
         }) {
             host.wait_for_change(epoch, IDLE_WAIT);
             continue;
         }
+        last_clock_minute = clock_minute;
         last_epoch = epoch;
         last_suspended = suspended;
         last_span = span_mode;
@@ -3512,7 +3531,14 @@ fn run_renderer(
             // A spanned photo gets one caption, on the display the span is drawn from.
             let caption_here = !span_on || span_source_id.as_deref() == Some(m.monitor_id.as_str());
             let overlay = caption_here
-                .then(|| photo_overlay_text(host, rt, overlay_prefs, overlay_now))
+                .then(|| {
+                    photo_overlay_text(
+                        host,
+                        rt,
+                        overlay_prefs.for_monitor(&m.monitor_id),
+                        overlay_now,
+                    )
+                })
                 .flatten();
             animating |= m.frame(
                 &gpu.device,
@@ -4243,6 +4269,7 @@ mod tests {
             span_changed: false,
             platform_event: false,
             photo_ready: false,
+            clock_ticked: false,
         };
         assert!(can_skip_idle_pass(idle));
         for changed in [
@@ -4270,12 +4297,35 @@ mod tests {
                 photo_ready: true,
                 ..idle
             },
+            IdleState {
+                clock_ticked: true,
+                ..idle
+            },
         ] {
             assert!(!can_skip_idle_pass(changed));
         }
         assert_eq!(loop_wait(true, true), LoopWait::Frame);
         assert_eq!(loop_wait(false, true), LoopWait::Retry);
         assert_eq!(loop_wait(false, false), LoopWait::Idle);
+    }
+
+    #[test]
+    fn caption_clock_ticks_once_a_minute_only_while_shown() {
+        use chrono::TimeZone;
+        let at = |h, m, sec| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 11, 25, h, m, sec)
+                .unwrap()
+        };
+        assert_eq!(caption_clock_minute(false, at(9, 0, 0)), None);
+        assert_eq!(
+            caption_clock_minute(true, at(9, 0, 1)),
+            caption_clock_minute(true, at(9, 0, 59))
+        );
+        assert_ne!(
+            caption_clock_minute(true, at(9, 0, 59)),
+            caption_clock_minute(true, at(9, 1, 0))
+        );
     }
 
     #[test]

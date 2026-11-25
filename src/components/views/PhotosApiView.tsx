@@ -18,8 +18,9 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import { confirmAction, toast } from '../../store/feedback';
 import { parseImportLink } from '../../lib/importLinks';
+import { ALL_DISPLAYS, captionFor, captionOverrides, captionPatch, followDefaultCaptionPatch, hasOwnCaption } from '../../lib/photoCaption';
 import { FIT_MODE_HINT, FIT_MODE_LABEL, GB, MB, OFFLINE_NOTICE, PHOTO_POOL_OPTIONS, ROTATION_INTERVALS, formatBytes, formatOfflinePhotoCount, offlinePhotosForDisplay, photoAlbumTitle, photoPreviewSrc, plural, safeAlbumUrl } from '../../lib/format';
-import type { FitMode, PhotoItem } from '../../types/ipc';
+import type { AppSettings, FitMode, MonitorInfo, PhotoCaptionParts, PhotoItem } from '../../types/ipc';
 import { Badge, SectionTitle, SegmentedControl, Thumb, ToggleRow, ViewHeader, cardGrid } from '../ui';
 import { Dropdown } from '../Dropdown';
 import { PhotoTransitionControls } from '../SourceDetails';
@@ -70,6 +71,65 @@ const PhotoTile: React.FC<{ photo: PhotoItem; children: React.ReactNode }> = ({ 
     <div className="photo-actions">{children}</div>
   </article>
 );
+
+/** "On the wallpaper": the caption parts, for every display or one display at a time. */
+export const CaptionControls: React.FC<{
+  settings: AppSettings | null;
+  monitors: MonitorInfo[];
+  onChange: (patch: Partial<AppSettings>) => void;
+}> = ({ settings, monitors, onChange }) => {
+  const [scope, setScope] = useState<string>(ALL_DISPLAYS);
+  // A display that was unplugged falls back to "All displays".
+  const current = monitors.some((m) => m.monitorId === scope) ? scope : ALL_DISPLAYS;
+  const parts = captionFor(settings, current);
+  const own = hasOwnCaption(settings, current);
+  const nameOf = (id: string) => monitors.find((m) => m.monitorId === id)?.name;
+  const withOwn = Object.keys(captionOverrides(settings)).map(nameOf).filter((n): n is string => !!n);
+  const toggle = (part: keyof PhotoCaptionParts, label: string, description?: string) => (
+    <ToggleRow
+      label={label}
+      description={description}
+      checked={parts[part]}
+      onChange={(next) => onChange(captionPatch(settings, current, part, next))}
+    />
+  );
+  return (
+    <>
+      <div style={{ fontSize: 13, fontWeight: 600, margin: '14px 0 4px' }}>On the wallpaper</div>
+      {monitors.length > 1 && (
+        <div className="settings-field" style={{ marginBottom: 4 }}>
+          <span>Display</span>
+          <Dropdown<string>
+            label="Caption display"
+            value={current}
+            options={[[ALL_DISPLAYS, 'All displays'] as const, ...monitors.map((m) => [m.monitorId, m.name] as const)]}
+            onChange={setScope}
+          />
+          <span className="view-subtitle">
+            {current === ALL_DISPLAYS
+              ? withOwn.length > 0
+                ? `${withOwn.join(', ')} ${withOwn.length === 1 ? 'has its' : 'have their'} own caption.`
+                : 'Every display shows the same caption. Pick a display to change only that one.'
+              : own
+                ? 'This display has its own caption.'
+                : 'This display follows All displays until you change something here.'}
+          </span>
+          {own && (
+            <div>
+              <button type="button" className="button" style={{ marginTop: 6 }}
+                onClick={() => onChange(followDefaultCaptionPatch(settings, current))}>
+                Use All displays setting
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {toggle('time', 'Time and date')}
+      {toggle('album', 'Album name')}
+      {toggle('exif', 'Camera settings', "Camera, lens, aperture, shutter and ISO from the photo's EXIF.")}
+    </>
+  );
+};
 
 /** Long lists show this many tiles first. */
 const TILE_PAGE = 60;
@@ -311,22 +371,10 @@ export const PhotosApiView: React.FC = () => {
             onChange={(next) => void runPhotoAction(() => updateSettings({ skipMismatchedOrientation: next }))}
           />
         </div>
-        <div style={{ fontSize: 13, fontWeight: 600, margin: '14px 0 4px' }}>On the wallpaper</div>
-        <ToggleRow
-          label="Time and date"
-          checked={settings?.photoShowTime ?? false}
-          onChange={(next) => void runPhotoAction(() => updateSettings({ photoShowTime: next }))}
-        />
-        <ToggleRow
-          label="Album name"
-          checked={settings?.photoShowAlbum ?? false}
-          onChange={(next) => void runPhotoAction(() => updateSettings({ photoShowAlbum: next }))}
-        />
-        <ToggleRow
-          label="Camera settings"
-          description="Camera, lens, aperture, shutter and ISO from the photo's EXIF."
-          checked={settings?.photoShowExif ?? false}
-          onChange={(next) => void runPhotoAction(() => updateSettings({ photoShowExif: next }))}
+        <CaptionControls
+          settings={settings}
+          monitors={monitors}
+          onChange={(patch) => void runPhotoAction(() => updateSettings(patch))}
         />
       </div>
 

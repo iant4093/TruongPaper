@@ -709,7 +709,7 @@ pub(crate) fn set_host_caption(app: &AppHandle, state: &AppState, item: &PhotoIt
     static CATALOG_FETCHED: AtomicBool = AtomicBool::new(false);
     if !title_known
         && !item.album_slug.is_empty()
-        && state.settings.lock().photo_show_album
+        && state.host.overlay_prefs().album_anywhere()
         && !CATALOG_FETCHED.swap(true, Ordering::AcqRel)
     {
         let app = app.clone();

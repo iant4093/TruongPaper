@@ -469,6 +469,21 @@ pub struct AppSettings {
     /// Photo caption: camera settings (EXIF) under the album name.
     #[serde(default)]
     pub photo_show_exif: bool,
+    /// Photo caption per display (`monitor id -> parts`). A display without an entry uses
+    /// `photo_show_time` / `photo_show_album` / `photo_show_exif`.
+    #[serde(default)]
+    pub photo_caption_by_monitor: std::collections::BTreeMap<String, PhotoCaptionParts>,
+}
+
+/// Which parts of the photo caption one display shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhotoCaptionParts {
+    #[serde(default)]
+    pub time: bool,
+    #[serde(default)]
+    pub album: bool,
+    #[serde(default)]
+    pub exif: bool,
 }
 
 pub const DEFAULT_PHOTO_DOWNLOADS_PER_DAY: u32 = 0;
@@ -539,6 +554,7 @@ impl Default for AppSettings {
             photo_show_time: false,
             photo_show_album: false,
             photo_show_exif: false,
+            photo_caption_by_monitor: Default::default(),
         }
     }
 }

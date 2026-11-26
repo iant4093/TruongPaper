@@ -410,6 +410,23 @@ impl GeometryDiff {
     }
 }
 
+/// Displays whose wallpaper window survives a geometry change: on Windows, those with unchanged
+/// geometry when no display was added or removed and nothing forces a full rebuild. Tearing
+/// them down showed the Windows wallpaper on them for a moment, e.g. on a second display
+/// while a fullscreen game changed the main display's mode on Alt+Tab. A display added or
+/// removed rebuilds everything (the present mode depends on the display count).
+pub fn windows_to_keep(
+    keeps_unchanged_windows: bool,
+    rebuild_all: bool,
+    diff: &GeometryDiff,
+) -> Vec<String> {
+    if keeps_unchanged_windows && !rebuild_all && diff.added.is_empty() && diff.removed.is_empty() {
+        diff.unchanged.clone()
+    } else {
+        Vec::new()
+    }
+}
+
 /// A monitor's sub-rectangle of the shared span canvas (the union of all display frames).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpanTransform {
@@ -1038,6 +1055,25 @@ mod platform {
             SCREENS_CHANGED.swap(false, Ordering::SeqCst)
         }
 
+        /// macOS recreates every window on a geometry change.
+        pub const KEEPS_UNCHANGED_WINDOWS: bool = false;
+
+        /// Notifications alone never require new windows on macOS.
+        pub fn take_rebuild_required(&mut self) -> bool {
+            false
+        }
+
+        pub fn recreate_except(
+            &mut self,
+            app: &AppHandle,
+            instance: &Arc<wgpu::Instance>,
+            geoms: &[MonitorGeometry],
+            _keep: &[String],
+        ) -> Vec<SurfaceTarget> {
+            self.teardown(app);
+            self.create(app, instance, geoms)
+        }
+
         pub fn pump(&mut self) {}
 
         /// Shows or hides the desktop window of one display (hidden: macOS's own wallpaper).
@@ -1082,6 +1118,8 @@ mod platform {
     pub struct DesktopSurfaces {
         hwnds: Vec<(String, HWND)>,
         events: Receiver<DesktopLifecycleEvent>,
+        /// `TaskbarCreated` arrived: every window must be attached to the new desktop.
+        explorer_restarted: bool,
     }
 
     unsafe extern "system" fn surface_wndproc(
@@ -1102,14 +1140,65 @@ mod platform {
             Self {
                 hwnds: Vec::new(),
                 events: rx,
+                explorer_restarted: false,
             }
         }
 
+        /// Windows keeps the window of a display whose geometry did not change (see
+        /// [`super::windows_to_keep`]).
+        pub const KEEPS_UNCHANGED_WINDOWS: bool = true;
+
         pub fn create(
+            &mut self,
+            app: &AppHandle,
+            instance: &Arc<wgpu::Instance>,
+            geoms: &[MonitorGeometry],
+        ) -> Vec<SurfaceTarget> {
+            self.create_except(app, instance, geoms, &[])
+        }
+
+        /// Destroys the windows of every display not in `keep` and creates new ones for them;
+        /// the windows in `keep` stay on screen (only moved if the desktop layer moved), so
+        /// those displays never show the Windows wallpaper in between. Returns surfaces for
+        /// the new windows only.
+        pub fn recreate_except(
+            &mut self,
+            app: &AppHandle,
+            instance: &Arc<wgpu::Instance>,
+            geoms: &[MonitorGeometry],
+            keep: &[String],
+        ) -> Vec<SurfaceTarget> {
+            self.hwnds.retain(|(id, hwnd)| {
+                if keep.contains(id) {
+                    return true;
+                }
+                // SAFETY: windows created by this thread in `create`.
+                unsafe {
+                    let _ = DestroyWindow(*hwnd);
+                }
+                false
+            });
+            self.create_except(app, instance, geoms, keep)
+        }
+
+        /// `true` once after Explorer restarted or a surface window was destroyed behind our
+        /// back (its desktop layer went away): every window must be created again.
+        pub fn take_rebuild_required(&mut self) -> bool {
+            let restarted = std::mem::take(&mut self.explorer_restarted);
+            // SAFETY: read-only checks of window handles.
+            let lost = self.hwnds.iter().any(|(_, hwnd)| unsafe {
+                !IsWindow(Some(*hwnd)).as_bool()
+                    || GetParent(*hwnd).is_ok_and(|p| !IsWindow(Some(p)).as_bool())
+            });
+            restarted || lost
+        }
+
+        fn create_except(
             &mut self,
             _app: &AppHandle,
             instance: &Arc<wgpu::Instance>,
             _geoms: &[MonitorGeometry],
+            keep: &[String],
         ) -> Vec<SurfaceTarget> {
             let mut out = Vec::new();
             // SAFETY: Win32 window creation on this (render) thread, which also pumps its
@@ -1132,6 +1221,15 @@ mod platform {
                 RegisterClassExW(&wc);
                 for m in win_desktop::enumerate_monitors_win32() {
                     let r = m.monitor_rect;
+                    if keep.contains(&m.monitor_id) {
+                        // Still drawing: only follow the desktop layer if it moved.
+                        if let Some((_, hwnd)) =
+                            self.hwnds.iter().find(|(id, _)| *id == m.monitor_id)
+                        {
+                            win_desktop::attach_hwnd_to_desktop(*hwnd, &desktop, r);
+                        }
+                        continue;
+                    }
                     let (width, height) = ((r.right - r.left).max(1), (r.bottom - r.top).max(1));
                     let Ok(hwnd) = CreateWindowExW(
                         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -1202,8 +1300,11 @@ mod platform {
         /// `true` after explorer.exe restarted (TaskbarCreated) or the display topology changed.
         pub fn take_changed(&mut self) -> bool {
             let mut changed = false;
-            while self.events.try_recv().is_ok() {
+            while let Ok(event) = self.events.try_recv() {
                 changed = true;
+                if matches!(event, DesktopLifecycleEvent::ExplorerRestarted) {
+                    self.explorer_restarted = true;
+                }
             }
             changed
         }
@@ -1283,6 +1384,23 @@ mod platform {
 
         pub fn take_changed(&mut self) -> bool {
             false
+        }
+
+        pub const KEEPS_UNCHANGED_WINDOWS: bool = false;
+
+        pub fn take_rebuild_required(&mut self) -> bool {
+            false
+        }
+
+        pub fn recreate_except(
+            &mut self,
+            app: &AppHandle,
+            instance: &Arc<wgpu::Instance>,
+            geoms: &[MonitorGeometry],
+            _keep: &[String],
+        ) -> Vec<SurfaceTarget> {
+            self.teardown(app);
+            self.create(app, instance, geoms)
         }
 
         pub fn pump(&mut self) {}
@@ -3286,15 +3404,24 @@ fn run_renderer(
             platform_event = true;
             invalidate_live_monitors();
             let next = monitor_geometries(app);
-            // Windows must rebuild on Explorer restart even when geometry is unchanged.
-            // macOS screen-parameter notifications alone must not tear down live drawables.
-            if cfg!(target_os = "windows") || surface_geometry_changed(&surface_geoms, &next) {
+            // Windows must rebuild on Explorer restart (or lost windows) even when geometry is
+            // unchanged. Other notifications (a fullscreen game changing display mode on
+            // Alt+Tab, work area updates) must not tear down live windows: that showed the
+            // system wallpaper for a moment.
+            let rebuild_all = desktop.take_rebuild_required();
+            if rebuild_all || surface_geometry_changed(&surface_geoms, &next) {
                 let diff = GeometryDiff::between(&surface_geoms, &next);
+                let keep = windows_to_keep(
+                    platform::DesktopSurfaces::KEEPS_UNCHANGED_WINDOWS,
+                    rebuild_all,
+                    &diff,
+                );
                 tracing::info!(
-                    "display geometry changed (added {:?}, removed {:?}, changed {:?}); recreating desktop surfaces",
+                    "display geometry changed (added {:?}, removed {:?}, changed {:?}, kept {:?}, full rebuild {rebuild_all}); recreating desktop surfaces",
                     diff.added,
                     diff.removed,
-                    diff.changed
+                    diff.changed,
+                    keep
                 );
                 // Unchanged displays keep their loaded scene / photo; only their surface is new.
                 let restore_ids = hotplug_restore_ids(
@@ -3305,29 +3432,47 @@ fn run_renderer(
                     &next.iter().map(|g| g.id.clone()).collect::<Vec<_>>(),
                 );
                 let mut carried: HashMap<String, Carry> = HashMap::new();
+                let mut kept: Vec<MonitorRenderer> = Vec::new();
                 for m in monitors.drain(..) {
-                    if diff.unchanged.contains(&m.monitor_id) {
+                    if keep.contains(&m.monitor_id) {
+                        kept.push(m);
+                    } else if diff.unchanged.contains(&m.monitor_id) {
                         carried.insert(m.monitor_id.clone(), m.into_carry());
                     }
                 }
-                desktop.teardown(app);
+                // Only displays that still had a renderer keep their window.
+                let keep: Vec<String> = kept.iter().map(|m| m.monitor_id.clone()).collect();
                 geoms = next;
                 surface_geoms = geoms.clone();
                 geoms_at = Instant::now();
-                let targets = desktop.create(app, instance, &geoms);
-                let multi_display = targets.len() > 1;
-                monitors = targets
-                    .into_iter()
-                    .filter_map(|t| {
-                        MonitorRenderer::new(&gpu.adapter, &gpu.device, t, multi_display)
-                    })
-                    .map(|mut m| {
-                        if let Some(carry) = carried.remove(&m.monitor_id) {
-                            m.restore(carry);
-                        }
-                        m
-                    })
-                    .collect();
+                let targets = if keep.is_empty() {
+                    desktop.teardown(app);
+                    desktop.create(app, instance, &geoms)
+                } else {
+                    desktop.recreate_except(app, instance, &geoms, &keep)
+                };
+                let multi_display = targets.len() + kept.len() > 1;
+                monitors = kept;
+                monitors.extend(
+                    targets
+                        .into_iter()
+                        .filter_map(|t| {
+                            MonitorRenderer::new(&gpu.adapter, &gpu.device, t, multi_display)
+                        })
+                        .map(|mut m| {
+                            if let Some(carry) = carried.remove(&m.monitor_id) {
+                                m.restore(carry);
+                            }
+                            m
+                        }),
+                );
+                // The order the system lists displays in (kept windows would come first).
+                monitors.sort_by_key(|m| {
+                    geoms
+                        .iter()
+                        .position(|g| g.id == m.monitor_id)
+                        .unwrap_or(usize::MAX)
+                });
                 if !geoms.is_empty() {
                     let ids: Vec<String> = geoms.iter().map(|g| g.id.clone()).collect();
                     host.retain_monitors(&ids);
@@ -4307,6 +4452,29 @@ mod tests {
         assert_eq!(loop_wait(true, true), LoopWait::Frame);
         assert_eq!(loop_wait(false, true), LoopWait::Retry);
         assert_eq!(loop_wait(false, false), LoopWait::Idle);
+    }
+
+    #[test]
+    fn unchanged_displays_keep_their_window_only_when_safe() {
+        let diff = |added: &[&str], removed: &[&str], changed: &[&str], unchanged: &[&str]| {
+            let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+            GeometryDiff {
+                added: v(added),
+                removed: v(removed),
+                changed: v(changed),
+                unchanged: v(unchanged),
+            }
+        };
+        // A game changed the main display's mode: the second display keeps its window.
+        let mode_change = diff(&[], &[], &["MAIN"], &["SECOND"]);
+        assert_eq!(windows_to_keep(true, false, &mode_change), vec!["SECOND"]);
+        // Explorer restarted or a window was lost: everything is rebuilt.
+        assert!(windows_to_keep(true, true, &mode_change).is_empty());
+        // Hotplug changes the display count: everything is rebuilt.
+        assert!(windows_to_keep(true, false, &diff(&["NEW"], &[], &[], &["SECOND"])).is_empty());
+        assert!(windows_to_keep(true, false, &diff(&[], &["OLD"], &[], &["SECOND"])).is_empty());
+        // macOS always rebuilds.
+        assert!(windows_to_keep(false, false, &mode_change).is_empty());
     }
 
     #[test]
